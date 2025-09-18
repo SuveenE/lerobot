@@ -137,7 +137,7 @@ def predict_action(
 
 def init_keyboard_listener():
     # Allow to exit early while recording an episode or resetting the environment,
-    # by tapping the right arrow key '->'. This might require a sudo permission
+    # by tapping the right arrow key '->' or 'n' + Enter. This might require a sudo permission
     # to allow your terminal to monitor keyboard events.
     events = {}
     events["exit_early"] = False
@@ -154,6 +154,9 @@ def init_keyboard_listener():
     # Only import pynput if not in a headless environment
     from pynput import keyboard
 
+    # Buffer to store typed characters for 'n' + Enter and 'b' + Enter detection
+    key_buffer = []
+
     def on_press(key):
         try:
             if key == keyboard.Key.right:
@@ -167,6 +170,24 @@ def init_keyboard_listener():
                 print("Escape key pressed. Stopping data recording...")
                 events["stop_recording"] = True
                 events["exit_early"] = True
+            elif key == keyboard.Key.enter:
+                # Check if the last character typed was 'n' or 'b'
+                if len(key_buffer) > 0:
+                    last_char = key_buffer[-1]
+                    if last_char == 'n':
+                        print("'n' + Enter pressed. Exiting loop...")
+                        events["exit_early"] = True
+                    elif last_char == 'b':
+                        print("'b' + Enter pressed. Exiting loop and rerecord the last episode...")
+                        events["rerecord_episode"] = True
+                        events["exit_early"] = True
+                # Clear buffer after Enter
+                key_buffer.clear()
+            elif hasattr(key, 'char') and key.char is not None:
+                # Store character keys in buffer (keep only last 5 characters to prevent memory issues)
+                key_buffer.append(key.char.lower())
+                if len(key_buffer) > 5:
+                    key_buffer.pop(0)
         except Exception as e:
             print(f"Error handling key press: {e}")
 
