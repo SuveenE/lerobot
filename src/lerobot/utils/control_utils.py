@@ -18,6 +18,7 @@
 
 
 import logging
+import threading
 import traceback
 from contextlib import nullcontext
 from copy import copy
@@ -137,8 +138,10 @@ def predict_action(
 
 def init_keyboard_listener():
     # Allow to exit early while recording an episode or resetting the environment,
-    # by pressing 'n' + Enter (next episode) or 'b' + Enter (re-record). 
-    # This might require a sudo permission to allow your terminal to monitor keyboard events.
+    # by tapping the right arrow key '->'. This might require a sudo permission
+    # to allow your terminal to monitor keyboard events.
+    # Initialize simple text-based keyboard listener to avoid sudo permission issues.
+    # Uses input() in a background thread - no special permissions required.
     events = {}
     events["exit_early"] = False
     events["rerecord_episode"] = False
@@ -151,42 +154,42 @@ def init_keyboard_listener():
         listener = None
         return listener, events
 
-    # Only import pynput if not in a headless environment
-    from pynput import keyboard
+    print("Text-based keyboard controls enabled:")
+    print("  'n' + Enter: Next/forward command (simulate right arrow) - Exit current loop")
+    print("  'b' + Enter: Back command (simulate left arrow) - Re-record episode")
+    print("  's' + Enter: Stop recording completely")
 
-    # Use a more reliable approach: track the last character pressed
-    last_char = [None]  # Use list to make it mutable in nested function
-
-    def on_press(key):
+    def input_listener():
         try:
-            if key == keyboard.Key.esc:
-                print("Escape key pressed. Stopping data recording...")
-                events["stop_recording"] = True
-                events["exit_early"] = True
-            elif key == keyboard.Key.enter:
-                # Check what the last character was before Enter
-                if last_char[0] == 'n':
-                    print("'n' + Enter pressed. Going to next episode...")
-                    events["exit_early"] = True
-                    last_char[0] = None  # Reset
-                elif last_char[0] == 'b':
-                    print("'b' + Enter pressed. Re-recording current episode...")
-                    events["rerecord_episode"] = True
-                    events["exit_early"] = True
-                    last_char[0] = None  # Reset
-            elif hasattr(key, 'char') and key.char is not None:
-                # Store the last character pressed
-                char = key.char.lower()
-                if char in ['n', 'b']:
-                    last_char[0] = char
-                    print(f"'{char}' pressed, press Enter to confirm...")
-                else:
-                    last_char[0] = None  # Reset if other character pressed
+            while not events["stop_recording"]:
+                try:
+                    user_input = input().strip().lower()
+                    if user_input == 'n':
+                        print("Next/forward command received. Exiting loop...")
+                        events["exit_early"] = True
+                    elif user_input == 'b':
+                        print("Back command received. Exiting loop and re-record episode...")
+                        events["rerecord_episode"] = True
+                        events["exit_early"] = True
+                    elif user_input == 's':
+                        print("Stop command received. Stopping data recording...")
+                        events["stop_recording"] = True
+                        events["exit_early"] = True
+                except EOFError:
+                    # Handle case where input is not available (e.g., piped input)
+                    break
         except Exception as e:
-            print(f"Error handling key press: {e}")
+            logging.debug(f"Input listener error: {e}")
 
-    listener = keyboard.Listener(on_press=on_press)
-    listener.start()
+    input_thread = threading.Thread(target=input_listener, daemon=True)
+    input_thread.start()
+
+    # Return a simple object to maintain compatibility
+    class SimpleListener:
+        def stop(self):
+            events["stop_recording"] = True
+
+    listener = SimpleListener()
 
     return listener, events
 
