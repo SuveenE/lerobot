@@ -167,36 +167,31 @@ class BiPiper(Robot):
 
         observation = {}
 
-        try:
-            # Get left arm joint positions
-            left_joint_msgs = self.left_arm.GetArmJointMsgs()
-            left_gripper_msgs = self.left_arm.GetArmGripperMsgs()
+        # Get left arm joint positions
+        left_joint_msgs = self.left_arm.GetArmJointMsgs()
+        left_gripper_msgs = self.left_arm.GetArmGripperMsgs()
 
-            # Parse joint positions for left arm
-            # Based on the format: ArmMsgFeedBackJointStates with Joint 1-6 values
-            self._parse_joint_messages(left_joint_msgs, "left", observation)
+        # Parse joint positions for left arm
+        # Based on the format: ArmMsgFeedBackJointStates with Joint 1-6 values
+        self._parse_joint_messages(left_joint_msgs, "left", observation)
 
-            # Parse gripper position for left arm
-            # Based on the format: ArmMsgFeedBackGripper with grippers_angle
-            self._parse_gripper_messages(left_gripper_msgs, "left", observation)
+        # Parse gripper position for left arm
+        # Based on the format: ArmMsgFeedBackGripper with grippers_angle
+        self._parse_gripper_messages(left_gripper_msgs, "left", observation)
 
-            # Get right arm joint positions
-            right_joint_msgs = self.right_arm.GetArmJointMsgs()
-            right_gripper_msgs = self.right_arm.GetArmGripperMsgs()
+        # Get right arm joint positions
+        right_joint_msgs = self.right_arm.GetArmJointMsgs()
+        right_gripper_msgs = self.right_arm.GetArmGripperMsgs()
 
-            # Parse joint positions for right arm
-            self._parse_joint_messages(right_joint_msgs, "right", observation)
+        # Parse joint positions for right arm
+        self._parse_joint_messages(right_joint_msgs, "right", observation)
 
-            # Parse gripper position for right arm
-            self._parse_gripper_messages(right_gripper_msgs, "right", observation)
+        # Parse gripper position for right arm
+        self._parse_gripper_messages(right_gripper_msgs, "right", observation)
 
-            # Capture camera images
-            for cam_name, cam in self.cameras.items():
-                observation[cam_name] = cam.async_read()
-
-        except Exception as e:
-            logger.error(f"Error capturing observation: {e}")
-            raise
+        # Capture camera images
+        for cam_name, cam in self.cameras.items():
+            observation[cam_name] = cam.async_read()
 
         return observation
 
@@ -205,42 +200,30 @@ class BiPiper(Robot):
         Parse joint messages from piper SDK format.
         Expected format includes Joint 1-6 values in the message.
         """
-        try:
-            # Convert message to string to parse it
-            msg_str = str(joint_msgs)
+        # Convert message to string to parse it
+        msg_str = str(joint_msgs)
 
-            # Extract joint values using string parsing
-            # Looking for patterns like "Joint 1:value", "Joint 2:value", etc.
-            for i in range(1, 7):
-                joint_key = f"{arm_prefix}_joint_{i}.pos"
+        # Extract joint values using string parsing
+        # Looking for patterns like "Joint 1:value", "Joint 2:value", etc.
+        for i in range(1, 7):
+            joint_key = f"{arm_prefix}_joint_{i}.pos"
 
-                # Look for "Joint {i}:" pattern in the message
-                pattern = f"Joint {i}:"
-                start_idx = msg_str.find(pattern)
+            # Look for "Joint {i}:" pattern in the message
+            pattern = f"Joint {i}:"
+            start_idx = msg_str.find(pattern)
 
-                if start_idx != -1:
-                    # Find the value after "Joint {i}:"
-                    value_start = start_idx + len(pattern)
-                    # Find the end of the value (next newline or end of string)
-                    value_end = msg_str.find("\n", value_start)
-                    if value_end == -1:
-                        value_end = len(msg_str)
+            if start_idx != -1:
+                # Find the value after "Joint {i}:"
+                value_start = start_idx + len(pattern)
+                # Find the end of the value (next newline or end of string)
+                value_end = msg_str.find("\n", value_start)
+                if value_end == -1:
+                    value_end = len(msg_str)
 
-                    value_str = msg_str[value_start:value_end].strip()
-                    try:
-                        observation[joint_key] = float(value_str)
-                    except ValueError:
-                        logger.warning(f"Could not parse joint {i} value: {value_str}")
-                        observation[joint_key] = 0.0
-                else:
-                    logger.warning(f"Joint {i} not found in message")
-                    observation[joint_key] = 0.0
-
-        except Exception as e:
-            logger.error(f"Error parsing joint messages: {e}")
-            # Fallback: set all joints to 0
-            for i in range(1, 7):
-                observation[f"{arm_prefix}_joint_{i}.pos"] = 0.0
+                value_str = msg_str[value_start:value_end].strip()
+                observation[joint_key] = float(value_str)  # Let ValueError propagate
+            else:
+                raise ValueError(f"Joint {i} not found in message for {arm_prefix} arm")
 
     def _parse_gripper_messages(self, gripper_msgs, arm_prefix: str, observation: dict) -> None:
         """
@@ -248,18 +231,11 @@ class BiPiper(Robot):
         Expected format: ArmGripper object with gripper_state.grippers_angle attribute
         grippers_angle is in 0.001mm units, needs conversion to mm.
         """
-        try:
-            # Access gripper_state.grippers_angle - convert from 0.001mm to mm
-            angle_raw = gripper_msgs.gripper_state.grippers_angle
-            angle_mm = float(angle_raw) / 1000.0
-            observation[f"{arm_prefix}_gripper.pos"] = angle_mm
-            logger.debug(f"{arm_prefix} gripper position: {angle_mm}mm (raw: {angle_raw})")
-
-        except Exception as e:
-            logger.error(f"Error parsing {arm_prefix} gripper messages: {e}")
-            logger.error(f"Gripper message type: {type(gripper_msgs)}")
-            logger.error(f"Gripper message content: {gripper_msgs}")
-            observation[f"{arm_prefix}_gripper.pos"] = 0.0
+        # Access gripper_state.grippers_angle - convert from 0.001mm to mm
+        angle_raw = gripper_msgs.gripper_state.grippers_angle
+        angle_mm = float(angle_raw) / 1000.0
+        observation[f"{arm_prefix}_gripper.pos"] = angle_mm
+        logger.debug(f"{arm_prefix} gripper position: {angle_mm}mm (raw: {angle_raw})")
 
     def send_action(self, action: dict) -> dict:
         """
