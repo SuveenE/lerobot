@@ -70,9 +70,15 @@ class BiPiper(Robot):
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
-        return {
-            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
-        }
+        features = {}
+        for cam_name in self.cameras:
+            cfg = self.config.cameras[cam_name]
+            # RGB features
+            features[cam_name] = (cfg.height, cfg.width, 3)
+            # Depth features if enabled
+            if hasattr(cfg, 'use_depth') and cfg.use_depth:
+                features[f"{cam_name}_depth"] = (cfg.height, cfg.width)
+        return features
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
@@ -86,7 +92,8 @@ class BiPiper(Robot):
     def is_connected(self) -> bool:
         left_connected = self.left_arm is not None
         right_connected = self.right_arm is not None
-        cameras_connected = all(cam.is_connected for cam in self.cameras.values())
+        cameras_connected = all(
+            cam.is_connected for cam in self.cameras.values())
         return left_connected and right_connected and cameras_connected
 
     def connect(self, calibrate: bool = True) -> None:
@@ -95,13 +102,17 @@ class BiPiper(Robot):
         """
         try:
             # Connect left arm
-            logger.info(f"Connecting to left arm on CAN port: {self.config.left_arm_can_port}")
-            self.left_arm = self.C_PiperInterface_V2(self.config.left_arm_can_port)
+            logger.info(
+                f"Connecting to left arm on CAN port: {self.config.left_arm_can_port}")
+            self.left_arm = self.C_PiperInterface_V2(
+                self.config.left_arm_can_port)
             self.left_arm.ConnectPort(True)
 
             # Connect right arm
-            logger.info(f"Connecting to right arm on CAN port: {self.config.right_arm_can_port}")
-            self.right_arm = self.C_PiperInterface_V2(self.config.right_arm_can_port)
+            logger.info(
+                f"Connecting to right arm on CAN port: {self.config.right_arm_can_port}")
+            self.right_arm = self.C_PiperInterface_V2(
+                self.config.right_arm_can_port)
             self.right_arm.ConnectPort(True)
 
             # Connect cameras
@@ -121,7 +132,8 @@ class BiPiper(Robot):
 
     def calibrate(self) -> None:
         """BiPiper robots don't require manual calibration"""
-        logger.info("BiPiper robot calibration - no action needed, assumed calibrated")
+        logger.info(
+            "BiPiper robot calibration - no action needed, assumed calibrated")
         pass
 
     def configure(self) -> None:
@@ -192,6 +204,11 @@ class BiPiper(Robot):
         # Capture camera images
         for cam_name, cam in self.cameras.items():
             observation[cam_name] = cam.async_read()
+            # Capture depth if enabled
+            cfg = self.config.cameras[cam_name]
+            if hasattr(cfg, 'use_depth') and cfg.use_depth:
+                if hasattr(cam, 'async_read_depth'):
+                    observation[f"{cam_name}_depth"] = cam.async_read_depth()
 
         return observation
 
@@ -221,9 +238,11 @@ class BiPiper(Robot):
                     value_end = len(msg_str)
 
                 value_str = msg_str[value_start:value_end].strip()
-                observation[joint_key] = float(value_str)  # Let ValueError propagate
+                observation[joint_key] = float(
+                    value_str)  # Let ValueError propagate
             else:
-                raise ValueError(f"Joint {i} not found in message for {arm_prefix} arm")
+                raise ValueError(
+                    f"Joint {i} not found in message for {arm_prefix} arm")
 
     def _parse_gripper_messages(self, gripper_msgs, arm_prefix: str, observation: dict) -> None:
         """
@@ -235,7 +254,8 @@ class BiPiper(Robot):
         angle_raw = gripper_msgs.gripper_state.grippers_angle
         angle_mm = float(angle_raw) / 1000.0
         observation[f"{arm_prefix}_gripper.pos"] = angle_mm
-        logger.debug(f"{arm_prefix} gripper position: {angle_mm}mm (raw: {angle_raw})")
+        logger.debug(
+            f"{arm_prefix} gripper position: {angle_mm}mm (raw: {angle_raw})")
 
     def send_action(self, action: dict) -> dict:
         """
