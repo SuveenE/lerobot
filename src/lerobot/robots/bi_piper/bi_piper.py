@@ -238,11 +238,9 @@ class BiPiper(Robot):
                     value_end = len(msg_str)
 
                 value_str = msg_str[value_start:value_end].strip()
-                observation[joint_key] = float(
-                    value_str)  # Let ValueError propagate
+                observation[joint_key] = float(value_str)  # Let ValueError propagate
             else:
-                raise ValueError(
-                    f"Joint {i} not found in message for {arm_prefix} arm")
+                raise ValueError(f"Joint {i} not found in message for {arm_prefix} arm")
 
     def _parse_gripper_messages(self, gripper_msgs, arm_prefix: str, observation: dict) -> None:
         """
@@ -254,8 +252,7 @@ class BiPiper(Robot):
         angle_raw = gripper_msgs.gripper_state.grippers_angle
         angle_mm = float(angle_raw) / 1000.0
         observation[f"{arm_prefix}_gripper.pos"] = angle_mm
-        logger.debug(
-            f"{arm_prefix} gripper position: {angle_mm}mm (raw: {angle_raw})")
+        logger.debug(f"{arm_prefix} gripper position: {angle_mm}mm (raw: {angle_raw})")
 
     def send_action(self, action: dict) -> dict:
         """
