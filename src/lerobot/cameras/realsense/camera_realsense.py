@@ -137,7 +137,6 @@ class RealSenseCamera(Camera):
         self.new_frame_event: Event = Event()
 
         # Depth frame management for async reading
-        self.depth_lock: Lock = Lock()
         self.latest_depth_frame: np.ndarray | None = None
         self.new_depth_frame_event: Event = Event()
 
@@ -478,17 +477,15 @@ class RealSenseCamera(Camera):
                         f"{self} failed to get frameset in background thread")
                     continue
 
-                # Extract and process color frame
+                # Extract and process color and depth frames (same frameset)
+                color_image = None
+                depth_image = None
+
                 color_frame = frameset.get_color_frame()
                 if color_frame:
                     color_image_raw = np.asanyarray(color_frame.get_data())
                     color_image = self._postprocess_image(color_image_raw)
 
-                    with self.frame_lock:
-                        self.latest_frame = color_image
-                    self.new_frame_event.set()
-
-                # Extract and process depth frame if enabled
                 if self.use_depth:
                     depth_frame = frameset.get_depth_frame()
                     if depth_frame:
@@ -496,9 +493,21 @@ class RealSenseCamera(Camera):
                         depth_image = self._postprocess_image(
                             depth_map, depth_frame=True)
 
-                        with self.depth_lock:
-                            self.latest_depth_frame = depth_image
-                        self.new_depth_frame_event.set()
+                # Atomically publish both results under the same lock
+                set_color_event = False
+                set_depth_event = False
+                with self.frame_lock:
+                    if color_image is not None:
+                        self.latest_frame = color_image
+                        set_color_event = True
+                    if depth_image is not None:
+                        self.latest_depth_frame = depth_image
+                        set_depth_event = True
+
+                if set_color_event:
+                    self.new_frame_event.set()
+                if set_depth_event:
+                    self.new_depth_frame_event.set()
 
             except DeviceNotConnectedError:
                 break
@@ -616,7 +625,10 @@ class RealSenseCamera(Camera):
                 f"Read thread alive: {thread_alive}."
             )
 
-        with self.depth_lock:
+        with self.frame_lock:
+            frame = self.latest_frame
+            self.new_frame_event.clear()
+
             depth_frame = self.latest_depth_frame
             self.new_depth_frame_event.clear()
 
@@ -624,7 +636,11 @@ class RealSenseCamera(Camera):
             raise RuntimeError(
                 f"Internal error: Event set but no depth frame available for {self}.")
 
-        return depth_frame
+        if frame is None:
+            raise RuntimeError(
+                f"Internal error: Event set but no frame available for {self}.")
+
+        return frame, depth_frame
 
     def disconnect(self):
         """

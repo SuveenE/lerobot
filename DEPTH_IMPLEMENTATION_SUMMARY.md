@@ -32,7 +32,41 @@ Successfully implemented depth data collection support in the LeRobot framework 
 
 **Impact**: RealSense cameras can now capture depth asynchronously, matching the performance of RGB capture.
 
-### 2. Dataset Utilities - Depth Feature Support
+### 2. Orbbec Camera - Async Depth Support
+
+**File**: `src/lerobot/cameras/orbbec/camera_orbbec.py`
+
+**Config**: `src/lerobot/cameras/orbbec/configuration_orbbec.py`
+
+**Factory**: `src/lerobot/cameras/utils.py` (adds `type="orbbec"` case)
+
+**Changes**:
+
+- Implemented `OrbbecCamera` using `pyorbbecsdk` mirroring the RealSense interface
+- Added `read()`, `read_depth()`, `async_read()`, and `async_read_depth()`
+- Background thread captures synchronized RGB and depth frames when `use_depth=True`
+- Depth frames returned as `uint16` (millimeters); color conversion and rotation match RealSense behavior
+- Implemented `find_cameras()` for device discovery by name/serial
+
+**Impact**: Orbbec Gemini cameras can now capture depth asynchronously, integrated seamlessly with existing robots and dataset recording.
+
+#### EXAMPLE
+
+```
+python -m lerobot.record \
+        --robot.type=bi_piper \
+        --robot.left_arm_can_port=can_0 \
+        --robot.right_arm_can_port=can_1 \
+        --robot.id=arm \
+        --robot.cameras="{front: {type: orbbec, serial_number_or_name: '123456789', width: 640, height: 480, fps: 30, use_depth: true}, right: {type: orbbec, index_or_path: 1, width: 640, height: 480, fps: 30, use_depth: true}, left: {type: orbbec, index_or_path: 2, width: 640, height: 480, fps: 30, use_depth: true}}" \
+        --dataset.repo_id=your_username/bimanual-piper-depth-dataset \
+        --dataset.num_episodes=10 \
+        --dataset.single_task="Pick and place task" \
+        --dataset.episode_time_s=30 \
+        --dataset.reset_time_s=10
+```
+
+### 3. Dataset Utilities - Depth Feature Support
 
 **File**: `src/lerobot/datasets/utils.py`
 
@@ -58,7 +92,7 @@ Successfully implemented depth data collection support in the LeRobot framework 
 
 **Impact**: Datasets can now store and load depth data alongside RGB images without breaking existing functionality.
 
-### 3. BiPiper Robot - Depth Capture
+### 4. BiPiper Robot - Depth Capture
 
 **File**: `src/lerobot/robots/bi_piper/bi_piper.py`
 
@@ -78,7 +112,7 @@ Successfully implemented depth data collection support in the LeRobot framework 
 
 **Impact**: BiPiper robot can now capture depth data from configured cameras during data collection.
 
-### 4. Example Configuration
+### 5. Example Configuration
 
 **File**: `examples/bi_piper_example.py`
 
@@ -104,7 +138,7 @@ Successfully implemented depth data collection support in the LeRobot framework 
 
 **Impact**: Users have clear examples of how to configure and use depth data collection.
 
-### 5. Documentation
+### 6. Documentation
 
 **New file**: `docs/source/depth_data_collection.md`
 
@@ -274,26 +308,12 @@ depth_m = depth.astype(float) / 1000.0
 
 ### Orbbec Camera Driver
 
-**Priority**: Medium  
-**Effort**: ~4-8 hours
-
-Create full Orbbec camera driver for depth support:
-
-- Implement `OrbbecCamera` class using `pyorbbecsdk`
-- Add `read()` and `read_depth()` methods
-- Add `async_read()` and `async_read_depth()` methods
-- Register in camera factory
-- Add to documentation
-
-**Files to create**:
+Implemented:
 
 - `src/lerobot/cameras/orbbec/__init__.py`
 - `src/lerobot/cameras/orbbec/camera_orbbec.py`
 - `src/lerobot/cameras/orbbec/configuration_orbbec.py`
-
-**Files to modify**:
-
-- `src/lerobot/cameras/utils.py` (add "orbbec" type)
+- `src/lerobot/cameras/utils.py` factory registration
 
 ### Other Robots
 
@@ -356,14 +376,14 @@ Add optional depth processing utilities:
 
 ## Known Limitations
 
-1. **Orbbec Depth Not Implemented**: Currently only RGB via OpenCV
-2. **Depth-RGB Alignment**: Assumes aligned depth/RGB (no explicit alignment step)
-3. **Video Encoding**: Uses image format, not video encoding for depth
-4. **Depth Resolution**: Must match RGB resolution in current implementation
+1. **Depth-RGB Alignment**: Assumes aligned depth/RGB (no explicit alignment step)
+2. **Video Encoding**: Uses image format, not video encoding for depth
+3. **Depth Resolution**: Must match RGB resolution in current implementation
 
 ## Verification Checklist
 
 - [x] RealSense `async_read_depth()` implemented
+- [x] Orbbec `async_read_depth()` implemented
 - [x] Dataset utilities handle 2D depth arrays
 - [x] BiPiper robot captures depth in observations
 - [x] Example configuration with depth
@@ -376,7 +396,7 @@ Add optional depth processing utilities:
 
 ## Conclusion
 
-The depth data collection feature is fully implemented and ready for use with RealSense cameras. The implementation is:
+The depth data collection feature is fully implemented and ready for use with RealSense and Orbbec cameras. The implementation is:
 
 - **Complete**: All planned features implemented
 - **Documented**: Comprehensive docs for users and developers

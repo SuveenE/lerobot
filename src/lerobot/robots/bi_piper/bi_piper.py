@@ -203,12 +203,12 @@ class BiPiper(Robot):
 
         # Capture camera images
         for cam_name, cam in self.cameras.items():
-            observation[cam_name] = cam.async_read()
-            # Capture depth if enabled
             cfg = self.config.cameras[cam_name]
-            if hasattr(cfg, 'use_depth') and cfg.use_depth:
-                if hasattr(cam, 'async_read_depth'):
-                    observation[f"{cam_name}_depth"] = cam.async_read_depth()
+            depth_enabled = hasattr(cfg, 'use_depth') and cfg.use_depth
+            rgb_frame, depth_frame = cam.async_read_depth() if depth_enabled else (cam.async_read(), None)
+            observation[cam_name] = rgb_frame
+            if depth_enabled and depth_frame is not None:
+                observation[f"{cam_name}_depth"] = depth_frame
 
         return observation
 
