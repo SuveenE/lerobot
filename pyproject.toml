@@ -113,6 +113,20 @@ intelrealsense = [
     "pyrealsense2>=2.55.1.6486 ; sys_platform != 'darwin'",
     "pyrealsense2-macosx>=2.54 ; sys_platform == 'darwin'",
 ]
+
+# Depth: Orbbec Gemini (optional)
+orbbec = [
+    # Windows (x86_64) - Python 3.12
+    "pyorbbecsdk @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-win_amd64.whl ; sys_platform == 'win32' and python_version >= '3.12' and python_version < '3.13'",
+
+    # Linux x86_64
+    "pyorbbecsdk @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp311-cp311-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.11' and python_version < '3.12'",
+    "pyorbbecsdk @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.12' and python_version < '3.13'",
+
+    # Linux aarch64 (Jetson/ARM)
+    "pyorbbecsdk @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp311-cp311-linux_aarch64.whl ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64') and python_version >= '3.11' and python_version < '3.12'",
+    "pyorbbecsdk @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-linux_aarch64.whl ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64') and python_version >= '3.12' and python_version < '3.13'",
+]
 # stretch = [
 #     "hello-robot-stretch-body>=0.7.27 ; sys_platform == 'linux'",
 #     "pyrender @ git+https://github.com/mmatl/pyrender.git ; sys_platform == 'linux'",
@@ -147,6 +161,7 @@ all = [
     "lerobot[piper]",
     "lerobot[kinematics]",
     "lerobot[intelrealsense]",
+    "lerobot[orbbec]",
     "lerobot[pi0]",
     "lerobot[smolvla]",
     "lerobot[hilserl]",

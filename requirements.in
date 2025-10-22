@@ -8,4 +8,9 @@
 
 -e .[all]
 # Optional: Orbbec SDK for depth support
-# Install with: pip install pyorbbecsdk
+# Install with one of (matching your Python and platform):
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp311-cp311-linux_x86_64.whl
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-linux_x86_64.whl
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp311-cp311-linux_aarch64.whl
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-linux_aarch64.whl
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-win_amd64.whl
