@@ -9,6 +9,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+"""
+example test command:
+python test_depth_camera.py --type orbbec --serial_number_or_name /dev/video8 --width 640 --height 480 --fps 30
+"""
+
 # Enable debug logging
 logging.basicConfig(level=logging.DEBUG, format='%(name)s - %(levelname)s - %(message)s')
 
