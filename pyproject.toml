@@ -116,6 +116,9 @@ intelrealsense = [
 
 # Depth: Orbbec Gemini (optional)
 orbbec = [
+    "numpy<2.0",
+    "opencv-python-headless>=4.8.0,<4.10.0",  # Compatible with numpy<2.0
+    
     # Windows (x86_64) - Python 3.10
     "pyorbbecsdk @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp310-cp310-win_amd64.whl ; sys_platform == 'win32' and python_version >= '3.10' and python_version < '3.11'",
 

@@ -267,29 +267,33 @@ class OrbbecCamera(Camera):
                 self.width, self.height = w, h
                 self.capture_width, self.capture_height = w, h
 
-    def _i420_to_bgr(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    def _i420_to_rgb(self, frame: np.ndarray, width: int, height: int) -> np.ndarray:
         y = frame[0:height, :]
         u = frame[height:height + height // 4].reshape(height // 2, width // 2)
         v = frame[height + height // 4:].reshape(height // 2, width // 2)
         yuv_image = cv2.merge([y, u, v])
         bgr_image = cv2.cvtColor(yuv_image, cv2.COLOR_YUV2BGR_I420)
-        return bgr_image
+        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+        return rgb_image
 
-    def _nv12_to_bgr(self, frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    def _nv12_to_rgb(self, frame: np.ndarray, width: int, height: int) -> np.ndarray:
         y = frame[0:height, :]
         uv = frame[height:height + height // 2].reshape(height // 2, width)
         yuv_image = cv2.merge([y, uv])
         bgr_image = cv2.cvtColor(yuv_image, cv2.COLOR_YUV2BGR_NV12)
-        return bgr_image
+        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+        return rgb_image
 
-    def _nv21_to_bgr(self, frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    def _nv21_to_rgb(self, frame: np.ndarray, width: int, height: int) -> np.ndarray:
         y = frame[0:height, :]
         uv = frame[height:height + height // 2].reshape(height // 2, width)
         yuv_image = cv2.merge([y, uv])
         bgr_image = cv2.cvtColor(yuv_image, cv2.COLOR_YUV2BGR_NV21)
-        return bgr_image
+        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+        return rgb_image
 
-    def _frame_to_bgr_image(self, frame: ob.VideoFrame) -> np.ndarray:
+    def _frame_to_rgb_image(self, frame: ob.VideoFrame) -> np.ndarray:
+        """Convert Orbbec frame to RGB format."""
         width = frame.get_width()
         height = frame.get_height()
         color_format = frame.get_format()
@@ -297,29 +301,28 @@ class OrbbecCamera(Camera):
         image = np.zeros((height, width, 3), dtype=np.uint8)
         if color_format == ob.OBFormat.RGB:
             image = np.resize(data, (height, width, 3))
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            # Already RGB
         elif color_format == ob.OBFormat.BGR:
             image = np.resize(data, (height, width, 3))
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         elif color_format == ob.OBFormat.YUYV:
             image = np.resize(data, (height, width, 2))
-            image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_YUYV)
+            image = cv2.cvtColor(image, cv2.COLOR_YUV2RGB_YUYV)
         elif color_format == ob.OBFormat.MJPG:
             image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            # imdecode returns BGR, convert to RGB
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         elif color_format == ob.OBFormat.I420:
-            image = self._i420_to_bgr(data, width, height)
-            return image
+            return self._i420_to_rgb(data, width, height)
         elif color_format == ob.OBFormat.NV12:
-            image = self._nv12_to_bgr(data, width, height)
-            return image
+            return self._nv12_to_rgb(data, width, height)
         elif color_format == ob.OBFormat.NV21:
-            image = self._nv21_to_bgr(data, width, height)
-            return image
+            return self._nv21_to_rgb(data, width, height)
         elif color_format == ob.OBFormat.UYVY:
             image = np.resize(data, (height, width, 2))
-            image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_UYVY)
+            image = cv2.cvtColor(image, cv2.COLOR_YUV2RGB_UYVY)
         else:
-            print("Unsupported color format: {}".format(color_format))
+            logger.error(f"Unsupported color format: {color_format}")
             return None
         return image
 
@@ -380,14 +383,18 @@ class OrbbecCamera(Camera):
         height = depth_frame.get_height()
         scale = depth_frame.get_depth_scale()
         
+        # Process depth data following Orbbec SDK example
         depth_data = np.frombuffer(depth_frame.get_data(), dtype=np.uint16).reshape((height, width))
         depth_data = depth_data.astype(np.float32) * scale
         depth_data = np.where((depth_data > MIN_DEPTH) & (depth_data < MAX_DEPTH), depth_data, 0).astype(np.uint16)
-        depth_image = self._postprocess_image(depth_data, is_depth=True)
+        
+        logger.debug(f"Orbbec depth scale: {scale}, depth range: {depth_data[depth_data > 0].min() if depth_data.any() else 0}-{depth_data.max()}")
+        
+        depth_data = self._postprocess_image(depth_data, is_depth=True)
         return depth_data
     
     def _process_color_frame(self, color_frame: ob.ColorFrame) -> np.ndarray:
-        color_image = self._frame_to_bgr_image(color_frame)
+        color_image = self._frame_to_rgb_image(color_frame)
         color_image = self._postprocess_image(color_image, is_depth=False)
         return color_image
 
