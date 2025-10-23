@@ -29,10 +29,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-try:
-    import pyorbbecsdk as ob
-except Exception as e:
-    logging.info(f"Could not import pyorbbecsdk: {e}")
+import pyorbbecsdk as ob
 
 from ..camera import Camera
 from ..configs import ColorMode
@@ -89,7 +86,7 @@ class OrbbecCamera(Camera):
         device_list = context.query_devices()
         found: list[dict[str, Any]] = []
         for i in range(device_list.get_count()):
-            dev = device_list.get_device(i)
+            dev = device_list[i]
             try:
                 info = dev.get_device_info()
                 name = info.name() if hasattr(info, "name") else "Orbbec"
@@ -103,36 +100,143 @@ class OrbbecCamera(Camera):
 
     def _match_device(self, context: "ob.Context") -> "ob.Device":
         device_list = context.query_devices()
-        if device_list.get_count() == 0:
+        count = device_list.get_count()
+        
+        if count == 0:
             raise ConnectionError("No Orbbec devices detected.")
+        
+        # If only one device is available, use it regardless of identifier
+        if count == 1:
+            dev = device_list[0]
+            info = dev.get_device_info()
+            name = info.name() if hasattr(info, "name") else "Orbbec"
+            serial = info.serial_number() if hasattr(info, "serial_number") else ""
+            logger.info(f"Using single Orbbec device: name={name}, serial={serial}")
+            return dev
 
-        # If digits only, match serial number; else match name
-        for i in range(device_list.get_count()):
-            dev = device_list.get_device(i)
+        # If multiple devices, try to match by serial number or name
+        for i in range(count):
+            dev = device_list[i]
             info = dev.get_device_info()
             name = info.name() if hasattr(info, "name") else "Orbbec"
             serial = info.serial_number() if hasattr(info, "serial_number") else ""
             if self.serial_or_name == serial or self.serial_or_name == name:
                 return dev
 
+        # Build helpful error message with available devices
+        available = []
+        for i in range(count):
+            dev = device_list[i]
+            info = dev.get_device_info()
+            name = info.name() if hasattr(info, "name") else "Orbbec"
+            serial = info.serial_number() if hasattr(info, "serial_number") else ""
+            available.append(f"  - name: {name}, serial: {serial}")
+        
+        available_str = "\n".join(available)
         raise ValueError(
-            f"No Orbbec device found for identifier '{self.serial_or_name}'.")
+            f"No Orbbec device found for identifier '{self.serial_or_name}'.\n"
+            f"Available Orbbec devices:\n{available_str}"
+        )
+
+    def _print_available_profiles(self, sensor: ob.Sensor, sensor_name: str) -> None:
+        """Print all available stream profiles for a sensor."""
+        profile_list = sensor.get_stream_profile_list()
+        print(f"\n{sensor_name} - Available profiles ({profile_list.get_count()} total):")
+        for i in range(profile_list.get_count()):
+            profile = profile_list.get_stream_profile_by_index(i)
+            stream_type = profile.get_type()
+            if profile.is_video_stream_profile():
+                video_profile = profile.as_video_stream_profile()
+                width = video_profile.get_width()
+                height = video_profile.get_height()
+                fps = video_profile.get_fps()
+                fmt = video_profile.get_format()
+                print(f"  [{i}] {stream_type} - {width}x{height}@{fps}fps - Format: {fmt}")
+            else:
+                print(f"  [{i}] {stream_type} - (non-video profile)")
+    
+    def _find_stream_profile(self, sensor: ob.Sensor, stream_type: ob.OBStreamType, 
+                             width: int = None, height: int = None, 
+                             fmt: ob.OBFormat = None, fps: int = None) -> ob.StreamProfile:
+        """Find a stream profile matching the desired parameters."""
+        profile_list = sensor.get_stream_profile_list()
+        
+        # If no specific requirements, return the first profile
+        if width is None and height is None and fmt is None and fps is None:
+            if profile_list.get_count() > 0:
+                return profile_list.get_stream_profile_by_index(0)
+            raise RuntimeError(f"No stream profiles available for {stream_type}")
+        
+        # Try to find exact match
+        for i in range(profile_list.get_count()):
+            profile = profile_list.get_stream_profile_by_index(i)
+            if profile.get_type() != stream_type:
+                continue
+                
+            video_profile = profile.as_video_stream_profile()
+            matches = True
+            
+            if width is not None and video_profile.get_width() != width:
+                matches = False
+            if height is not None and video_profile.get_height() != height:
+                matches = False
+            if fmt is not None and video_profile.get_format() != fmt:
+                matches = False
+            if fps is not None and video_profile.get_fps() != fps:
+                matches = False
+                
+            if matches:
+                return profile
+        
+        # If no exact match, try to find closest match
+        best_profile = None
+        for i in range(profile_list.get_count()):
+            profile = profile_list.get_stream_profile_by_index(i)
+            if profile.get_type() != stream_type:
+                continue
+            best_profile = profile
+            
+        if best_profile is None:
+            raise RuntimeError(f"No suitable stream profile found for {stream_type}")
+            
+        logger.warning(f"Exact match not found for {stream_type}, using closest available profile")
+        return best_profile
 
     def _build_config(self) -> "ob.Config":
         cfg = ob.Config()
 
-        # Color stream
+        # Get sensors to query available profiles
+        color_sensor = self._device.get_sensor(ob.OBSensorType.COLOR_SENSOR)
+        
+        # Print all available profiles
+        self._print_available_profiles(color_sensor, "COLOR SENSOR")
+        
+        if self.use_depth:
+            depth_sensor = self._device.get_sensor(ob.OBSensorType.DEPTH_SENSOR)
+            self._print_available_profiles(depth_sensor, "DEPTH SENSOR")
+        
+        # Color stream - use MJPG for better bandwidth
         if self.width and self.height and self.fps:
-            cfg.enable_stream(ob.StreamType.COLOR, self.capture_width, self.capture_height, ob.Format.RGB, self.fps)
+            color_profile = self._find_stream_profile(
+                color_sensor, ob.OBStreamType.COLOR_STREAM,
+                self.capture_width, self.capture_height, ob.OBFormat.MJPG, self.fps
+            )
+            logger.info(f"Selected color profile: {color_profile} (MJPG format)")
+            cfg.enable_stream(color_profile)
         else:
-            cfg.enable_stream(ob.StreamType.COLOR)
+            cfg.enable_stream(ob.OBStreamType.COLOR_STREAM)
 
-        # Depth stream
+        # Depth stream - use Y16 format (uint16 depth in mm)
         if self.use_depth:
             if self.width and self.height and self.fps:
-                cfg.enable_stream(ob.StreamType.DEPTH, self.capture_width, self.capture_height, ob.Format.Y16, self.fps)
+                depth_profile = self._find_stream_profile(
+                    depth_sensor, ob.OBStreamType.DEPTH_STREAM,
+                    self.capture_width, self.capture_height, ob.OBFormat.Y16, self.fps
+                )
+                logger.info(f"Selected depth profile: {depth_profile} (Y16 format)")
+                cfg.enable_stream(depth_profile)
             else:
-                cfg.enable_stream(ob.StreamType.DEPTH)
+                cfg.enable_stream(ob.OBStreamType.DEPTH_STREAM)
 
         return cfg
 
@@ -147,10 +251,13 @@ class OrbbecCamera(Camera):
             ret = self._pipeline.wait_for_frames(1000)
             if ret is None:
                 raise RuntimeError(f"Failed to fetch initial frameset for {self}.")
-            color_frame = ret.color_frame()
+            color_frame = ret.get_color_frame()
             if color_frame is None:
                 raise RuntimeError(f"{self} failed to get color frame for shape inference.")
-            h, w, _ = np.asanyarray(color_frame.get_data()).shape
+            # Get frame as video stream profile to get dimensions
+            video_profile = color_frame.get_stream_profile().as_video_stream_profile()
+            w = video_profile.get_width()
+            h = video_profile.get_height()
             if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
                 self.width, self.height = h, w
                 self.capture_width, self.capture_height = w, h
@@ -220,10 +327,35 @@ class OrbbecCamera(Camera):
         if frameset is None:
             raise RuntimeError(f"{self} read failed (no frameset).")
 
-        color_frame = frameset.color_frame()
+        color_frame = frameset.get_color_frame()
         if color_frame is None:
             raise RuntimeError(f"{self} color frame is None.")
-        color_image_raw = np.asanyarray(color_frame.get_data())
+        
+        # Get format and decode/convert as needed
+        color_data = np.asanyarray(color_frame.get_data())
+        fmt = color_frame.get_format()
+        expected_rgb_size = self.capture_height * self.capture_width * 3
+        
+        if fmt == ob.OBFormat.MJPG:
+            # MJPG format - decode compressed JPEG
+            color_image_raw = cv2.imdecode(color_data, cv2.IMREAD_COLOR)
+            if color_image_raw is None:
+                raise RuntimeError(f"{self} failed to decode MJPG frame")
+            # imdecode returns BGR, convert to RGB
+            color_image_raw = cv2.cvtColor(color_image_raw, cv2.COLOR_BGR2RGB)
+        elif color_data.size == expected_rgb_size:
+            # RGB format
+            color_image_raw = color_data.reshape((self.capture_height, self.capture_width, 3))
+        elif color_data.size == self.capture_height * self.capture_width * 2:
+            # YUY2/YUYV format - convert to RGB
+            yuyv = color_data.reshape((self.capture_height, self.capture_width, 2))
+            color_image_raw = cv2.cvtColor(yuyv, cv2.COLOR_YUV2RGB_YUY2)
+        else:
+            raise RuntimeError(
+                f"{self} unexpected color frame format: {fmt}, size: {color_data.size}, "
+                f"expected MJPG, {expected_rgb_size} (RGB), or {self.capture_height * self.capture_width * 2} (YUY2)"
+            )
+            
         color_image = self._postprocess_image(color_image_raw, is_depth=False)
 
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
@@ -242,12 +374,22 @@ class OrbbecCamera(Camera):
         frameset = self._pipeline.wait_for_frames(timeout_ms)
         if frameset is None:
             raise RuntimeError(f"{self} read_depth failed (no frameset).")
-        depth_frame = frameset.depth_frame()
+        depth_frame = frameset.get_depth_frame()
         if depth_frame is None:
             raise RuntimeError(f"{self} depth frame is None.")
-        depth_raw = np.asanyarray(depth_frame.get_data())
-        if depth_raw.dtype != np.uint16:
-            depth_raw = depth_raw.astype(np.uint16, copy=False)
+        
+        # Get depth data as bytes and convert to uint16
+        depth_data = np.asanyarray(depth_frame.get_data())
+        # If data is bytes (uint8), convert to uint16
+        if depth_data.dtype == np.uint8:
+            # Interpret bytes as uint16 (every 2 bytes = 1 uint16 value)
+            depth_raw = np.frombuffer(depth_data.tobytes(), dtype=np.uint16)
+        else:
+            depth_raw = depth_data
+            if depth_raw.dtype != np.uint16:
+                depth_raw = depth_raw.astype(np.uint16, copy=False)
+        # Now reshape to (H, W)
+        depth_raw = depth_raw.reshape((self.capture_height, self.capture_width))
 
         depth_image = self._postprocess_image(depth_raw, is_depth=True)
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
@@ -264,17 +406,56 @@ class OrbbecCamera(Camera):
                 color_image = None
                 depth_image = None
 
-                c = frameset.color_frame()
+                c = frameset.get_color_frame()
                 if c is not None:
-                    color_image_raw = np.asanyarray(c.get_data())
+                    # Get format and decode/convert as needed
+                    color_data = np.asanyarray(c.get_data())
+                    fmt = c.get_format()
+                    
+                    logger.debug(f"Color frame: size={color_data.size}, dtype={color_data.dtype}, format={fmt}")
+                    
+                    expected_rgb_size = self.capture_height * self.capture_width * 3
+                    
+                    if fmt == ob.OBFormat.MJPG:
+                        # MJPG format - decode compressed JPEG
+                        color_image_raw = cv2.imdecode(color_data, cv2.IMREAD_COLOR)
+                        if color_image_raw is None:
+                            logger.error("Failed to decode MJPG frame")
+                            continue
+                        # imdecode returns BGR, convert to RGB
+                        color_image_raw = cv2.cvtColor(color_image_raw, cv2.COLOR_BGR2RGB)
+                    elif color_data.size == expected_rgb_size:
+                        # RGB format
+                        color_image_raw = color_data.reshape((self.capture_height, self.capture_width, 3))
+                    elif color_data.size == self.capture_height * self.capture_width * 2:
+                        # YUY2/YUYV format - convert to RGB
+                        yuyv = color_data.reshape((self.capture_height, self.capture_width, 2))
+                        color_image_raw = cv2.cvtColor(yuyv, cv2.COLOR_YUV2RGB_YUY2)
+                    else:
+                        logger.error(f"Unexpected color frame format: {fmt}, size: {color_data.size}")
+                        continue
+                    
+                    logger.debug(f"Color image after conversion: shape={color_image_raw.shape}, "
+                                f"min={color_image_raw.min()}, max={color_image_raw.max()}")
                     color_image = self._postprocess_image(color_image_raw, is_depth=False)
 
                 if self.use_depth:
-                    d = frameset.depth_frame()
+                    d = frameset.get_depth_frame()
                     if d is not None:
-                        depth_raw = np.asanyarray(d.get_data())
-                        if depth_raw.dtype != np.uint16:
-                            depth_raw = depth_raw.astype(np.uint16, copy=False)
+                        # Get depth data as bytes and convert to uint16
+                        depth_data = np.asanyarray(d.get_data())
+                        logger.debug(f"Depth frame: size={depth_data.size}, dtype={depth_data.dtype}, "
+                                    f"min={depth_data.min()}, max={depth_data.max()}")
+                        # If data is bytes (uint8), convert to uint16
+                        if depth_data.dtype == np.uint8:
+                            # Interpret bytes as uint16 (every 2 bytes = 1 uint16 value)
+                            depth_raw = np.frombuffer(depth_data.tobytes(), dtype=np.uint16)
+                        else:
+                            depth_raw = depth_data
+                        # Now reshape to (H, W)
+                        depth_raw = depth_raw.reshape((self.capture_height, self.capture_width))
+                        logger.debug(f"Depth after reshape: shape={depth_raw.shape}, "
+                                    f"min={depth_raw.min()}, max={depth_raw.max()}, non_zero={np.count_nonzero(depth_raw)}")
                         depth_image = self._postprocess_image(depth_raw, is_depth=True)
 
                 set_color_event = False

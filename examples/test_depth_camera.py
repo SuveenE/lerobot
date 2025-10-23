@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 
 import argparse
+import logging
 import sys
 import time
+from pathlib import Path
 
+import cv2
 import numpy as np
+
+# Enable debug logging
+logging.basicConfig(level=logging.DEBUG, format='%(name)s - %(levelname)s - %(message)s')
 
 
 def _print_frame_info(title: str, frame: np.ndarray) -> None:
@@ -18,7 +24,7 @@ def parse_args() -> argparse.Namespace:
         epilog=(
             "\nExamples:\n"
             "  # RealSense\n"
-            "  python examples/test_depth_camera.py --type intelrealsense --serial_number_or_name 123456789 \\\n"
+            "  python examples/test_depth_camera.py --type intelrealsense --serial_number_or_name /dev/video8 \\\n"
             "      --width 640 --height 480 --fps 30\n\n"
             "  # Orbbec\n"
             "  python examples/test_depth_camera.py --type orbbec --serial_number_or_name 123456789 \\\n"
@@ -31,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480, help="Frame height")
     parser.add_argument("--fps", type=int, default=30, help="Frames per second")
     parser.add_argument("--timeout_ms", type=int, default=500, help="Wait timeout for async read (ms)")
+    parser.add_argument("--output_dir", type=str, default="outputs/test_depth", help="Output directory for saved images")
     return parser.parse_args()
 
 
@@ -70,9 +77,6 @@ def main() -> int:
         cam.connect(warmup=True)
         print("Connected.")
 
-        # Give the background thread a moment on some backends
-        time.sleep(0.1)
-
         rgb, depth = cam.async_read_depth(timeout_ms=args.timeout_ms)
         _print_frame_info("RGB", rgb)
         _print_frame_info("Depth", depth)
@@ -83,6 +87,44 @@ def main() -> int:
 
         if rgb.ndim != 3 or rgb.shape[2] != 3:
             print(f"Warning: unexpected RGB shape {rgb.shape}, expected (H, W, 3)")
+
+        # Save images
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save RGB (convert to BGR for OpenCV)
+        rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        rgb_path = output_dir / f"{args.type}_rgb.png"
+        cv2.imwrite(str(rgb_path), rgb_bgr)
+        print(f"Saved RGB image to: {rgb_path}")
+        
+        # Save depth as grayscale visualization
+        # Normalize depth to 0-255 range for visualization
+        depth_normalized = depth.copy()
+        # Filter out invalid (0) depth values for normalization
+        valid_depth = depth_normalized[depth_normalized > 0]
+        if len(valid_depth) > 0:
+            min_depth = valid_depth.min()
+            max_depth = valid_depth.max()
+            print(f"Depth range: {min_depth}mm to {max_depth}mm")
+            # Normalize to 0-255
+            depth_vis = np.zeros_like(depth_normalized, dtype=np.uint8)
+            mask = depth_normalized > 0
+            depth_vis[mask] = np.clip(
+                255 * (depth_normalized[mask] - min_depth) / (max_depth - min_depth), 0, 255
+            ).astype(np.uint8)
+        else:
+            depth_vis = np.zeros_like(depth_normalized, dtype=np.uint8)
+            print("Warning: No valid depth values found")
+        
+        depth_path = output_dir / f"{args.type}_depth.png"
+        cv2.imwrite(str(depth_path), depth_vis)
+        print(f"Saved depth image to: {depth_path}")
+        
+        # Also save raw depth values as 16-bit PNG for precise data
+        depth_raw_path = output_dir / f"{args.type}_depth_raw.png"
+        cv2.imwrite(str(depth_raw_path), depth)
+        print(f"Saved raw depth (uint16) to: {depth_raw_path}")
 
     except Exception as e:
         print(f"Error: {e}")
