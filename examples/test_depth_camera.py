@@ -103,27 +103,12 @@ def main() -> int:
         cv2.imwrite(str(rgb_path), rgb_bgr)
         print(f"Saved RGB image to: {rgb_path}")
         
-        # Save depth as grayscale visualization
-        # Normalize depth to 0-255 range for visualization
-        depth_normalized = depth.copy()
-        # Filter out invalid (0) depth values for normalization
-        valid_depth = depth_normalized[depth_normalized > 0]
-        if len(valid_depth) > 0:
-            min_depth = valid_depth.min()
-            max_depth = valid_depth.max()
-            print(f"Depth range: {min_depth}mm to {max_depth}mm")
-            # Normalize to 0-255
-            depth_vis = np.zeros_like(depth_normalized, dtype=np.uint8)
-            mask = depth_normalized > 0
-            depth_vis[mask] = np.clip(
-                255 * (depth_normalized[mask] - min_depth) / (max_depth - min_depth), 0, 255
-            ).astype(np.uint8)
-        else:
-            depth_vis = np.zeros_like(depth_normalized, dtype=np.uint8)
-            print("Warning: No valid depth values found")
-        
+        # Save depth visualization to match examples/quick.py
+        # Normalize depth to 0-255 using OpenCV and apply COLORMAP_JET
+        depth_vis_gray = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        depth_vis_color = cv2.applyColorMap(depth_vis_gray, cv2.COLORMAP_JET)
         depth_path = output_dir / f"{args.type}_depth.png"
-        cv2.imwrite(str(depth_path), depth_vis)
+        cv2.imwrite(str(depth_path), depth_vis_color)
         print(f"Saved depth image to: {depth_path}")
         
         # Also save raw depth values as 16-bit PNG for precise data
