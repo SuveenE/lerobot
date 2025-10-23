@@ -39,6 +39,8 @@ from ...errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 logger = logging.getLogger(__name__)
 
+MIN_DEPTH = 20  # 20mm
+MAX_DEPTH = 10000  # 10000mm
 
 class OrbbecCamera(Camera):
     def __init__(self, config: OrbbecCameraConfig):
@@ -265,6 +267,62 @@ class OrbbecCamera(Camera):
                 self.width, self.height = w, h
                 self.capture_width, self.capture_height = w, h
 
+    def _i420_to_bgr(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+        y = frame[0:height, :]
+        u = frame[height:height + height // 4].reshape(height // 2, width // 2)
+        v = frame[height + height // 4:].reshape(height // 2, width // 2)
+        yuv_image = cv2.merge([y, u, v])
+        bgr_image = cv2.cvtColor(yuv_image, cv2.COLOR_YUV2BGR_I420)
+        return bgr_image
+
+    def _nv12_to_bgr(self, frame: np.ndarray, width: int, height: int) -> np.ndarray:
+        y = frame[0:height, :]
+        uv = frame[height:height + height // 2].reshape(height // 2, width)
+        yuv_image = cv2.merge([y, uv])
+        bgr_image = cv2.cvtColor(yuv_image, cv2.COLOR_YUV2BGR_NV12)
+        return bgr_image
+
+    def _nv21_to_bgr(self, frame: np.ndarray, width: int, height: int) -> np.ndarray:
+        y = frame[0:height, :]
+        uv = frame[height:height + height // 2].reshape(height // 2, width)
+        yuv_image = cv2.merge([y, uv])
+        bgr_image = cv2.cvtColor(yuv_image, cv2.COLOR_YUV2BGR_NV21)
+        return bgr_image
+
+    def _frame_to_bgr_image(self, frame: ob.VideoFrame) -> np.ndarray:
+        width = frame.get_width()
+        height = frame.get_height()
+        color_format = frame.get_format()
+        data = np.asanyarray(frame.get_data())
+        image = np.zeros((height, width, 3), dtype=np.uint8)
+        if color_format == ob.OBFormat.RGB:
+            image = np.resize(data, (height, width, 3))
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        elif color_format == ob.OBFormat.BGR:
+            image = np.resize(data, (height, width, 3))
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        elif color_format == ob.OBFormat.YUYV:
+            image = np.resize(data, (height, width, 2))
+            image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_YUYV)
+        elif color_format == ob.OBFormat.MJPG:
+            image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        elif color_format == ob.OBFormat.I420:
+            image = self._i420_to_bgr(data, width, height)
+            return image
+        elif color_format == ob.OBFormat.NV12:
+            image = self._nv12_to_bgr(data, width, height)
+            return image
+        elif color_format == ob.OBFormat.NV21:
+            image = self._nv21_to_bgr(data, width, height)
+            return image
+        elif color_format == ob.OBFormat.UYVY:
+            image = np.resize(data, (height, width, 2))
+            image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_UYVY)
+        else:
+            print("Unsupported color format: {}".format(color_format))
+            return None
+        return image
+
     def connect(self, warmup: bool = True) -> None:
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} is already connected.")
@@ -317,6 +375,22 @@ class OrbbecCamera(Camera):
 
         return processed
 
+    def _process_depth_frame(self, depth_frame: ob.DepthFrame) -> np.ndarray:
+        width = depth_frame.get_width()
+        height = depth_frame.get_height()
+        scale = depth_frame.get_depth_scale()
+        
+        depth_data = np.frombuffer(depth_frame.get_data(), dtype=np.uint16).reshape((height, width))
+        depth_data = depth_data.astype(np.float32) * scale
+        depth_data = np.where((depth_data > MIN_DEPTH) & (depth_data < MAX_DEPTH), depth_data, 0).astype(np.uint16)
+        depth_image = self._postprocess_image(depth_data, is_depth=True)
+        return depth_data
+    
+    def _process_color_frame(self, color_frame: ob.ColorFrame) -> np.ndarray:
+        color_image = self._frame_to_bgr_image(color_frame)
+        color_image = self._postprocess_image(color_image, is_depth=False)
+        return color_image
+
     def read(self, color_mode: ColorMode | None = None) -> np.ndarray:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -332,37 +406,14 @@ class OrbbecCamera(Camera):
             raise RuntimeError(f"{self} color frame is None.")
         
         # Get format and decode/convert as needed
-        color_data = np.asanyarray(color_frame.get_data())
-        fmt = color_frame.get_format()
-        expected_rgb_size = self.capture_height * self.capture_width * 3
-        
-        if fmt == ob.OBFormat.MJPG:
-            # MJPG format - decode compressed JPEG
-            color_image_raw = cv2.imdecode(color_data, cv2.IMREAD_COLOR)
-            if color_image_raw is None:
-                raise RuntimeError(f"{self} failed to decode MJPG frame")
-            # imdecode returns BGR, convert to RGB
-            color_image_raw = cv2.cvtColor(color_image_raw, cv2.COLOR_BGR2RGB)
-        elif color_data.size == expected_rgb_size:
-            # RGB format
-            color_image_raw = color_data.reshape((self.capture_height, self.capture_width, 3))
-        elif color_data.size == self.capture_height * self.capture_width * 2:
-            # YUY2/YUYV format - convert to RGB
-            yuyv = color_data.reshape((self.capture_height, self.capture_width, 2))
-            color_image_raw = cv2.cvtColor(yuyv, cv2.COLOR_YUV2RGB_YUY2)
-        else:
-            raise RuntimeError(
-                f"{self} unexpected color frame format: {fmt}, size: {color_data.size}, "
-                f"expected MJPG, {expected_rgb_size} (RGB), or {self.capture_height * self.capture_width * 2} (YUY2)"
-            )
-            
-        color_image = self._postprocess_image(color_image_raw, is_depth=False)
+        color_image = self._process_color_frame(color_frame)
 
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
         logger.debug(f"{self} read took: {read_duration_ms:.1f}ms")
         return color_image
 
     def read_depth(self, timeout_ms: int = 200) -> np.ndarray:
+
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
         if not self.use_depth:
@@ -378,20 +429,10 @@ class OrbbecCamera(Camera):
         if depth_frame is None:
             raise RuntimeError(f"{self} depth frame is None.")
         
-        # Get depth data as bytes and convert to uint16
-        depth_data = np.asanyarray(depth_frame.get_data())
-        # If data is bytes (uint8), convert to uint16
-        if depth_data.dtype == np.uint8:
-            # Interpret bytes as uint16 (every 2 bytes = 1 uint16 value)
-            depth_raw = np.frombuffer(depth_data.tobytes(), dtype=np.uint16)
-        else:
-            depth_raw = depth_data
-            if depth_raw.dtype != np.uint16:
-                depth_raw = depth_raw.astype(np.uint16, copy=False)
-        # Now reshape to (H, W)
-        depth_raw = depth_raw.reshape((self.capture_height, self.capture_width))
+        
+        # Process depth data
+        depth_image = self._process_depth_frame(depth_frame)
 
-        depth_image = self._postprocess_image(depth_raw, is_depth=True)
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
         logger.debug(f"{self} read_depth took: {read_duration_ms:.1f}ms")
         return depth_image
@@ -408,55 +449,12 @@ class OrbbecCamera(Camera):
 
                 c = frameset.get_color_frame()
                 if c is not None:
-                    # Get format and decode/convert as needed
-                    color_data = np.asanyarray(c.get_data())
-                    fmt = c.get_format()
-                    
-                    logger.debug(f"Color frame: size={color_data.size}, dtype={color_data.dtype}, format={fmt}")
-                    
-                    expected_rgb_size = self.capture_height * self.capture_width * 3
-                    
-                    if fmt == ob.OBFormat.MJPG:
-                        # MJPG format - decode compressed JPEG
-                        color_image_raw = cv2.imdecode(color_data, cv2.IMREAD_COLOR)
-                        if color_image_raw is None:
-                            logger.error("Failed to decode MJPG frame")
-                            continue
-                        # imdecode returns BGR, convert to RGB
-                        color_image_raw = cv2.cvtColor(color_image_raw, cv2.COLOR_BGR2RGB)
-                    elif color_data.size == expected_rgb_size:
-                        # RGB format
-                        color_image_raw = color_data.reshape((self.capture_height, self.capture_width, 3))
-                    elif color_data.size == self.capture_height * self.capture_width * 2:
-                        # YUY2/YUYV format - convert to RGB
-                        yuyv = color_data.reshape((self.capture_height, self.capture_width, 2))
-                        color_image_raw = cv2.cvtColor(yuyv, cv2.COLOR_YUV2RGB_YUY2)
-                    else:
-                        logger.error(f"Unexpected color frame format: {fmt}, size: {color_data.size}")
-                        continue
-                    
-                    logger.debug(f"Color image after conversion: shape={color_image_raw.shape}, "
-                                f"min={color_image_raw.min()}, max={color_image_raw.max()}")
-                    color_image = self._postprocess_image(color_image_raw, is_depth=False)
+                    color_image = self._process_color_frame(c)
 
                 if self.use_depth:
                     d = frameset.get_depth_frame()
                     if d is not None:
-                        # Get depth data as bytes and convert to uint16
-                        depth_data = np.asanyarray(d.get_data())
-                        logger.debug(f"Depth frame: size={depth_data.size}, dtype={depth_data.dtype}, "
-                                    f"min={depth_data.min()}, max={depth_data.max()}")
-                        # If data is bytes (uint8), convert to uint16
-                        if depth_data.dtype == np.uint8:
-                            # Interpret bytes as uint16 (every 2 bytes = 1 uint16 value)
-                            depth_raw = np.frombuffer(depth_data.tobytes(), dtype=np.uint16)
-                        else:
-                            depth_raw = depth_data
-                        # Now reshape to (H, W)
-                        depth_raw = depth_raw.reshape((self.capture_height, self.capture_width))
-                        logger.debug(f"Depth after reshape: shape={depth_raw.shape}, "
-                                    f"min={depth_raw.min()}, max={depth_raw.max()}, non_zero={np.count_nonzero(depth_raw)}")
-                        depth_image = self._postprocess_image(depth_raw, is_depth=True)
+                        depth_image = self._process_depth_frame(d)
 
                 set_color_event = False
                 set_depth_event = False
@@ -568,5 +566,3 @@ class OrbbecCamera(Camera):
             self._ctx = None
 
         logger.info(f"{self} disconnected.")
-
-
