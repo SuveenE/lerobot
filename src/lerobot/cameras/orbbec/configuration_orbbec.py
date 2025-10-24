@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..configs import CameraConfig, ColorMode, Cv2Rotation
 
@@ -32,7 +33,7 @@ class OrbbecCameraConfig(CameraConfig):
         warmup_s: Time reading frames before returning from connect (in seconds).
     """
 
-    index_or_path: str | int
+    index_or_path: int | Path
     color_mode: ColorMode = ColorMode.RGB
     use_depth: bool = False
     rotation: Cv2Rotation = Cv2Rotation.NO_ROTATION
