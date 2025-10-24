@@ -47,7 +47,7 @@ class OrbbecCamera(Camera):
         super().__init__(config)
         self.config = config
 
-        self.serial_or_name = config.serial_number_or_name
+        self.index_or_path = config.index_or_path
         self.fps = config.fps
         self.color_mode = config.color_mode
         self.use_depth = config.use_depth
@@ -76,7 +76,7 @@ class OrbbecCamera(Camera):
                 self.capture_width, self.capture_height = self.height, self.width
 
     def __str__(self) -> str:
-        return f"{self.__class__.__name__}({self.serial_or_name})"
+        return f"{self.__class__.__name__}({self.index_or_path})"
 
     @property
     def is_connected(self) -> bool:
@@ -102,54 +102,37 @@ class OrbbecCamera(Camera):
 
     def _match_device(self, context: "ob.Context") -> "ob.Device":
         device_list = context.query_devices()
-        logger.info(f"device_list: {device_list}")
-
-        # print all device info
-        for i in range(device_list.get_count()):
-            dev = device_list.get_device_by_index(i)
-            info = dev.get_device_info()
-            name = info.name() if hasattr(info, "name") else "Orbbec"
-            serial = info.serial_number() if hasattr(info, "serial_number") else ""
-            logger.info(f"Device {i}: name={name}, serial={serial}")
-            logger.info(f"Device {i} info: {info}")
-
         count = device_list.get_count()
         
         if count == 0:
             raise ConnectionError("No Orbbec devices detected.")
         
-        # If only one device is available, use it regardless of identifier
-        if count == 1:
-            dev = device_list.get_device_by_index(0)
-            info = dev.get_device_info()
-            name = info.name() if hasattr(info, "name") else "Orbbec"
-            serial = info.serial_number() if hasattr(info, "serial_number") else ""
-            logger.info(f"Using single Orbbec device: name={name}, serial={serial}")
-            return dev
-
-        # If multiple devices, try to match by serial number or name
-        for i in range(count):
-            dev = device_list.get_device_by_index(i)
-            info = dev.get_device_info()
-            name = info.name() if hasattr(info, "name") else "Orbbec"
-            serial = info.serial_number() if hasattr(info, "serial_number") else ""
-            if self.serial_or_name == serial or self.serial_or_name == name:
-                return dev
-
-        # Build helpful error message with available devices
-        available = []
-        for i in range(count):
-            dev = device_list.get_device_by_index(i)
-            info = dev.get_device_info()
-            name = info.name() if hasattr(info, "name") else "Orbbec"
-            serial = info.serial_number() if hasattr(info, "serial_number") else ""
-            available.append(f"  - name: {name}, serial: {serial}")
+        # Convert index_or_path to integer index
+        if isinstance(self.index_or_path, int):
+            device_index = self.index_or_path
+        else:
+            try:
+                device_index = int(self.index_or_path)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"index_or_path must be an integer or string integer, got: '{self.index_or_path}'"
+                )
         
-        available_str = "\n".join(available)
-        raise ValueError(
-            f"No Orbbec device found for identifier '{self.serial_or_name}'.\n"
-            f"Available Orbbec devices:\n{available_str}"
-        )
+        # Validate index range
+        if device_index < 0 or device_index >= count:
+            raise ValueError(
+                f"Device index {device_index} is out of range. "
+                f"Found {count} device(s), valid indices are 0-{count-1}."
+            )
+        
+        # Get device by index
+        dev = device_list.get_device_by_index(device_index)
+        info = dev.get_device_info()
+        name = info.name() if hasattr(info, "name") else "Orbbec"
+        serial = info.serial_number() if hasattr(info, "serial_number") else ""
+        logger.info(f"Using Orbbec device at index {device_index}: name={name}, serial={serial}")
+        
+        return dev
 
     def _print_available_profiles(self, sensor: ob.Sensor, sensor_name: str) -> None:
         """Print all available stream profiles for a sensor."""

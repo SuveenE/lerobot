@@ -25,14 +25,14 @@ class OrbbecCameraConfig(CameraConfig):
     """Configuration class for Orbbec Gemini cameras.
 
     Attributes:
-        serial_number_or_name: Unique serial number or device name to identify the camera.
+        index_or_path: Device index (e.g., 0), serial number, or device name to identify the camera.
         color_mode: RGB or BGR output for color images.
         use_depth: Enable depth stream when True.
         rotation: Image rotation applied after capture.
         warmup_s: Time reading frames before returning from connect (in seconds).
     """
 
-    serial_number_or_name: str
+    index_or_path: str | int
     color_mode: ColorMode = ColorMode.RGB
     use_depth: bool = False
     rotation: Cv2Rotation = Cv2Rotation.NO_ROTATION
