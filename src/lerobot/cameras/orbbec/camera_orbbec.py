@@ -102,6 +102,8 @@ class OrbbecCamera(Camera):
 
     def _match_device(self, context: "ob.Context") -> "ob.Device":
         device_list = context.query_devices()
+        logger.info(f"device_list: {device_list}")
+
         # print all device info
         for i in range(device_list.get_count()):
             dev = device_list[i]
