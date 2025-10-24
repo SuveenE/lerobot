@@ -1,7 +1,7 @@
 git clone https://github.com/orbbec/pyorbbecsdk.git
+cd pyorbbecsdk
 git fetch
 git switch main
-cd pyorbbecsdk
 pip3 install -r requirements.txt
 mkdir build
 cd build
