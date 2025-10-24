@@ -114,13 +114,6 @@ class OrbbecCamera(Camera):
         count = device_list.get_count()
         
         if count == 0:
-            for i in range(device_list.get_count()):
-                dev = device_list[i]
-                info = dev.get_device_info()
-                name = info.name() if hasattr(info, "name") else "Orbbec"
-                serial = info.serial_number() if hasattr(info, "serial_number") else ""
-                logger.info(f"Device {i}: name={name}, serial={serial}")
-                logger.info(f"Device {i} info: {info}")
             raise ConnectionError("No Orbbec devices detected.")
         
         # If only one device is available, use it regardless of identifier
