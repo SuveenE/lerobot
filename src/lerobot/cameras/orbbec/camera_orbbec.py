@@ -106,7 +106,7 @@ class OrbbecCamera(Camera):
 
         # print all device info
         for i in range(device_list.get_count()):
-            dev = device_list[i]
+            dev = device_list.get_device_by_index(i)
             info = dev.get_device_info()
             name = info.name() if hasattr(info, "name") else "Orbbec"
             serial = info.serial_number() if hasattr(info, "serial_number") else ""
@@ -120,7 +120,7 @@ class OrbbecCamera(Camera):
         
         # If only one device is available, use it regardless of identifier
         if count == 1:
-            dev = device_list[0]
+            dev = device_list.get_device_by_index(0)
             info = dev.get_device_info()
             name = info.name() if hasattr(info, "name") else "Orbbec"
             serial = info.serial_number() if hasattr(info, "serial_number") else ""
@@ -129,7 +129,7 @@ class OrbbecCamera(Camera):
 
         # If multiple devices, try to match by serial number or name
         for i in range(count):
-            dev = device_list[i]
+            dev = device_list.get_device_by_index(i)
             info = dev.get_device_info()
             name = info.name() if hasattr(info, "name") else "Orbbec"
             serial = info.serial_number() if hasattr(info, "serial_number") else ""
@@ -139,7 +139,7 @@ class OrbbecCamera(Camera):
         # Build helpful error message with available devices
         available = []
         for i in range(count):
-            dev = device_list[i]
+            dev = device_list.get_device_by_index(i)
             info = dev.get_device_info()
             name = info.name() if hasattr(info, "name") else "Orbbec"
             serial = info.serial_number() if hasattr(info, "serial_number") else ""
