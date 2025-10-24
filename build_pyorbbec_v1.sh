@@ -1,4 +1,5 @@
 git clone https://github.com/orbbec/pyorbbecsdk.git
+git checkout main
 cd pyorbbecsdk
 pip3 install -r requirements.txt
 mkdir build
