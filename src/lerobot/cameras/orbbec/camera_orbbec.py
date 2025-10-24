@@ -102,7 +102,14 @@ class OrbbecCamera(Camera):
 
     def _match_device(self, context: "ob.Context") -> "ob.Device":
         device_list = context.query_devices()
-        print(device_list)
+        # print all device info
+        for i in range(device_list.get_count()):
+            dev = device_list[i]
+            info = dev.get_device_info()
+            name = info.name() if hasattr(info, "name") else "Orbbec"
+            serial = info.serial_number() if hasattr(info, "serial_number") else ""
+            logger.info(f"Device {i}: name={name}, serial={serial}")
+            logger.info(f"Device {i} info: {info}")
         count = device_list.get_count()
         
         if count == 0:
