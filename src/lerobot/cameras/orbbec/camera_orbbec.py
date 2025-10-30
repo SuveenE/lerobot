@@ -42,6 +42,25 @@ logger = logging.getLogger(__name__)
 MIN_DEPTH = 20  # 20mm
 MAX_DEPTH = 10000  # 10000mm
 
+# Shared Orbbec SDK Context for all camera instances
+# The Orbbec SDK requires a single Context to be shared across all devices
+# Creating multiple Context objects causes segmentation faults
+_SHARED_CONTEXT: ob.Context | None = None
+_SHARED_CONTEXT_LOCK = Lock()
+
+def _get_shared_context() -> ob.Context:
+    """Get or create the shared Orbbec SDK Context.
+    
+    The Orbbec SDK has stability issues when multiple Context objects are created.
+    This function ensures all OrbbecCamera instances share a single Context.
+    """
+    global _SHARED_CONTEXT
+    with _SHARED_CONTEXT_LOCK:
+        if _SHARED_CONTEXT is None:
+            _SHARED_CONTEXT = ob.Context()
+            logger.info("Created shared Orbbec SDK Context")
+        return _SHARED_CONTEXT
+
 class OrbbecCamera(Camera):
     def __init__(self, config: OrbbecCameraConfig):
         super().__init__(config)
@@ -84,7 +103,7 @@ class OrbbecCamera(Camera):
 
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
-        context = ob.Context()
+        context = _get_shared_context()
         device_list = context.query_devices()
         found: list[dict[str, Any]] = []
         for i in range(device_list.get_count()):
@@ -134,34 +153,21 @@ class OrbbecCamera(Camera):
         
         return dev
 
-    def _print_available_profiles(self, sensor: ob.Sensor, sensor_name: str) -> None:
-        """Print all available stream profiles for a sensor."""
-        profile_list = sensor.get_stream_profile_list()
-        print(f"\n{sensor_name} - Available profiles ({profile_list.get_count()} total):")
-        for i in range(profile_list.get_count()):
-            profile = profile_list.get_stream_profile_by_index(i)
-            stream_type = profile.get_type()
-            if profile.is_video_stream_profile():
-                video_profile = profile.as_video_stream_profile()
-                width = video_profile.get_width()
-                height = video_profile.get_height()
-                fps = video_profile.get_fps()
-                fmt = video_profile.get_format()
-                print(f"  [{i}] {stream_type} - {width}x{height}@{fps}fps - Format: {fmt}")
-            else:
-                print(f"  [{i}] {stream_type} - (non-video profile)")
-    
-    def _find_stream_profile(self, sensor: ob.Sensor, stream_type: ob.OBStreamType, 
+    def _find_stream_profile(self, sensor_type: ob.OBSensorType, stream_type: ob.OBStreamType, 
                              width: int = None, height: int = None, 
                              fmt: ob.OBFormat = None, fps: int = None) -> ob.StreamProfile:
-        """Find a stream profile matching the desired parameters."""
-        profile_list = sensor.get_stream_profile_list()
+        """Find a stream profile matching the desired parameters using pipeline."""
+        try:
+            profile_list = self._pipeline.get_stream_profile_list(sensor_type)
+        except Exception as e:
+            raise RuntimeError(f"Failed to get stream profile list for {sensor_type}: {e}")
         
-        # If no specific requirements, return the first profile
+        if profile_list is None:
+            raise RuntimeError(f"No stream profiles available for {sensor_type}")
+        
+        # If no specific requirements, return the default profile
         if width is None and height is None and fmt is None and fps is None:
-            if profile_list.get_count() > 0:
-                return profile_list.get_stream_profile_by_index(0)
-            raise RuntimeError(f"No stream profiles available for {stream_type}")
+            return profile_list.get_default_video_stream_profile()
         
         # Try to find exact match
         for i in range(profile_list.get_count()):
@@ -184,55 +190,77 @@ class OrbbecCamera(Camera):
             if matches:
                 return profile
         
-        # If no exact match, try to find closest match
-        best_profile = None
-        for i in range(profile_list.get_count()):
-            profile = profile_list.get_stream_profile_by_index(i)
-            if profile.get_type() != stream_type:
-                continue
-            best_profile = profile
-            
-        if best_profile is None:
-            raise RuntimeError(f"No suitable stream profile found for {stream_type}")
-            
-        logger.warning(f"Exact match not found for {stream_type}, using closest available profile")
-        return best_profile
+        # If no exact match, use default profile
+        logger.warning(f"Exact match not found for {sensor_type}, using default profile")
+        return profile_list.get_default_video_stream_profile()
 
     def _build_config(self) -> "ob.Config":
         cfg = ob.Config()
+        
+        # Color stream configuration
+        # Follow Orbbec SDK examples: get profile list, then get specific or default profile
+        try:
+            profile_list = self._pipeline.get_stream_profile_list(ob.OBSensorType.COLOR_SENSOR)
+            if profile_list:
+                if self.width and self.height and self.fps:
+                    # Try to get specific profile matching requested parameters
+                    try:
+                        # Try MJPG format first for better bandwidth
+                        color_profile = profile_list.get_video_stream_profile(
+                            self.capture_width, self.capture_height, ob.OBFormat.MJPG, self.fps
+                        )
+                        logger.info(f"Using MJPG color profile: {self.capture_width}x{self.capture_height}@{self.fps}fps")
+                    except Exception:
+                        # Fallback to any format with matching resolution/fps
+                        try:
+                            color_profile = profile_list.get_video_stream_profile(
+                                self.capture_width, 0, ob.OBFormat.ANY, self.fps
+                            )
+                            logger.info(f"Using ANY format color profile: {self.capture_width}x*@{self.fps}fps")
+                        except Exception:
+                            color_profile = profile_list.get_default_video_stream_profile()
+                            logger.warning("Using default color profile (requested profile not available)")
+                else:
+                    # No specific requirements, use default
+                    color_profile = profile_list.get_default_video_stream_profile()
+                    logger.info("Using default color profile")
+                
+                cfg.enable_stream(color_profile)
+        except Exception as e:
+            logger.error(f"Failed to enable color stream: {e}")
+            raise
 
-        # Get sensors to query available profiles
-        color_sensor = self._device.get_sensor(ob.OBSensorType.COLOR_SENSOR)
-        
-        # Print all available profiles
-        self._print_available_profiles(color_sensor, "COLOR SENSOR")
-        
+        # Depth stream configuration
         if self.use_depth:
-            depth_sensor = self._device.get_sensor(ob.OBSensorType.DEPTH_SENSOR)
-            self._print_available_profiles(depth_sensor, "DEPTH SENSOR")
-        
-        # Color stream - use MJPG for better bandwidth
-        if self.width and self.height and self.fps:
-            color_profile = self._find_stream_profile(
-                color_sensor, ob.OBStreamType.COLOR_STREAM,
-                self.capture_width, self.capture_height, ob.OBFormat.MJPG, self.fps
-            )
-            logger.info(f"Selected color profile: {color_profile} (MJPG format)")
-            cfg.enable_stream(color_profile)
-        else:
-            cfg.enable_stream(ob.OBStreamType.COLOR_STREAM)
-
-        # Depth stream - use Y16 format (uint16 depth in mm)
-        if self.use_depth:
-            if self.width and self.height and self.fps:
-                depth_profile = self._find_stream_profile(
-                    depth_sensor, ob.OBStreamType.DEPTH_STREAM,
-                    self.capture_width, self.capture_height, ob.OBFormat.Y16, self.fps
-                )
-                logger.info(f"Selected depth profile: {depth_profile} (Y16 format)")
-                cfg.enable_stream(depth_profile)
-            else:
-                cfg.enable_stream(ob.OBStreamType.DEPTH_STREAM)
+            try:
+                profile_list = self._pipeline.get_stream_profile_list(ob.OBSensorType.DEPTH_SENSOR)
+                if profile_list:
+                    if self.width and self.height and self.fps:
+                        # Try to get specific profile matching requested parameters
+                        try:
+                            # Use Y16 format for depth (uint16 millimeters)
+                            depth_profile = profile_list.get_video_stream_profile(
+                                self.capture_width, self.capture_height, ob.OBFormat.Y16, self.fps
+                            )
+                            logger.info(f"Using Y16 depth profile: {self.capture_width}x{self.capture_height}@{self.fps}fps")
+                        except Exception:
+                            try:
+                                depth_profile = profile_list.get_video_stream_profile(
+                                    self.capture_width, 0, ob.OBFormat.Y16, self.fps
+                                )
+                                logger.info(f"Using Y16 depth profile: {self.capture_width}x*@{self.fps}fps")
+                            except Exception:
+                                depth_profile = profile_list.get_default_video_stream_profile()
+                                logger.warning("Using default depth profile (requested profile not available)")
+                    else:
+                        # No specific requirements, use default
+                        depth_profile = profile_list.get_default_video_stream_profile()
+                        logger.info("Using default depth profile")
+                    
+                    cfg.enable_stream(depth_profile)
+            except Exception as e:
+                logger.error(f"Failed to enable depth stream: {e}")
+                raise
 
         return cfg
 
@@ -324,7 +352,8 @@ class OrbbecCamera(Camera):
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} is already connected.")
 
-        self._ctx = ob.Context()
+        # Use shared context to avoid SDK segmentation faults
+        self._ctx = _get_shared_context()
         self._device = self._match_device(self._ctx)
         self._pipeline = ob.Pipeline(self._device)
         self._config = self._build_config()
@@ -334,6 +363,7 @@ class OrbbecCamera(Camera):
         except Exception as e:
             self._pipeline = None
             self._device = None
+            self._ctx = None
             raise ConnectionError(f"Failed to open {self}.") from e
 
         self._configure_capture_settings()
@@ -358,10 +388,19 @@ class OrbbecCamera(Camera):
             if c != 3:
                 raise RuntimeError(f"{self} frame channels={c} do not match expected 3 channels (RGB/BGR).")
 
+        # Handle resolution mismatch - update configured dimensions if actual stream differs
+        # This happens when SDK falls back to default profile (e.g., Gemini E uses 640x360 depth)
         if h != self.capture_height or w != self.capture_width:
-            raise RuntimeError(
-                f"{self} frame width={w} or height={h} do not match configured width={self.capture_width} or height={self.capture_height}."
+            logger.warning(
+                f"{self} received frame {w}x{h}, expected {self.capture_width}x{self.capture_height}. "
+                f"Updating configuration to match actual stream."
             )
+            self.capture_width, self.capture_height = w, h
+            # Update output dimensions based on rotation
+            if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+                self.width, self.height = h, w
+            else:
+                self.width, self.height = w, h
 
         processed = image
         if not is_depth and self.color_mode == ColorMode.BGR:
@@ -564,6 +603,7 @@ class OrbbecCamera(Camera):
             self._pipeline = None
             self._config = None
             self._device = None
-            self._ctx = None
+            # Don't set _ctx = None since it's a shared resource
+            # self._ctx remains pointing to the shared context
 
         logger.info(f"{self} disconnected.")
