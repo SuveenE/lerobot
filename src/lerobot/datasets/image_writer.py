@@ -18,6 +18,7 @@ import queue
 import threading
 from pathlib import Path
 
+import cv2
 import numpy as np
 import PIL.Image
 import torch
@@ -39,9 +40,17 @@ def safe_stop_image_writer(func):
 
 
 def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) -> PIL.Image.Image:
-    # TODO(aliberts): handle 1 channel and 4 for depth images
+    # Handle single-channel (depth) images
+    if image_array.ndim == 2:
+        # Depth image: normalize and convert to grayscale
+        depth = cv2.normalize(image_array, None, 0, 255, norm_type=cv2.NORM_MINMAX)
+        
+        depth_image = PIL.Image.fromarray(depth.astype(np.uint8))
+        return depth_image
+    
+    # Handle 3-channel (RGB) images
     if image_array.ndim != 3:
-        raise ValueError(f"The array has {image_array.ndim} dimensions, but 3 is expected for an image.")
+        raise ValueError(f"The array has {image_array.ndim} dimensions, but 2 (depth) or 3 (RGB) is expected for an image.")
 
     if image_array.shape[0] == 3:
         # Transpose from pytorch convention (C, H, W) to (H, W, C)
@@ -49,7 +58,7 @@ def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) 
 
     elif image_array.shape[-1] != 3:
         raise NotImplementedError(
-            f"The image has {image_array.shape[-1]} channels, but 3 is required for now."
+            f"The image has {image_array.shape[-1]} channels, but 3 is required for RGB images."
         )
 
     if image_array.dtype != np.uint8:
