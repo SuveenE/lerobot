@@ -235,6 +235,12 @@ class OrbbecCamera(Camera):
             try:
                 profile_list = self._pipeline.get_stream_profile_list(ob.OBSensorType.DEPTH_SENSOR)
                 logger.info(f"Depth profile list: {profile_list}")
+
+                # print all possible profiles
+                for i in range(profile_list.get_count()):
+                    profile = profile_list.get_stream_profile_by_index(i)
+                    logger.info(f"Profile {i}: {profile}")
+
                 if profile_list:
                     depth_profile = None
                     if self.width and self.height and self.fps:
@@ -248,11 +254,6 @@ class OrbbecCamera(Camera):
                         except Exception:
                             depth_profile = profile_list.get_default_video_stream_profile()
                             logger.info("Using default depth profile")
-                            # print the format
-                            print(f"Depth profile format: {depth_profile.get_format()}")
-                            print(f"Depth profile width: {depth_profile.get_width()}")
-                            print(f"Depth profile height: {depth_profile.get_height()}")
-                            print(f"Depth profile fps: {depth_profile.get_fps()}")
 
                     if depth_profile is None:
                         depth_profile = profile_list.get_default_video_stream_profile()
