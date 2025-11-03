@@ -238,17 +238,17 @@ class OrbbecCamera(Camera):
                     if self.width and self.height and self.fps:
                         # Try to get specific profile matching requested parameters
                         try:
-                            # Use Y16 format for depth (uint16 millimeters)
+                            # Use Y10  format for depth (uint8 millimeters)
                             depth_profile = profile_list.get_video_stream_profile(
-                                self.capture_width, self.capture_height, ob.OBFormat.Y16, self.fps
+                                self.capture_width, self.capture_height, ob.OBFormat.Y10, self.fps
                             )
-                            logger.info(f"Using Y16 depth profile: {self.capture_width}x{self.capture_height}@{self.fps}fps")
+                            logger.info(f"Using Y10 depth profile: {self.capture_width}x{self.capture_height}@{self.fps}fps")
                         except Exception:
                             try:
                                 depth_profile = profile_list.get_video_stream_profile(
-                                    self.capture_width, 0, ob.OBFormat.Y16, self.fps
+                                    self.capture_width, 0, ob.OBFormat.Y10, self.fps
                                 )
-                                logger.info(f"Using Y16 depth profile: {self.capture_width}x*@{self.fps}fps")
+                                logger.info(f"Using Y10 depth profile: {self.capture_width}x*@{self.fps}fps")
                             except Exception:
                                 depth_profile = profile_list.get_default_video_stream_profile()
                                 logger.warning("Using default depth profile (requested profile not available)")
