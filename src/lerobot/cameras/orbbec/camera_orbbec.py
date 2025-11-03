@@ -252,6 +252,7 @@ class OrbbecCamera(Camera):
                                 logger.info(f"Using Y10 depth profile: {self.capture_width}x*@{self.fps}fps")
                             except Exception:
                                 depth_profile = profile_list.get_default_video_stream_profile()
+                                logger.info(f"Default depth profile: {depth_profile}")
                                 logger.warning("Using default depth profile (requested profile not available)")
                     else:
                         # No specific requirements, use default
