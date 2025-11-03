@@ -239,9 +239,10 @@ class OrbbecCamera(Camera):
                 # print all possible profiles
                 for i in range(profile_list.get_count()):
                     profile = profile_list.get_stream_profile_by_index(i)
+                    logger.info(f"Profile {i}: {profile}")
                     logger.info(f"Profile format: {profile.get_format()}")
-                    logger.info(f"Profile width: {profile.get_width()}")
-                    logger.info(f"Profile height: {profile.get_height()}")
+                    # print class methods in profile
+                    logger.info(f"Profile methods: {profile.__class__.__methods__}")
                     logger.info(f"Profile fps: {profile.get_fps()}")
 
                 if profile_list:
