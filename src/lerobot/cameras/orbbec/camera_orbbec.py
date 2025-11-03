@@ -563,6 +563,9 @@ class OrbbecCamera(Camera):
 
         if self.thread is None or not self.thread.is_alive():
             self._start_read_thread()
+            # Brief delay to allow thread to initialize and capture first frame
+            # This is especially important when multiple cameras compete for SDK resources
+            time.sleep(0.05)  # 50ms - ~1.5 frame periods at 30fps
 
         if not self.new_depth_frame_event.wait(timeout=timeout_ms / 1000.0):
             thread_alive = self.thread is not None and self.thread.is_alive()
