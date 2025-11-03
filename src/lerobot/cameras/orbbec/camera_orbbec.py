@@ -236,15 +236,6 @@ class OrbbecCamera(Camera):
                 profile_list = self._pipeline.get_stream_profile_list(ob.OBSensorType.DEPTH_SENSOR)
                 logger.info(f"Depth profile list: {profile_list}")
 
-                # print all possible profiles
-                for i in range(profile_list.get_count()):
-                    profile = profile_list.get_stream_profile_by_index(i)
-                    logger.info(f"Profile {i}: {profile}")
-                    logger.info(f"Profile format: {profile.get_format()}")
-                    # print class methods in profile
-                    logger.info(f"Profile methods: {profile.__class__.__methods__}")
-                    logger.info(f"Profile fps: {profile.get_fps()}")
-
                 if profile_list:
                     depth_profile = None
                     if self.width and self.height and self.fps:
@@ -252,7 +243,7 @@ class OrbbecCamera(Camera):
                         try:
                             # Use Y10  format for depth (uint8 millimeters)
                             depth_profile = profile_list.get_video_stream_profile(
-                                self.capture_width, self.capture_height, ob.OBFormat.MJPG, self.fps
+                                self.capture_width, self.capture_height, ob.OBFormat.Y11, self.fps
                             )
                             logger.info(f"Using Y10 depth profile: {self.capture_width}x{self.capture_height}@{self.fps}fps")
                         except Exception:
