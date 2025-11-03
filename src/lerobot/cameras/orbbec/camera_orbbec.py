@@ -554,7 +554,7 @@ class OrbbecCamera(Camera):
             raise RuntimeError(f"Internal error: Event set but no frame available for {self}.")
         return frame
 
-    def async_read_depth(self, timeout_ms: float = 700) -> tuple[np.ndarray, np.ndarray]:
+    def async_read_depth(self, timeout_ms: float = 1000) -> tuple[np.ndarray, np.ndarray]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
         if not self.use_depth:
