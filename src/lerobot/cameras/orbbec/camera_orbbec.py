@@ -248,6 +248,11 @@ class OrbbecCamera(Camera):
                         except Exception:
                             depth_profile = profile_list.get_default_video_stream_profile()
                             logger.info("Using default depth profile")
+                            # print the format
+                            print(f"Depth profile format: {depth_profile.get_format()}")
+                            print(f"Depth profile width: {depth_profile.get_width()}")
+                            print(f"Depth profile height: {depth_profile.get_height()}")
+                            print(f"Depth profile fps: {depth_profile.get_fps()}")
 
                     if depth_profile is None:
                         depth_profile = profile_list.get_default_video_stream_profile()
