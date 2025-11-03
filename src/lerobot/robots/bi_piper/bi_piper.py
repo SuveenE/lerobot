@@ -216,7 +216,8 @@ class BiPiper(Robot):
         for cam_name, cam in self.cameras.items():
             cfg = self.config.cameras[cam_name]
             depth_enabled = hasattr(cfg, 'use_depth') and cfg.use_depth
-            print(f"USE DEPTH: {depth_enabled}")
+            # log use depth enabled
+            logger.info(f"Using depth enabled: {depth_enabled}")
             rgb_frame, depth_frame = cam.async_read_depth() if depth_enabled else (cam.async_read(), None)
             observation[cam_name] = rgb_frame
             if depth_enabled and depth_frame is not None:
