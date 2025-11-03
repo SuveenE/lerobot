@@ -236,29 +236,23 @@ class OrbbecCamera(Camera):
                 profile_list = self._pipeline.get_stream_profile_list(ob.OBSensorType.DEPTH_SENSOR)
                 logger.info(f"Depth profile list: {profile_list}")
                 if profile_list:
+                    depth_profile = None
                     if self.width and self.height and self.fps:
                         # Try to get specific profile matching requested parameters
                         try:
                             # Use Y10  format for depth (uint8 millimeters)
                             depth_profile = profile_list.get_video_stream_profile(
-                                self.capture_width, self.capture_height, ob.OBFormat.Y10, self.fps
+                                self.capture_width, self.capture_height, ob.OBFormat.MJPG, self.fps
                             )
                             logger.info(f"Using Y10 depth profile: {self.capture_width}x{self.capture_height}@{self.fps}fps")
                         except Exception:
-                            try:
-                                depth_profile = profile_list.get_video_stream_profile(
-                                    self.capture_width, 0, ob.OBFormat.Y10, self.fps
-                                )
-                                logger.info(f"Using Y10 depth profile: {self.capture_width}x*@{self.fps}fps")
-                            except Exception:
-                                depth_profile = profile_list.get_default_video_stream_profile()
-                                print(f"Default depth profile: {depth_profile}")
-                                logger.warning("Using default depth profile (requested profile not available)")
-                    else:
-                        # No specific requirements, use default
+                            depth_profile = profile_list.get_default_video_stream_profile()
+                            logger.info("Using default depth profile")
+
+                    if depth_profile is None:
                         depth_profile = profile_list.get_default_video_stream_profile()
                         logger.info("Using default depth profile")
-                    
+
                     cfg.enable_stream(depth_profile)
             except Exception as e:
                 logger.error(f"Failed to enable depth stream: {e}")
