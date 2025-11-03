@@ -366,7 +366,7 @@ class OrbbecCamera(Camera):
         self._configure_capture_settings()
 
         if warmup:
-            time.sleep(1)
+            time.sleep(5)
             start_time = time.time()
             while time.time() - start_time < self.warmup_s:
                 try:
@@ -434,7 +434,7 @@ class OrbbecCamera(Camera):
 
         start_time = time.perf_counter()
 
-        frameset = self._pipeline.wait_for_frames(123)
+        frameset = self._pipeline.wait_for_frames(400)
         if frameset is None:
             raise RuntimeError(f"{self} read failed (no frameset).")
 
@@ -449,7 +449,7 @@ class OrbbecCamera(Camera):
         logger.debug(f"{self} read took: {read_duration_ms:.1f}ms")
         return color_image
 
-    def read_depth(self, timeout_ms: int = 456) -> np.ndarray:
+    def read_depth(self, timeout_ms: int = 200) -> np.ndarray:
 
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
@@ -533,7 +533,7 @@ class OrbbecCamera(Camera):
         self.thread = None
         self.stop_event = None
 
-    def async_read(self, timeout_ms: float = 321) -> np.ndarray:
+    def async_read(self, timeout_ms: float = 200) -> np.ndarray:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
