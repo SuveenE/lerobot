@@ -234,6 +234,7 @@ class OrbbecCamera(Camera):
         if self.use_depth:
             try:
                 profile_list = self._pipeline.get_stream_profile_list(ob.OBSensorType.DEPTH_SENSOR)
+                logger.info(f"Depth profile list: {profile_list}")
                 if profile_list:
                     if self.width and self.height and self.fps:
                         # Try to get specific profile matching requested parameters
