@@ -477,7 +477,7 @@ class OrbbecCamera(Camera):
     def _read_loop(self):
         while not self.stop_event.is_set():
             try:
-                frameset = self._pipeline.wait_for_frames(500)
+                frameset = self._pipeline.wait_for_frames()
                 if frameset is None:
                     continue
 
