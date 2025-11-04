@@ -180,16 +180,6 @@ class BiPiper(Robot):
 
         observation = {}
 
-        # Initialize camera threads upfront if needed to reduce contention
-        # when multiple cameras are used. This avoids starting threads lazily
-        # one-by-one which can cause SDK contention and timeouts.
-        for cam in self.cameras.values():
-            # Check if camera has async read thread capability and needs initialization
-            if hasattr(cam, 'thread') and (cam.thread is None or not cam.thread.is_alive()):
-                if hasattr(cam, '_start_read_thread'):
-                    cam._start_read_thread()
-                    time.sleep(1)
-
         # Get left arm joint positions
         left_joint_msgs = self.left_arm.GetArmJointMsgs()
         left_gripper_msgs = self.left_arm.GetArmGripperMsgs()

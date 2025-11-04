@@ -475,7 +475,6 @@ class OrbbecCamera(Camera):
         return depth_image
 
     def _read_loop(self):
-        time.sleep(1)
         while not self.stop_event.is_set():
             try:
                 frameset = self._pipeline.wait_for_frames(600)
