@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import av
+import cv2
+import numpy as np
 import pyarrow as pa
 import torch
 import torchvision
@@ -329,6 +331,112 @@ def encode_video_frames(
 
     if not video_path.exists():
         raise OSError(f"Video encoding did not work. File not found: {video_path}.")
+
+
+def encode_depth_preview_frames(
+    imgs_dir: Path | str,
+    preview_path: Path | str,
+    fps: int,
+    colormap: bool = False,
+) -> None:
+    """
+    Encode a human-visible preview video from RGB-encoded depth frames.
+    
+    This function reads RGB-encoded depth PNG frames (where R=high byte, G=low byte),
+    reconstructs the uint16 depth values, normalizes them to 0-255 for visualization
+    using per-frame min/max normalization, and encodes as a standard RGB video.
+    
+    The preview video is saved separately and does not interfere with dataset loading.
+    It's useful for human inspection/debugging but should not be used for training.
+    
+    Args:
+        imgs_dir: Directory containing frame_XXXXXX.png files (RGB-encoded depth)
+        preview_path: Output path for the preview video (.mp4)
+        fps: Frames per second for the video
+        colormap: If True, applies VIRIDIS colormap for better visualization
+    
+    Raises:
+        FileNotFoundError: If no PNG frames found in imgs_dir
+        OSError: If video encoding fails
+    """
+    imgs_dir = Path(imgs_dir)
+    preview_path = Path(preview_path)
+    
+    # Get input frames
+    template = "frame_" + ("[0-9]" * 6) + ".png"
+    input_list = sorted(
+        glob.glob(str(imgs_dir / template)), key=lambda x: int(x.split("_")[-1].split(".")[0])
+    )
+    
+    if len(input_list) == 0:
+        raise FileNotFoundError(f"No images found in {imgs_dir}.")
+    
+    # Get frame dimensions from first frame
+    dummy_image = Image.open(input_list[0])
+    width, height = dummy_image.size
+    
+    # Create output directory
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Set logging level
+    logging.getLogger("libav").setLevel(av.logging.ERROR)
+    
+    # Create and open output file
+    with av.open(str(preview_path), "w") as output:
+        # Use h264 codec for better compatibility with video players
+        output_stream = output.add_stream("h264", fps)
+        output_stream.pix_fmt = "yuv420p"
+        output_stream.width = width
+        output_stream.height = height
+        
+        # Process each frame
+        for input_path in input_list:
+            # Load RGB-encoded depth frame
+            rgb_image = Image.open(input_path)
+            rgb_array = np.array(rgb_image)  # (H, W, 3)
+            
+            # Reconstruct uint16 depth: depth = (R << 8) | G
+            depth = (rgb_array[:, :, 0].astype(np.uint16) << 8) | rgb_array[:, :, 1].astype(np.uint16)
+            
+            # Normalize to 0-255 for visualization using per-frame min/max normalization
+            # Note: We must reconstruct first because RGB channels are high/low bytes, not actual depth values
+            # Normalizing RGB directly would give incorrect results
+            nonzero_mask = depth > 0
+            if nonzero_mask.any():
+                # Normalize only nonzero pixels, keep zeros as black
+                vis_array = np.zeros_like(depth, dtype=np.uint8)
+                vis_array[nonzero_mask] = cv2.normalize(
+                    depth[nonzero_mask], None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                )
+            else:
+                # No valid depth, output all zeros
+                vis_array = np.zeros_like(depth, dtype=np.uint8)
+            
+            # Apply colormap if requested
+            if colormap:
+                colored = cv2.applyColorMap(vis_array, cv2.COLORMAP_VIRIDIS)  # Returns BGR
+                vis_rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+                vis_image = Image.fromarray(vis_rgb)
+            else:
+                # Convert grayscale to RGB (3 channels) for video encoding
+                vis_image = Image.fromarray(vis_array, mode="L").convert("RGB")
+            
+            # Encode frame
+            input_frame = av.VideoFrame.from_image(vis_image)
+            packet = output_stream.encode(input_frame)
+            if packet:
+                output.mux(packet)
+        
+        # Flush the encoder
+        packet = output_stream.encode()
+        if packet:
+            output.mux(packet)
+    
+    # Reset logging level
+    av.logging.restore_default_callback()
+    
+    if not preview_path.exists():
+        raise OSError(f"Preview video encoding did not work. File not found: {preview_path}.")
 
 
 @dataclass

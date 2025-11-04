@@ -68,6 +68,7 @@ from lerobot.datasets.utils import (
 from lerobot.datasets.video_utils import (
     VideoFrame,
     decode_video_frames,
+    encode_depth_preview_frames,
     encode_video_frames,
     get_safe_default_codec,
     get_video_info,
@@ -974,7 +975,24 @@ class LeRobotDataset(torch.utils.data.Dataset):
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
             ).parent
+            
+            # Encode the main data video (preserves full precision for ML)
             encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+            
+            # For depth features, also create a human-visible preview video
+            # Check if this is a depth feature by naming convention (_depth suffix)
+            is_depth = key.endswith("_depth")
+            
+            if is_depth:
+                # Create preview video path using same structure as main video but with _preview suffix on key
+                # Format: videos/chunk-XXX/key_preview/episode_XXXXXX.mp4
+                preview_path = self.root / self.meta.get_video_file_path(episode_index, f"{key}_preview")
+                try:
+                    encode_depth_preview_frames(img_dir, preview_path, self.fps, colormap=True)
+                except Exception as e:
+                    # Log warning but don't fail the main encoding
+                    logging.warning(f"Failed to create preview video for {key} episode {episode_index}: {e}")
+            
             shutil.rmtree(img_dir)
 
         # Update video info (only needed when first episode is encoded since it reads from episode 0)
