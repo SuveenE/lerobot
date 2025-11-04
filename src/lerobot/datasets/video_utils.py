@@ -515,3 +515,56 @@ class VideoEncodingManager:
             logging.debug(f"Images directory is not empty, containing {len(png_files)} PNG files")
 
         return False  # Don't suppress the original exception
+
+
+def reconstruct_depth_from_rgb(frames: torch.Tensor) -> torch.Tensor:
+    """
+    Reconstruct 16-bit depth from RGB-encoded video frames.
+    
+    DECODING EXPLANATION:
+    When depth images are encoded into videos, each 16-bit depth value is split into
+    two 8-bit values stored in RGB channels:
+    - R channel = high byte (upper 8 bits, represents values 0-255 * 256)
+    - G channel = low byte (lower 8 bits, represents values 0-255)
+    - B channel = 0 (unused)
+    
+    To reconstruct the original depth value:
+    1. Read R channel (high byte) and multiply by 256 (shift left 8 bits)
+    2. Read G channel (low byte) and add it
+    3. Result = (high_byte * 256) + low_byte
+    
+    Example reconstruction:
+    - R channel = 19, G channel = 136
+    - Reconstructed depth = (19 * 256) + 136 = 4864 + 136 = 5000 millimeters ✓
+    
+    This preserves full 16-bit precision (0-65535) instead of losing precision
+    by normalizing to 8-bit (0-255).
+    
+    Args:
+        frames: Tensor of shape (..., C, H, W) where C=3, values in [0, 1] float32
+                R channel contains high byte, G channel contains low byte
+                Can handle batches: (N, C, H, W) or single: (C, H, W)
+    
+    Returns:
+        Tensor of shape (..., H, W) with uint16 depth values (millimeters)
+    """
+    # Handle batch dimension
+    if frames.ndim == 3:  # (C, H, W)
+        frames = frames.unsqueeze(0)
+        squeeze_output = True
+    else:
+        squeeze_output = False
+    
+    # Convert from [0, 1] float32 back to uint8 [0, 255]
+    # Video decoders return values in [0, 1] range, so multiply by 255 to get bytes
+    r = (frames[:, 0, :, :] * 255).clamp(0, 255).byte()  # High byte (R channel)
+    g = (frames[:, 1, :, :] * 255).clamp(0, 255).byte()  # Low byte (G channel)
+    
+    # Reconstruct uint16: depth = (high_byte * 256) + low_byte
+    # Left shift by 8 bits = multiply by 256, then OR with low byte = add
+    depth = (r.to(torch.uint16) << 8) | g.to(torch.uint16)
+    
+    if squeeze_output:
+        depth = depth.squeeze(0)
+    
+    return depth

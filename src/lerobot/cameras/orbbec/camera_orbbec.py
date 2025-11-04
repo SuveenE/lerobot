@@ -39,9 +39,6 @@ from ...errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 logger = logging.getLogger(__name__)
 
-MIN_DEPTH = 20  # 20mm
-MAX_DEPTH = 10000  # 10000mm
-
 # Shared Orbbec SDK Context for all camera instances
 # The Orbbec SDK requires a single Context to be shared across all devices
 # Creating multiple Context objects causes segmentation faults
@@ -415,8 +412,7 @@ class OrbbecCamera(Camera):
         
         # Process depth data following Orbbec SDK example
         depth_data = np.frombuffer(depth_frame.get_data(), dtype=np.uint16).reshape((height, width))
-        depth_data = depth_data.astype(np.float32) * scale
-        depth_data = np.where((depth_data > MIN_DEPTH) & (depth_data < MAX_DEPTH), depth_data, 0).astype(np.uint16)
+        depth_data = (depth_data.astype(np.float32) * scale).astype(np.uint16)
         
         logger.debug(f"Orbbec depth scale: {scale}, depth range: {depth_data[depth_data > 0].min() if depth_data.any() else 0}-{depth_data.max()}")
         
