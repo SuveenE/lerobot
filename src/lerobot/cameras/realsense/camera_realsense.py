@@ -352,6 +352,11 @@ class RealSenseCamera(Camera):
             raise RuntimeError(f"{self} read_depth failed (status={ret}).")
 
         depth_frame = frame.get_depth_frame()
+        if not depth_frame:
+            raise RuntimeError(f"{self} read_depth failed: depth frame is None.")
+        
+        # Extract depth data from pyrealsense2 depth frame
+        # z16 format returns uint16 values directly in millimeters
         depth_map = np.asanyarray(depth_frame.get_data())
 
         depth_map_processed = self._postprocess_image(
@@ -444,7 +449,8 @@ class RealSenseCamera(Camera):
             )
 
         processed_image = image
-        if self.color_mode == ColorMode.BGR:
+        # Only apply color conversion for color frames, not depth frames
+        if not depth_frame and self.color_mode == ColorMode.BGR:
             processed_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
         if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180]:
@@ -489,9 +495,15 @@ class RealSenseCamera(Camera):
                 if self.use_depth:
                     depth_frame = frameset.get_depth_frame()
                     if depth_frame:
+                        # Extract depth data from pyrealsense2 depth frame
+                        # z16 format returns uint16 values directly in millimeters
                         depth_map = np.asanyarray(depth_frame.get_data())
                         depth_image = self._postprocess_image(
                             depth_map, depth_frame=True)
+                        # Log center pixel depth in mm
+                        h, w = depth_image.shape
+                        center_depth_mm = depth_image[h // 2, w // 2]
+                        logger.info(f"{self} center depth: {center_depth_mm} mm")
 
                 # Atomically publish both results under the same lock
                 set_color_event = False
@@ -583,7 +595,7 @@ class RealSenseCamera(Camera):
 
         return frame
 
-    def async_read_depth(self, timeout_ms: float = 200) -> np.ndarray:
+    def async_read_depth(self, timeout_ms: float = 200) -> tuple[np.ndarray, np.ndarray]:
         """
         Reads the latest available depth frame asynchronously.
 
@@ -596,9 +608,11 @@ class RealSenseCamera(Camera):
                 to become available. Defaults to 200ms (0.2 seconds).
 
         Returns:
-            np.ndarray: The latest captured depth frame as a NumPy array (height, width)
-                of type `np.uint16` (raw depth values in millimeters), processed according
-                to configuration (rotation applied).
+            tuple[np.ndarray, np.ndarray]: A tuple containing:
+                - The latest captured color frame (height, width, channels)
+                - The latest captured depth frame as a NumPy array (height, width)
+                  of type `np.uint16` (raw depth values in millimeters), processed according
+                  to configuration (rotation applied).
 
         Raises:
             DeviceNotConnectedError: If the camera is not connected.

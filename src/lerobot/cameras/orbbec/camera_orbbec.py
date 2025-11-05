@@ -488,6 +488,10 @@ class OrbbecCamera(Camera):
                     d = frameset.get_depth_frame()
                     if d is not None:
                         depth_image = self._process_depth_frame(d)
+                        # Log center pixel depth in mm
+                        h, w = depth_image.shape
+                        center_depth_mm = depth_image[h // 2, w // 2]
+                        logger.info(f"{self} center depth: {center_depth_mm} mm")
 
                 set_color_event = False
                 set_depth_event = False
