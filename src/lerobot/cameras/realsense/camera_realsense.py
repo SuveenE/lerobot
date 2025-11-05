@@ -116,11 +116,13 @@ class RealSenseCamera(Camera):
 
         self.config = config
 
-        if config.serial_number_or_name.isdigit():
-            self.serial_number = config.serial_number_or_name
+        # Ensure serial_number_or_name is a string (handles case where JSON parsing returns int)
+        serial_str = str(config.serial_number_or_name) if not isinstance(config.serial_number_or_name, str) else config.serial_number_or_name
+        
+        if serial_str.isdigit():
+            self.serial_number = serial_str
         else:
-            self.serial_number = self._find_serial_number_from_name(
-                config.serial_number_or_name)
+            self.serial_number = self._find_serial_number_from_name(serial_str)
 
         self.fps = config.fps
         self.color_mode = config.color_mode
@@ -180,9 +182,17 @@ class RealSenseCamera(Camera):
         except RuntimeError as e:
             self.rs_profile = None
             self.rs_pipeline = None
-            raise ConnectionError(
-                f"Failed to open {self}.Run `lerobot-find-cameras realsense` to find available cameras."
-            ) from e
+            config_str = f"serial={self.serial_number}"
+            if self.width and self.height and self.fps:
+                config_str += f", resolution={self.capture_width}x{self.capture_height}@{self.fps}fps"
+                if self.use_depth:
+                    config_str += " (with depth)"
+            error_msg = (
+                f"Failed to open {self} with configuration: {config_str}. "
+                f"Error: {str(e)}. "
+                f"Run `lerobot-find-cameras realsense` to find available cameras and supported resolutions."
+            )
+            raise ConnectionError(error_msg) from e
 
         self._configure_capture_settings()
 
