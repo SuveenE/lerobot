@@ -278,7 +278,8 @@ def test_multiple_cameras(camera_type: str, device_ids: list[str], args: argpars
                 
                 # Save depth visualization using matplotlib grayscale colormap
                 depth_path = output_dir / f"{camera_type}_{safe_device_id}_depth.png"
-                plt.imsave(depth_path, depth, cmap='Greys_r')
+                processed_depth = cv2.normalize(depth, None, 0, 255, norm_type=cv2.NORM_MINMAX)
+                plt.imsave(depth_path, processed_depth, cmap='Greys_r')
                 print(f"    Saved depth: {depth_path}")
                 
                 # Save raw depth
