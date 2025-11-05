@@ -101,82 +101,113 @@ os.makedirs(output_dir, exist_ok=True)
 # Capture frames and save them (like the C++ example)
 for frame_num in range(10):
     # Wait for frames (like pipe.wait_for_frames() in C++)
-    frames = pipeline.wait_for_frames()
+    frameset = pipeline.wait_for_frames()
     
-    # Process each frame in the frameset
-    for frame in frames:
-        # Check if it's a video frame (like vf = frame.as<rs2::video_frame>() in C++)
-        if frame.is_video_frame():
-            vf = frame.as_video_frame()
-            stream_type = vf.get_profile().stream_type()
-            width = vf.get_width()
-            height = vf.get_height()
-            
-            # Process frames and save RGB, raw depth, and colorized depth
-            if stream_type == rs.stream.color:
-                # Color frame - get data directly
-                frame_data = np.asanyarray(vf.get_data())
-                frame_format = vf.get_profile().format()
-                
-                print(f"  Frame {frame_num}, Color stream: "
-                      f"Size: {width}x{height}, Format: {frame_format}, "
-                      f"Data shape: {frame_data.shape}")
-                
-                # Convert to RGB if needed and save
-                if frame_format == rs.format.rgb8:
-                    rgb_image = np.resize(frame_data, (height, width, 3))
-                elif frame_format == rs.format.yuyv:
-                    # Handle YUY2 conversion if needed
-                    yuyv_image = np.resize(frame_data, (height, width, 2))
-                    rgb_image = cv2.cvtColor(yuyv_image, cv2.COLOR_YUV2RGB_YUYV)
-                else:
-                    rgb_image = np.resize(frame_data, (height, width, 3))
-                
-                # Save RGB image (convert to BGR for OpenCV imwrite)
-                rgb_bgr = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
-                rgb_filename = f"{output_dir}/rs-rgb-{frame_num}.png"
-                cv2.imwrite(rgb_filename, rgb_bgr)
-                print(f"    Saved RGB: {rgb_filename}")
-                
-            elif stream_type == rs.stream.depth:
-                # Depth frame - save both raw and colorized versions
-                raw_depth_data = np.asanyarray(vf.get_data())
-                
-                print(f"  Frame {frame_num}, Depth stream: "
-                      f"Size: {width}x{height}, Format: {vf.get_profile().format()}, "
-                      f"Data shape: {raw_depth_data.shape}, dtype: {raw_depth_data.dtype}")
-                
-                # Save raw depth (16-bit PNG)
-                raw_depth_filename = f"{output_dir}/rs-depth-raw-{frame_num}.png"
-                cv2.imwrite(raw_depth_filename, raw_depth_data)
-                print(f"    Saved raw depth: {raw_depth_filename}")
-                
-                # Colorize depth using RealSense colorizer (like color_map.process(frame) in C++)
-                colorized_depth = colorizer.colorize(vf)
-                colorized_data = np.asanyarray(colorized_depth.get_data())
-                
-                # Save colorized depth (RGB encoded)
-                colorized_filename = f"{output_dir}/rs-depth-colorized-{frame_num}.png"
-                cv2.imwrite(colorized_filename, colorized_data)
-                print(f"    Saved colorized depth: {colorized_filename}")
-                
-                # Also save custom RGB-encoded depth (matching image_writer.py encoding)
-                # Encode 16-bit depth into RGB channels to preserve precision:
-                # - R channel = high byte (upper 8 bits)
-                # - G channel = low byte (lower 8 bits)
-                # - B channel = 0 (unused)
-                # This is lossless encoding that preserves full 16-bit precision
-                if raw_depth_data.dtype == np.uint16:
-                    high_byte = (raw_depth_data >> 8).astype(np.uint8)  # Upper 8 bits
-                    low_byte = (raw_depth_data & 0xFF).astype(np.uint8)  # Lower 8 bits
-                    zero_channel = np.zeros_like(high_byte, dtype=np.uint8)  # B channel = 0
-                    # Stack as RGB: (H, W, 3)
-                    rgb_encoded_depth = np.stack([high_byte, low_byte, zero_channel], axis=-1)
-                    custom_rgb_filename = f"{output_dir}/rs-depth-rgb-encoded-{frame_num}.png"
-                    cv2.imwrite(custom_rgb_filename, rgb_encoded_depth)
-                    print(f"    Saved RGB-encoded depth: {custom_rgb_filename}")
-                else:
-                    print(f"    Warning: Depth dtype is {raw_depth_data.dtype}, expected uint16 for RGB encoding")
+    # Get color and depth frames directly from frameset (cleaner approach)
+    color_frame = frameset.get_color_frame()
+    depth_frame = frameset.get_depth_frame()
+    
+    # Process color frame
+    if color_frame:
+        width = color_frame.get_width()
+        height = color_frame.get_height()
+        frame_format = color_frame.get_profile().format()
+        frame_data = np.asanyarray(color_frame.get_data())
+        
+        print(f"  Frame {frame_num}, Color stream: "
+              f"Size: {width}x{height}, Format: {frame_format}, "
+              f"Data shape: {frame_data.shape}")
+        
+        # Convert to RGB if needed and save
+        if frame_format == rs.format.rgb8:
+            rgb_image = np.resize(frame_data, (height, width, 3))
+        elif frame_format == rs.format.yuyv:
+            # Handle YUY2 conversion if needed
+            yuyv_image = np.resize(frame_data, (height, width, 2))
+            rgb_image = cv2.cvtColor(yuyv_image, cv2.COLOR_YUV2RGB_YUYV)
+        else:
+            rgb_image = np.resize(frame_data, (height, width, 3))
+        
+        # Save RGB image (convert to BGR for OpenCV imwrite)
+        rgb_bgr = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+        rgb_filename = f"{output_dir}/rs-rgb-{frame_num}.png"
+        cv2.imwrite(rgb_filename, rgb_bgr)
+        print(f"    Saved RGB: {rgb_filename}")
+    
+    # Process depth frame
+    if depth_frame:
+        width = depth_frame.get_width()
+        height = depth_frame.get_height()
+        raw_depth_data = np.asanyarray(depth_frame.get_data())
+        
+        # Reshape depth data to 2D array (height, width)
+        raw_depth_image = np.resize(raw_depth_data, (height, width))
+        
+        # Get depth units (conversion factor from raw pixels to meters)
+        # Typically 0.001 for RealSense (raw pixel * 0.001 = distance in meters)
+        depth_units = depth_frame.get_units()
+        
+        # Convert raw depth matrix to distance matrix (in meters)
+        # Similar to Orbbec: depth_data * depth_scale = distance in millimeters
+        # For RealSense: raw_pixel * depth_units = distance in meters
+        distance_matrix_m = raw_depth_image.astype(np.float32) * depth_units
+        
+        # Convert to millimeters for storage and display (like Orbbec)
+        distance_matrix_mm = distance_matrix_m * 1000.0
+        
+        # Convert back to uint16 for saving (preserve precision, values in millimeters)
+        depth_image = distance_matrix_mm.astype(np.uint16)
+        
+        # Get center point coordinates
+        center_x = width // 2
+        center_y = height // 2
+        
+        # Get distance at center point from distance matrix (in meters)
+        center_distance_m = distance_matrix_m[center_y, center_x]
+        center_distance_mm = distance_matrix_mm[center_y, center_x]
+        
+        # Also verify using get_distance() API for comparison
+        center_distance_m_api = depth_frame.get_distance(center_x, center_y)
+        
+        print(f"  Frame {frame_num}, Depth stream: "
+              f"Size: {width}x{height}, Format: {depth_frame.get_profile().format()}, "
+              f"Units: {depth_units}, Data shape: {depth_image.shape}, dtype: {depth_image.dtype}")
+        print(f"    Center point ({center_x}, {center_y}) distance: "
+              f"{center_distance_m:.3f} m ({center_distance_mm:.1f} mm) [from distance matrix]")
+        print(f"    Verified with get_distance(): {center_distance_m_api:.3f} m")
+        
+        # Save distance matrix as depth (16-bit PNG, values in millimeters)
+        depth_filename = f"{output_dir}/rs-depth-{frame_num}.png"
+        cv2.imwrite(depth_filename, depth_image)
+        print(f"    Saved depth (distance matrix in mm): {depth_filename}")
+        
+        # Colorize depth using RealSense colorizer (like color_map.process(frame) in C++)
+        colorized_depth = colorizer.colorize(depth_frame)
+        colorized_data = np.asanyarray(colorized_depth.get_data())
+        
+        # Save colorized depth (RGB encoded)
+        colorized_filename = f"{output_dir}/rs-depth-colorized-{frame_num}.png"
+        cv2.imwrite(colorized_filename, colorized_data)
+        print(f"    Saved colorized depth: {colorized_filename}")
+        
+        # Also save custom RGB-encoded depth (matching image_writer.py encoding)
+        # Encode 16-bit depth into RGB channels to preserve precision:
+        # - R channel = high byte (upper 8 bits)
+        # - G channel = low byte (lower 8 bits)
+        # - B channel = 0 (unused)
+        # This is lossless encoding that preserves full 16-bit precision
+        # Note: depth_image now contains distance values in millimeters
+        if depth_image.dtype == np.uint16:
+            high_byte = (depth_image >> 8).astype(np.uint8)  # Upper 8 bits
+            low_byte = (depth_image & 0xFF).astype(np.uint8)  # Lower 8 bits
+            zero_channel = np.zeros_like(high_byte, dtype=np.uint8)  # B channel = 0
+            # Stack as RGB: (H, W, 3)
+            rgb_encoded_depth = np.stack([high_byte, low_byte, zero_channel], axis=-1)
+            custom_rgb_filename = f"{output_dir}/rs-depth-rgb-encoded-{frame_num}.png"
+            cv2.imwrite(custom_rgb_filename, rgb_encoded_depth)
+            print(f"    Saved RGB-encoded depth (distance in mm): {custom_rgb_filename}")
+        else:
+            print(f"    Warning: Depth dtype is {depth_image.dtype}, expected uint16 for RGB encoding")
 
 # Stop pipeline
 pipeline.stop()
