@@ -12,7 +12,7 @@ import cv2
 import os
 
 # Configuration parameters (as variables, not flags)
-DEVICE_INDEX = 0  # Set to device index (0, 1, 2, etc.), or None to use first device
+DEVICE_INDEX = 1  # Set to device index (0, 1, 2, etc.), or None to use first device
 WIDTH = 640
 HEIGHT = 480
 FPS = 30
