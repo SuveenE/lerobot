@@ -399,19 +399,36 @@ class RealSenseCamera(Camera):
             )
             
             if color_profile is not None:
-                # Use the found compatible profile
-                rs_config.enable_stream(color_profile)
-                if self.use_depth and depth_profile is not None:
-                    rs_config.enable_stream(depth_profile)
-                elif self.use_depth:
-                    # Depth profile not found, try fallback to default or explicit config
-                    logger.warning(
-                        f"Exact depth profile not found for {self.capture_width}x{self.capture_height}@{self.fps}fps, "
-                        f"trying explicit configuration"
-                    )
-                    rs_config.enable_stream(
-                        rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
-                    )
+                # Extract parameters from the found profile and use explicit configuration
+                vprofile = color_profile.as_video_stream_profile()
+                rs_config.enable_stream(
+                    rs.stream.color,
+                    vprofile.width(),
+                    vprofile.height(),
+                    vprofile.format(),
+                    vprofile.fps()
+                )
+                
+                if self.use_depth:
+                    if depth_profile is not None:
+                        # Extract parameters from depth profile
+                        dprofile = depth_profile.as_video_stream_profile()
+                        rs_config.enable_stream(
+                            rs.stream.depth,
+                            dprofile.width(),
+                            dprofile.height(),
+                            dprofile.format(),
+                            dprofile.fps()
+                        )
+                    else:
+                        # Depth profile not found, try fallback to explicit config
+                        logger.warning(
+                            f"Exact depth profile not found for {self.capture_width}x{self.capture_height}@{self.fps}fps, "
+                            f"trying explicit configuration"
+                        )
+                        rs_config.enable_stream(
+                            rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
+                        )
             else:
                 # Fallback to explicit configuration
                 rs_config.enable_stream(
