@@ -357,20 +357,34 @@ class RealSenseCamera(Camera):
             color_profile = None
             depth_profile = None
             
-            # Find matching color profile
+            # Find matching color profile - prefer YUY2 format (as per datasheet)
             if color_sensor:
                 profiles = color_sensor.get_stream_profiles()
+                # First pass: look for YUY2 format specifically
                 for profile in profiles:
                     if profile.is_video_stream_profile():
                         vprofile = profile.as_video_stream_profile()
                         if (vprofile.stream_type() == rs.stream.color and
                             vprofile.width() == requested_width and
                             vprofile.height() == requested_height and
-                            vprofile.fps() == requested_fps):
+                            vprofile.fps() == requested_fps and
+                            vprofile.format() == rs.format.yuyv):
                             color_profile = profile
                             break
+                
+                # If YUY2 not found, fall back to any matching resolution/FPS
+                if color_profile is None:
+                    for profile in profiles:
+                        if profile.is_video_stream_profile():
+                            vprofile = profile.as_video_stream_profile()
+                            if (vprofile.stream_type() == rs.stream.color and
+                                vprofile.width() == requested_width and
+                                vprofile.height() == requested_height and
+                                vprofile.fps() == requested_fps):
+                                color_profile = profile
+                                break
             
-            # Find matching depth profile (if needed)
+            # Find matching depth profile (if needed) - ensure Z16 format
             if self.use_depth and depth_sensor:
                 profiles = depth_sensor.get_stream_profiles()
                 for profile in profiles:
@@ -379,10 +393,33 @@ class RealSenseCamera(Camera):
                         if (vprofile.stream_type() == rs.stream.depth and
                             vprofile.width() == requested_width and
                             vprofile.height() == requested_height and
-                            vprofile.fps() == requested_fps):
+                            vprofile.fps() == requested_fps and
+                            vprofile.format() == rs.format.z16):
                             depth_profile = profile
                             break
             
+            # print both profiles verbosely
+            # Log selected color profile details
+            if color_profile is not None:
+                logger.info(
+                    f"Color profile: {color_profile} | "
+                    f"Format: {color_profile.format()} | "
+                    f"Resolution: {color_profile.width()}x{color_profile.height()} | "
+                    f"FPS: {color_profile.fps()}"
+                )
+            else:
+                logger.info("Color profile: None")
+
+            # Log selected depth profile details
+            if depth_profile is not None:
+                logger.info(
+                    f"Depth profile: {depth_profile} | "
+                    f"Format: {depth_profile.format()} | "
+                    f"Resolution: {depth_profile.width()}x{depth_profile.height()} | "
+                    f"FPS: {depth_profile.fps()}"
+                )
+            else:
+                logger.info("Depth profile: None")
             return color_profile, depth_profile
         except Exception as e:
             logger.debug(f"Error querying stream profiles: {e}")
@@ -430,9 +467,9 @@ class RealSenseCamera(Camera):
                             rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
                         )
             else:
-                # Fallback to explicit configuration
+                # Fallback to explicit configuration - use YUY2 for color (16 bits) and Z16 for depth
                 rs_config.enable_stream(
-                    rs.stream.color, self.capture_width, self.capture_height, rs.format.rgb8, self.fps
+                    rs.stream.color, self.capture_width, self.capture_height, rs.format.yuyv, self.fps
                 )
                 if self.use_depth:
                     rs_config.enable_stream(
@@ -554,7 +591,20 @@ class RealSenseCamera(Camera):
             raise RuntimeError(f"{self} read failed (status={ret}).")
 
         color_frame = frame.get_color_frame()
-        color_image_raw = np.asanyarray(color_frame.get_data())
+        frame_format = color_frame.get_profile().format()
+        
+        # Handle YUY2 format conversion (16 bits per pixel)
+        if frame_format == rs.format.yuyv:
+            # YUY2 is 16 bits per pixel, so reshape to (height, width, 2) for YUYV conversion
+            color_image_raw = np.asanyarray(color_frame.get_data())
+            height = color_frame.get_height()
+            width = color_frame.get_width()
+            # Reshape YUY2 data and convert to RGB
+            yuyv_image = color_image_raw.reshape((height, width, 2))
+            color_image_raw = cv2.cvtColor(yuyv_image, cv2.COLOR_YUV2RGB_YUYV)
+        else:
+            # For other formats (RGB8, etc.), use data directly
+            color_image_raw = np.asanyarray(color_frame.get_data())
 
         color_image_processed = self._postprocess_image(
             color_image_raw, color_mode)
@@ -644,7 +694,21 @@ class RealSenseCamera(Camera):
 
                 color_frame = frameset.get_color_frame()
                 if color_frame:
-                    color_image_raw = np.asanyarray(color_frame.get_data())
+                    frame_format = color_frame.get_profile().format()
+                    
+                    # Handle YUY2 format conversion (16 bits per pixel)
+                    if frame_format == rs.format.yuyv:
+                        # YUY2 is 16 bits per pixel, so reshape to (height, width, 2) for YUYV conversion
+                        color_image_raw = np.asanyarray(color_frame.get_data())
+                        height = color_frame.get_height()
+                        width = color_frame.get_width()
+                        # Reshape YUY2 data and convert to RGB
+                        yuyv_image = color_image_raw.reshape((height, width, 2))
+                        color_image_raw = cv2.cvtColor(yuyv_image, cv2.COLOR_YUV2RGB_YUYV)
+                    else:
+                        # For other formats (RGB8, etc.), use data directly
+                        color_image_raw = np.asanyarray(color_frame.get_data())
+                    
                     color_image = self._postprocess_image(color_image_raw)
 
                 if self.use_depth:
