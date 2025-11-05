@@ -413,47 +413,36 @@ class RealSenseCamera(Camera):
         rs.config.enable_device(rs_config, self.serial_number)
 
         if self.width and self.height and self.fps:
-            # Try to find compatible stream profiles first
-            color_profile, depth_profile = self._find_compatible_stream_profiles(
-                self.capture_width, self.capture_height, self.fps
-            )
-            
-            # REQUIRED: RGB8 format for color
-            if color_profile is not None:
-                # Extract parameters from the found profile and use explicit configuration
-                vprofile = color_profile.as_video_stream_profile()
+            # REQUIRED: RGB8 format for color - try to enable directly like minimal example
+            try:
                 rs_config.enable_stream(
                     rs.stream.color,
-                    vprofile.width(),
-                    vprofile.height(),
-                    vprofile.format(),
-                    vprofile.fps()
+                    self.capture_width,
+                    self.capture_height,
+                    rs.format.rgb8,
+                    self.fps
                 )
-            else:
-                # RGB8 profile not found - raise error
+            except RuntimeError as e:
                 raise ValueError(
                     f"{self} does not support RGB8 format at {self.capture_width}x{self.capture_height}@{self.fps}fps. "
-                    f"RGB8 format is required for color stream. "
+                    f"RGB8 format is required for color stream. Error: {e}. "
                     f"Run `lerobot-find-cameras realsense` to see available formats."
                 )
             
             # REQUIRED: Z16 format for depth (if depth is enabled)
             if self.use_depth:
-                if depth_profile is not None:
-                    # Extract parameters from depth profile
-                    dprofile = depth_profile.as_video_stream_profile()
+                try:
                     rs_config.enable_stream(
                         rs.stream.depth,
-                        dprofile.width(),
-                        dprofile.height(),
-                        dprofile.format(),
-                        dprofile.fps()
+                        self.capture_width,
+                        self.capture_height,
+                        rs.format.z16,
+                        self.fps
                     )
-                else:
-                    # Z16 profile not found - raise error
+                except RuntimeError as e:
                     raise ValueError(
                         f"{self} does not support Z16 format at {self.capture_width}x{self.capture_height}@{self.fps}fps. "
-                        f"Z16 format is required for depth stream. "
+                        f"Z16 format is required for depth stream. Error: {e}. "
                         f"Run `lerobot-find-cameras realsense` to see available formats."
                     )
         else:
