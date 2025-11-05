@@ -182,16 +182,52 @@ class RealSenseCamera(Camera):
         except RuntimeError as e:
             self.rs_profile = None
             self.rs_pipeline = None
+            
+            # Try to get available stream profiles to suggest alternatives
+            suggested_resolutions = []
+            try:
+                context = rs.context()
+                devices = context.query_devices()
+                for device in devices:
+                    if device.get_info(rs.camera_info.serial_number) == self.serial_number:
+                        sensors = device.query_sensors()
+                        for sensor in sensors:
+                            profiles = sensor.get_stream_profiles()
+                            for profile in profiles:
+                                if profile.is_video_stream_profile():
+                                    vprofile = profile.as_video_stream_profile()
+                                    stream_type = vprofile.stream_type()
+                                    if stream_type == rs.stream.color or (self.use_depth and stream_type == rs.stream.depth):
+                                        suggested_resolutions.append(
+                                            f"{vprofile.width()}x{vprofile.height()}@{vprofile.fps()}fps"
+                                        )
+                        break
+            except Exception:
+                pass  # If we can't query profiles, just skip the suggestion
+            
             config_str = f"serial={self.serial_number}"
             if self.width and self.height and self.fps:
                 config_str += f", resolution={self.capture_width}x{self.capture_height}@{self.fps}fps"
                 if self.use_depth:
                     config_str += " (with depth)"
+            
             error_msg = (
                 f"Failed to open {self} with configuration: {config_str}. "
-                f"Error: {str(e)}. "
-                f"Run `lerobot-find-cameras realsense` to find available cameras and supported resolutions."
+                f"Error: {str(e)}."
             )
+            
+            if suggested_resolutions:
+                # Remove duplicates and sort
+                unique_resolutions = sorted(set(suggested_resolutions))
+                error_msg += (
+                    f"\nSupported resolutions for this camera include: {', '.join(unique_resolutions[:10])}"
+                    f"{' (showing first 10)' if len(unique_resolutions) > 10 else ''}."
+                )
+            
+            error_msg += (
+                f"\nRun `lerobot-find-cameras realsense` to find all available cameras and supported resolutions."
+            )
+            
             raise ConnectionError(error_msg) from e
 
         self._configure_capture_settings()
