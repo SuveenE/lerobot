@@ -493,6 +493,44 @@ class RealSenseCamera(Camera):
                 self.width, self.height = actual_width, actual_height
                 self.capture_width, self.capture_height = actual_width, actual_height
 
+    def _process_depth_frame(self, depth_frame: Any) -> np.ndarray:
+        """Process RealSense depth frame to convert get_data() units to distance values.
+        
+        Similar to Orbbec's _process_depth_frame, converts depth data from get_data()
+        to distance values in millimeters using get_units() scaling factor.
+        get_units() provides the scaling factor to convert from get_data() units to meters.
+        
+        Args:
+            depth_frame: RealSense depth frame
+            
+        Returns:
+            np.ndarray: Depth map as uint16 array with distance values in millimeters
+        """
+        width = depth_frame.get_width()
+        height = depth_frame.get_height()
+        
+        # Get depth units: scaling factor to convert from get_data() units to meters
+        # get_units() provides the scaling factor to use when converting from get_data() units to meters
+        depth_units = depth_frame.get_units()
+        
+        # Extract raw depth data from get_data() (units depend on camera format)
+        raw_depth_data = np.asanyarray(depth_frame.get_data())
+        raw_depth_image = np.resize(raw_depth_data, (height, width))
+        
+        # Convert get_data() units to distance matrix (in meters)
+        # Similar to Orbbec: depth_data * depth_scale = distance in millimeters
+        # For RealSense: get_data() * depth_units = distance in meters
+        distance_matrix_m = raw_depth_image.astype(np.float32) * depth_units
+        
+        # Convert to millimeters for storage (like Orbbec output format)
+        distance_matrix_mm = distance_matrix_m * 1000.0
+        
+        # Convert back to uint16 for storage (preserve precision, values in millimeters)
+        depth_data = distance_matrix_mm.astype(np.uint16)
+        
+        depth_data = self._postprocess_image(depth_data, depth_frame=True)
+        return depth_data
+
     def read_depth(self, timeout_ms: int = 200) -> np.ndarray:
         """
         Reads a single frame (depth) synchronously from the camera.
@@ -505,7 +543,7 @@ class RealSenseCamera(Camera):
 
         Returns:
             np.ndarray: The depth map as a NumPy array (height, width)
-                  of type `np.uint16` (raw depth values in millimeters) and rotation.
+                  of type `np.uint16` (distance values in millimeters) and rotation.
 
         Raises:
             DeviceNotConnectedError: If the camera is not connected.
@@ -534,12 +572,8 @@ class RealSenseCamera(Camera):
         if not depth_frame:
             raise RuntimeError(f"{self} read_depth failed: depth frame is None.")
         
-        # Extract depth data from pyrealsense2 depth frame
-        # z16 format returns uint16 values directly in millimeters
-        depth_map = np.asanyarray(depth_frame.get_data())
-
-        depth_map_processed = self._postprocess_image(
-            depth_map, depth_frame=True)
+        # Process depth frame to convert raw pixels to distance values (millimeters)
+        depth_map_processed = self._process_depth_frame(depth_frame)
 
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
         logger.debug(f"{self} read_depth took: {read_duration_ms:.1f}ms")
@@ -695,11 +729,8 @@ class RealSenseCamera(Camera):
                 if self.use_depth:
                     depth_frame = frameset.get_depth_frame()
                     if depth_frame:
-                        # Extract depth data from pyrealsense2 depth frame
-                        # z16 format returns uint16 values directly in millimeters
-                        depth_map = np.asanyarray(depth_frame.get_data())
-                        depth_image = self._postprocess_image(
-                            depth_map, depth_frame=True)
+                        # Process depth frame to convert raw pixels to distance values (millimeters)
+                        depth_image = self._process_depth_frame(depth_frame)
                         # Log center pixel depth in mm
                         # h, w = depth_image.shape
                         # center_depth_mm = depth_image[h // 2, w // 2]
