@@ -95,7 +95,7 @@ for i in range(30):
 print(f"Warmup complete. Capturing frames...")
 
 # Create output directory
-output_dir = "output/test_depth/realsense"
+output_dir = "outputs/test/realsense"
 os.makedirs(output_dir, exist_ok=True)
 
 # Capture frames and save them (like the C++ example)

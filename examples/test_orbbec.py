@@ -156,7 +156,7 @@ for i in range(30):
 print(f"Warmup complete. Capturing frames...")
 
 # Create output directory
-output_dir = "output/test_depth/orbbec"
+output_dir = "outputs/test/orbbec"
 os.makedirs(output_dir, exist_ok=True)
 
 # Capture frames and save them
