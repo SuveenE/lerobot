@@ -53,13 +53,18 @@ class RealSenseCameraConfig(CameraConfig):
         - For `fps`, `width` and `height`, either all of them need to be set, or none of them.
     """
 
-    serial_number_or_name: str
+    serial_number_or_name: str | int
     color_mode: ColorMode = ColorMode.RGB
     use_depth: bool = False
     rotation: Cv2Rotation = Cv2Rotation.NO_ROTATION
     warmup_s: int = 1
 
     def __post_init__(self):
+        # Convert serial_number_or_name to string if it's an integer
+        # This handles cases where JSON parsing returns integers for numeric serial numbers
+        if isinstance(self.serial_number_or_name, int):
+            self.serial_number_or_name = str(self.serial_number_or_name)
+        
         if self.color_mode not in (ColorMode.RGB, ColorMode.BGR):
             raise ValueError(
                 f"`color_mode` is expected to be {ColorMode.RGB.value} or {ColorMode.BGR.value}, but {self.color_mode} is provided."
