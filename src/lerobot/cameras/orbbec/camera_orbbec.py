@@ -240,7 +240,7 @@ class OrbbecCamera(Camera):
                         try:
                             # Use Y10  format for depth (uint8 millimeters)
                             depth_profile = profile_list.get_video_stream_profile(
-                                self.capture_width, self.capture_height, ob.OBFormat.Y11, self.fps
+                                self.capture_width, self.capture_height, ob.OBFormat.Y12, self.fps
                             )
                             logger.info(f"Using Y10 depth profile: {self.capture_width}x{self.capture_height}@{self.fps}fps")
                         except Exception:
