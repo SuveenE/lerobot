@@ -35,7 +35,7 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[s
 
         elif cfg.type == "intelrealsense":
             from .realsense.camera_realsense import RealSenseCamera
-
+            print(f"RealSenseCamera: {cfg}")
             cameras[key] = RealSenseCamera(cfg)
 
         elif cfg.type == "orbbec":
