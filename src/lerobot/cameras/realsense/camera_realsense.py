@@ -712,9 +712,9 @@ class RealSenseCamera(Camera):
                         depth_image = self._postprocess_image(
                             depth_map, depth_frame=True)
                         # Log center pixel depth in mm
-                        h, w = depth_image.shape
-                        center_depth_mm = depth_image[h // 2, w // 2]
-                        logger.info(f"{self} center depth: {center_depth_mm} mm")
+                        # h, w = depth_image.shape
+                        # center_depth_mm = depth_image[h // 2, w // 2]
+                        # logger.info(f"{self} center depth: {center_depth_mm} mm")
 
                 # Atomically publish both results under the same lock
                 set_color_event = False
