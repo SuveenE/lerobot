@@ -220,8 +220,7 @@ class RealSenseCamera(Camera):
                 # Remove duplicates and sort
                 unique_resolutions = sorted(set(suggested_resolutions))
                 error_msg += (
-                    f"\nSupported resolutions for this camera include: {', '.join(unique_resolutions[:10])}"
-                    f"{' (showing first 10)' if len(unique_resolutions) > 10 else ''}."
+                    f"\nSupported resolutions for this camera include: {', '.join(unique_resolutions)}"
                 )
             
             error_msg += (
@@ -317,18 +316,113 @@ class RealSenseCamera(Camera):
         serial_number = str(found_devices[0]["serial_number"])
         return serial_number
 
+    def _find_compatible_stream_profiles(self, requested_width: int, requested_height: int, requested_fps: int):
+        """Find compatible stream profiles for color and depth streams.
+        
+        RealSense cameras may have constraints on which stream profiles can be enabled
+        simultaneously. This method queries the device to find compatible profiles that
+        match the requested resolution and FPS.
+        
+        Returns:
+            tuple: (color_profile, depth_profile) or (color_profile, None) if depth not needed.
+                   Returns (None, None) if device not found or profiles can't be queried.
+        """
+        try:
+            context = rs.context()
+            devices = context.query_devices()
+            
+            device = None
+            for d in devices:
+                if d.get_info(rs.camera_info.serial_number) == self.serial_number:
+                    device = d
+                    break
+            
+            if device is None:
+                logger.warning(f"Device with serial {self.serial_number} not found when querying stream profiles")
+                return None, None
+            
+            sensors = device.query_sensors()
+            color_sensor = None
+            depth_sensor = None
+            
+            # Find the sensors
+            for sensor in sensors:
+                profiles = sensor.get_stream_profiles()
+                for profile in profiles:
+                    if profile.is_video_stream_profile():
+                        vprofile = profile.as_video_stream_profile()
+                        if vprofile.stream_type() == rs.stream.color and color_sensor is None:
+                            color_sensor = sensor
+                        elif vprofile.stream_type() == rs.stream.depth and depth_sensor is None:
+                            depth_sensor = sensor
+            
+            color_profile = None
+            depth_profile = None
+            
+            # Find matching color profile
+            if color_sensor:
+                profiles = color_sensor.get_stream_profiles()
+                for profile in profiles:
+                    if profile.is_video_stream_profile():
+                        vprofile = profile.as_video_stream_profile()
+                        if (vprofile.stream_type() == rs.stream.color and
+                            vprofile.width() == requested_width and
+                            vprofile.height() == requested_height and
+                            vprofile.fps() == requested_fps):
+                            color_profile = profile
+                            break
+            
+            # Find matching depth profile (if needed)
+            if self.use_depth and depth_sensor:
+                profiles = depth_sensor.get_stream_profiles()
+                for profile in profiles:
+                    if profile.is_video_stream_profile():
+                        vprofile = profile.as_video_stream_profile()
+                        if (vprofile.stream_type() == rs.stream.depth and
+                            vprofile.width() == requested_width and
+                            vprofile.height() == requested_height and
+                            vprofile.fps() == requested_fps):
+                            depth_profile = profile
+                            break
+            
+            return color_profile, depth_profile
+        except Exception as e:
+            logger.debug(f"Error querying stream profiles: {e}")
+            return None, None
+
     def _configure_rs_pipeline_config(self, rs_config):
         """Creates and configures the RealSense pipeline configuration object."""
         rs.config.enable_device(rs_config, self.serial_number)
 
         if self.width and self.height and self.fps:
-            rs_config.enable_stream(
-                rs.stream.color, self.capture_width, self.capture_height, rs.format.rgb8, self.fps
+            # Try to find compatible stream profiles first
+            color_profile, depth_profile = self._find_compatible_stream_profiles(
+                self.capture_width, self.capture_height, self.fps
             )
-            if self.use_depth:
+            
+            if color_profile is not None:
+                # Use the found compatible profile
+                rs_config.enable_stream(color_profile)
+                if self.use_depth and depth_profile is not None:
+                    rs_config.enable_stream(depth_profile)
+                elif self.use_depth:
+                    # Depth profile not found, try fallback to default or explicit config
+                    logger.warning(
+                        f"Exact depth profile not found for {self.capture_width}x{self.capture_height}@{self.fps}fps, "
+                        f"trying explicit configuration"
+                    )
+                    rs_config.enable_stream(
+                        rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
+                    )
+            else:
+                # Fallback to explicit configuration
                 rs_config.enable_stream(
-                    rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
+                    rs.stream.color, self.capture_width, self.capture_height, rs.format.rgb8, self.fps
                 )
+                if self.use_depth:
+                    rs_config.enable_stream(
+                        rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
+                    )
         else:
             rs_config.enable_stream(rs.stream.color)
             if self.use_depth:
