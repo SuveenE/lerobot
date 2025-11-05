@@ -206,6 +206,7 @@ def test_multiple_cameras(camera_type: str, device_ids: list[str], args: argpars
                         height=args.height,
                         use_depth=True,
                     )
+                    print(f"RealSenseCameraConfig: {cfg}")
                     cam = RealSenseCamera(cfg)
                 elif camera_type == "orbbec":
                     from lerobot.cameras.orbbec.configuration_orbbec import OrbbecCameraConfig
