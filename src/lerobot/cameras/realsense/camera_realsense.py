@@ -219,9 +219,7 @@ class RealSenseCamera(Camera):
             if suggested_resolutions:
                 # Remove duplicates and sort
                 unique_resolutions = sorted(set(suggested_resolutions))
-                error_msg += (
-                    f"\nSupported resolutions for this camera include: {', '.join(unique_resolutions)}"
-                )
+                error_msg += f"\nSupported resolutions for this camera include: {', '.join(unique_resolutions[:10])}"
             
             error_msg += (
                 f"\nRun `lerobot-find-cameras realsense` to find all available cameras and supported resolutions."
