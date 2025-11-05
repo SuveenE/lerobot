@@ -357,10 +357,9 @@ class RealSenseCamera(Camera):
             color_profile = None
             depth_profile = None
             
-            # Find matching color profile - prefer YUY2 format (as per datasheet)
+            # Find matching color profile - REQUIRED: RGB8 format only
             if color_sensor:
                 profiles = color_sensor.get_stream_profiles()
-                # First pass: look for YUY2 format specifically
                 for profile in profiles:
                     if profile.is_video_stream_profile():
                         vprofile = profile.as_video_stream_profile()
@@ -368,23 +367,11 @@ class RealSenseCamera(Camera):
                             vprofile.width() == requested_width and
                             vprofile.height() == requested_height and
                             vprofile.fps() == requested_fps and
-                            vprofile.format() == rs.format.yuyv):
+                            vprofile.format() == rs.format.rgb8):
                             color_profile = profile
                             break
-                
-                # If YUY2 not found, fall back to any matching resolution/FPS
-                if color_profile is None:
-                    for profile in profiles:
-                        if profile.is_video_stream_profile():
-                            vprofile = profile.as_video_stream_profile()
-                            if (vprofile.stream_type() == rs.stream.color and
-                                vprofile.width() == requested_width and
-                                vprofile.height() == requested_height and
-                                vprofile.fps() == requested_fps):
-                                color_profile = profile
-                                break
             
-            # Find matching depth profile (if needed) - ensure Z16 format
+            # Find matching depth profile (if needed) - REQUIRED: Z16 format only
             if self.use_depth and depth_sensor:
                 profiles = depth_sensor.get_stream_profiles()
                 for profile in profiles:
@@ -407,8 +394,6 @@ class RealSenseCamera(Camera):
                     f"Resolution: {color_profile.width()}x{color_profile.height()} | "
                     f"FPS: {color_profile.fps()}"
                 )
-            else:
-                logger.info("Color profile: None")
 
             # Log selected depth profile details
             if depth_profile is not None:
@@ -418,8 +403,6 @@ class RealSenseCamera(Camera):
                     f"Resolution: {depth_profile.width()}x{depth_profile.height()} | "
                     f"FPS: {depth_profile.fps()}"
                 )
-            else:
-                logger.info("Depth profile: None")
             return color_profile, depth_profile
         except Exception as e:
             logger.debug(f"Error querying stream profiles: {e}")
@@ -435,6 +418,7 @@ class RealSenseCamera(Camera):
                 self.capture_width, self.capture_height, self.fps
             )
             
+            # REQUIRED: RGB8 format for color
             if color_profile is not None:
                 # Extract parameters from the found profile and use explicit configuration
                 vprofile = color_profile.as_video_stream_profile()
@@ -445,40 +429,51 @@ class RealSenseCamera(Camera):
                     vprofile.format(),
                     vprofile.fps()
                 )
-                
-                if self.use_depth:
-                    if depth_profile is not None:
-                        # Extract parameters from depth profile
-                        dprofile = depth_profile.as_video_stream_profile()
-                        rs_config.enable_stream(
-                            rs.stream.depth,
-                            dprofile.width(),
-                            dprofile.height(),
-                            dprofile.format(),
-                            dprofile.fps()
-                        )
-                    else:
-                        # Depth profile not found, try fallback to explicit config
-                        logger.warning(
-                            f"Exact depth profile not found for {self.capture_width}x{self.capture_height}@{self.fps}fps, "
-                            f"trying explicit configuration"
-                        )
-                        rs_config.enable_stream(
-                            rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
-                        )
             else:
-                # Fallback to explicit configuration - use YUY2 for color (16 bits) and Z16 for depth
-                rs_config.enable_stream(
-                    rs.stream.color, self.capture_width, self.capture_height, rs.format.yuyv, self.fps
+                # RGB8 profile not found - raise error
+                raise ValueError(
+                    f"{self} does not support RGB8 format at {self.capture_width}x{self.capture_height}@{self.fps}fps. "
+                    f"RGB8 format is required for color stream. "
+                    f"Run `lerobot-find-cameras realsense` to see available formats."
                 )
-                if self.use_depth:
+            
+            # REQUIRED: Z16 format for depth (if depth is enabled)
+            if self.use_depth:
+                if depth_profile is not None:
+                    # Extract parameters from depth profile
+                    dprofile = depth_profile.as_video_stream_profile()
                     rs_config.enable_stream(
-                        rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
+                        rs.stream.depth,
+                        dprofile.width(),
+                        dprofile.height(),
+                        dprofile.format(),
+                        dprofile.fps()
+                    )
+                else:
+                    # Z16 profile not found - raise error
+                    raise ValueError(
+                        f"{self} does not support Z16 format at {self.capture_width}x{self.capture_height}@{self.fps}fps. "
+                        f"Z16 format is required for depth stream. "
+                        f"Run `lerobot-find-cameras realsense` to see available formats."
                     )
         else:
-            rs_config.enable_stream(rs.stream.color)
+            # When width/height/fps not specified, use default but still require RGB8/Z16
+            # Try to enable with explicit formats - this will fail if formats not supported
+            try:
+                rs_config.enable_stream(rs.stream.color, rs.format.rgb8)
+            except RuntimeError as e:
+                raise ValueError(
+                    f"{self} does not support RGB8 format for color stream. "
+                    f"RGB8 format is required. Error: {e}"
+                )
             if self.use_depth:
-                rs_config.enable_stream(rs.stream.depth)
+                try:
+                    rs_config.enable_stream(rs.stream.depth, rs.format.z16)
+                except RuntimeError as e:
+                    raise ValueError(
+                        f"{self} does not support Z16 format for depth stream. "
+                        f"Z16 format is required. Error: {e}"
+                    )
 
     def _configure_capture_settings(self) -> None:
         """Sets fps, width, and height from device stream if not already configured.
@@ -537,13 +532,16 @@ class RealSenseCamera(Camera):
 
         start_time = time.perf_counter()
 
-        ret, frame = self.rs_pipeline.try_wait_for_frames(
-            timeout_ms=timeout_ms)
+        # Use wait_for_frames() like the minimal example - blocking call that returns frameset
+        try:
+            frameset = self.rs_pipeline.wait_for_frames(timeout_ms)
+        except RuntimeError as e:
+            raise RuntimeError(f"{self} read_depth failed: {e}")
 
-        if not ret or frame is None:
-            raise RuntimeError(f"{self} read_depth failed (status={ret}).")
+        if frameset is None:
+            raise RuntimeError(f"{self} read_depth failed (no frameset).")
 
-        depth_frame = frame.get_depth_frame()
+        depth_frame = frameset.get_depth_frame()
         if not depth_frame:
             raise RuntimeError(f"{self} read_depth failed: depth frame is None.")
         
@@ -555,7 +553,7 @@ class RealSenseCamera(Camera):
             depth_map, depth_frame=True)
 
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
-        logger.debug(f"{self} read took: {read_duration_ms:.1f}ms")
+        logger.debug(f"{self} read_depth took: {read_duration_ms:.1f}ms")
 
         return depth_map_processed
 
@@ -584,31 +582,26 @@ class RealSenseCamera(Camera):
 
         start_time = time.perf_counter()
 
-        ret, frame = self.rs_pipeline.try_wait_for_frames(
-            timeout_ms=timeout_ms)
+        # Use wait_for_frames() like the minimal example - blocking call that returns frameset
+        try:
+            frameset = self.rs_pipeline.wait_for_frames(timeout_ms)
+        except RuntimeError as e:
+            raise RuntimeError(f"{self} read failed: {e}")
 
-        if not ret or frame is None:
-            raise RuntimeError(f"{self} read failed (status={ret}).")
+        if frameset is None:
+            raise RuntimeError(f"{self} read failed (no frameset).")
 
-        color_frame = frame.get_color_frame()
-        frame_format = color_frame.get_profile().format()
+        color_frame = frameset.get_color_frame()
+        if not color_frame:
+            raise RuntimeError(f"{self} read failed: color frame is None.")
         
-        # Handle YUY2 format conversion (16 bits per pixel, packed YUV 4:2:2)
-        if frame_format == rs.format.yuyv:
-            # YUY2 format: 2 bytes per pixel (16 bits)
-            # get_data() returns uint8 array: shape (height * width * 2,)
-            # Reshape to (height, width, 2) where 2 represents the 2 bytes per pixel
-            color_image_raw = np.asanyarray(color_frame.get_data(), dtype=np.uint8)
-            height = color_frame.get_height()
-            width = color_frame.get_width()
-            # Reshape to (height, width, 2) - OpenCV expects this format for YUYV
-            # Using resize to match Orbbec pattern, but reshape would also work since size matches exactly
-            yuyv_image = np.resize(color_image_raw, (height, width, 2))
-            # Convert YUY2 to RGB - OpenCV handles the packed format
-            color_image_raw = cv2.cvtColor(yuyv_image, cv2.COLOR_YUV2RGB_YUYV)
-        else:
-            # For other formats (RGB8, etc.), use data directly
-            color_image_raw = np.asanyarray(color_frame.get_data())
+        # RGB8 format: 3 bytes per pixel (24 bits)
+        # get_data() returns uint8 array: shape (height * width * 3,)
+        # Reshape to (height, width, 3) - already RGB format
+        height = color_frame.get_height()
+        width = color_frame.get_width()
+        frame_data = np.asanyarray(color_frame.get_data())
+        color_image_raw = np.resize(frame_data, (height, width, 3))
 
         color_image_processed = self._postprocess_image(
             color_image_raw, color_mode)
@@ -683,11 +676,15 @@ class RealSenseCamera(Camera):
         """
         while not self.stop_event.is_set():
             try:
-                # Get frameset from pipeline (contains both color and depth if enabled)
-                ret, frameset = self.rs_pipeline.try_wait_for_frames(
-                    timeout_ms=500)
+                # Use wait_for_frames() like the minimal example - blocking call that returns frameset
+                try:
+                    frameset = self.rs_pipeline.wait_for_frames(500)
+                except RuntimeError:
+                    logger.debug(
+                        f"{self} failed to get frameset in background thread (timeout or error)")
+                    continue
 
-                if not ret or frameset is None:
+                if frameset is None:
                     logger.debug(
                         f"{self} failed to get frameset in background thread")
                     continue
@@ -698,23 +695,11 @@ class RealSenseCamera(Camera):
 
                 color_frame = frameset.get_color_frame()
                 if color_frame:
-                    frame_format = color_frame.get_profile().format()
-                    
-                    # Handle YUY2 format conversion (16 bits per pixel, packed YUV 4:2:2)
-                    if frame_format == rs.format.yuyv:
-                        # YUY2 format: 2 bytes per pixel (16 bits)
-                        # get_data() returns uint8 array: shape (height * width * 2,)
-                        # Reshape to (height, width, 2) where 2 represents the 2 bytes per pixel
-                        color_image_raw = np.asanyarray(color_frame.get_data(), dtype=np.uint8)
-                        height = color_frame.get_height()
-                        width = color_frame.get_width()
-                        # Reshape to (height, width, 2) - OpenCV expects this format for YUYV
-                        yuyv_image = np.resize(color_image_raw, (height, width, 2))
-                        # Convert YUY2 to RGB - OpenCV handles the packed format
-                        color_image_raw = cv2.cvtColor(yuyv_image, cv2.COLOR_YUV2RGB_YUYV)
-                    else:
-                        # For other formats (RGB8, etc.), use data directly
-                        color_image_raw = np.asanyarray(color_frame.get_data())
+                    # RGB8 format: 3 bytes per pixel (24 bits)
+                    height = color_frame.get_height()
+                    width = color_frame.get_width()
+                    frame_data = np.asanyarray(color_frame.get_data())
+                    color_image_raw = np.resize(frame_data, (height, width, 3))
                     
                     color_image = self._postprocess_image(color_image_raw)
 
