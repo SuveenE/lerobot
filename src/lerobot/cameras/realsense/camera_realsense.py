@@ -593,14 +593,18 @@ class RealSenseCamera(Camera):
         color_frame = frame.get_color_frame()
         frame_format = color_frame.get_profile().format()
         
-        # Handle YUY2 format conversion (16 bits per pixel)
+        # Handle YUY2 format conversion (16 bits per pixel, packed YUV 4:2:2)
         if frame_format == rs.format.yuyv:
-            # YUY2 is 16 bits per pixel, so reshape to (height, width, 2) for YUYV conversion
-            color_image_raw = np.asanyarray(color_frame.get_data())
+            # YUY2 format: 2 bytes per pixel (16 bits)
+            # get_data() returns uint8 array: shape (height * width * 2,)
+            # Reshape to (height, width, 2) where 2 represents the 2 bytes per pixel
+            color_image_raw = np.asanyarray(color_frame.get_data(), dtype=np.uint8)
             height = color_frame.get_height()
             width = color_frame.get_width()
-            # Reshape YUY2 data and convert to RGB
-            yuyv_image = color_image_raw.reshape((height, width, 2))
+            # Reshape to (height, width, 2) - OpenCV expects this format for YUYV
+            # Using resize to match Orbbec pattern, but reshape would also work since size matches exactly
+            yuyv_image = np.resize(color_image_raw, (height, width, 2))
+            # Convert YUY2 to RGB - OpenCV handles the packed format
             color_image_raw = cv2.cvtColor(yuyv_image, cv2.COLOR_YUV2RGB_YUYV)
         else:
             # For other formats (RGB8, etc.), use data directly
@@ -696,14 +700,17 @@ class RealSenseCamera(Camera):
                 if color_frame:
                     frame_format = color_frame.get_profile().format()
                     
-                    # Handle YUY2 format conversion (16 bits per pixel)
+                    # Handle YUY2 format conversion (16 bits per pixel, packed YUV 4:2:2)
                     if frame_format == rs.format.yuyv:
-                        # YUY2 is 16 bits per pixel, so reshape to (height, width, 2) for YUYV conversion
-                        color_image_raw = np.asanyarray(color_frame.get_data())
+                        # YUY2 format: 2 bytes per pixel (16 bits)
+                        # get_data() returns uint8 array: shape (height * width * 2,)
+                        # Reshape to (height, width, 2) where 2 represents the 2 bytes per pixel
+                        color_image_raw = np.asanyarray(color_frame.get_data(), dtype=np.uint8)
                         height = color_frame.get_height()
                         width = color_frame.get_width()
-                        # Reshape YUY2 data and convert to RGB
-                        yuyv_image = color_image_raw.reshape((height, width, 2))
+                        # Reshape to (height, width, 2) - OpenCV expects this format for YUYV
+                        yuyv_image = np.resize(color_image_raw, (height, width, 2))
+                        # Convert YUY2 to RGB - OpenCV handles the packed format
                         color_image_raw = cv2.cvtColor(yuyv_image, cv2.COLOR_YUV2RGB_YUYV)
                     else:
                         # For other formats (RGB8, etc.), use data directly
