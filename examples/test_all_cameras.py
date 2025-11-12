@@ -230,8 +230,8 @@ def capture_realsense_frames(serial_number: str, output_dir: str, num_frames: in
     COLOR_FORMAT = rs.format.rgb8
     DEPTH_FORMAT = rs.format.z16
     
-    config.enable_stream(rs.stream.color, WIDTH, HEIGHT, COLOR_FORMAT, FPS)
-    config.enable_stream(rs.stream.depth, WIDTH, HEIGHT, DEPTH_FORMAT, FPS)
+    config.enable_stream(rs.stream.color, 424, 240, COLOR_FORMAT, FPS)
+    config.enable_stream(rs.stream.depth, 424, 240, DEPTH_FORMAT, FPS)
     
     # Start pipeline
     pipeline = rs.pipeline()
