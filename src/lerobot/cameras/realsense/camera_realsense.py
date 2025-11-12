@@ -531,7 +531,7 @@ class RealSenseCamera(Camera):
         depth_data = self._postprocess_image(depth_data, depth_frame=True)
         return depth_data
 
-    def read_depth(self, timeout_ms: int = 200) -> np.ndarray:
+    def read_depth(self, timeout_ms: int = 600) -> np.ndarray:
         """
         Reads a single frame (depth) synchronously from the camera.
 
@@ -580,7 +580,7 @@ class RealSenseCamera(Camera):
 
         return depth_map_processed
 
-    def read(self, color_mode: ColorMode | None = None, timeout_ms: int = 200) -> np.ndarray:
+    def read(self, color_mode: ColorMode | None = None, timeout_ms: int = 600) -> np.ndarray:
         """
         Reads a single frame (color) synchronously from the camera.
 
