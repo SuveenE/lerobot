@@ -826,7 +826,7 @@ class RealSenseCamera(Camera):
 
         return frame
 
-    def async_read_depth(self, timeout_ms: float = 200) -> tuple[np.ndarray, np.ndarray]:
+    def async_read_depth(self, timeout_ms: float = 600) -> tuple[np.ndarray, np.ndarray]:
         """
         Reads the latest available depth frame asynchronously.
 
