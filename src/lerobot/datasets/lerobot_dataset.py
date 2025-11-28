@@ -68,6 +68,7 @@ from lerobot.datasets.utils import (
 from lerobot.datasets.video_utils import (
     VideoFrame,
     decode_video_frames,
+    encode_depth_preview_frames,
     encode_video_frames,
     get_safe_default_codec,
     get_video_info,
@@ -974,7 +975,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
             ).parent
+            
+            # Encode the main data video (preserves full precision for ML)
             encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+            
             shutil.rmtree(img_dir)
 
         # Update video info (only needed when first episode is encoded since it reads from episode 0)

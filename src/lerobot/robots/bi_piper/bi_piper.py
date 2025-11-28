@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import time
 from functools import cached_property
 
 from lerobot.cameras.utils import make_cameras_from_configs
@@ -70,9 +71,15 @@ class BiPiper(Robot):
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
-        return {
-            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
-        }
+        features = {}
+        for cam_name in self.cameras:
+            cfg = self.config.cameras[cam_name]
+            # RGB features
+            features[cam_name] = (cfg.height, cfg.width, 3)
+            # Depth features if enabled
+            if hasattr(cfg, 'use_depth') and cfg.use_depth:
+                features[f"{cam_name}_depth"] = (cfg.height, cfg.width)
+        return features
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
@@ -86,7 +93,8 @@ class BiPiper(Robot):
     def is_connected(self) -> bool:
         left_connected = self.left_arm is not None
         right_connected = self.right_arm is not None
-        cameras_connected = all(cam.is_connected for cam in self.cameras.values())
+        cameras_connected = all(
+            cam.is_connected for cam in self.cameras.values())
         return left_connected and right_connected and cameras_connected
 
     def connect(self, calibrate: bool = True) -> None:
@@ -95,13 +103,17 @@ class BiPiper(Robot):
         """
         try:
             # Connect left arm
-            logger.info(f"Connecting to left arm on CAN port: {self.config.left_arm_can_port}")
-            self.left_arm = self.C_PiperInterface_V2(self.config.left_arm_can_port)
+            logger.info(
+                f"Connecting to left arm on CAN port: {self.config.left_arm_can_port}")
+            self.left_arm = self.C_PiperInterface_V2(
+                self.config.left_arm_can_port)
             self.left_arm.ConnectPort(True)
 
             # Connect right arm
-            logger.info(f"Connecting to right arm on CAN port: {self.config.right_arm_can_port}")
-            self.right_arm = self.C_PiperInterface_V2(self.config.right_arm_can_port)
+            logger.info(
+                f"Connecting to right arm on CAN port: {self.config.right_arm_can_port}")
+            self.right_arm = self.C_PiperInterface_V2(
+                self.config.right_arm_can_port)
             self.right_arm.ConnectPort(True)
 
             # Connect cameras
@@ -121,7 +133,8 @@ class BiPiper(Robot):
 
     def calibrate(self) -> None:
         """BiPiper robots don't require manual calibration"""
-        logger.info("BiPiper robot calibration - no action needed, assumed calibrated")
+        logger.info(
+            "BiPiper robot calibration - no action needed, assumed calibrated")
         pass
 
     def configure(self) -> None:
@@ -191,7 +204,12 @@ class BiPiper(Robot):
 
         # Capture camera images
         for cam_name, cam in self.cameras.items():
-            observation[cam_name] = cam.async_read()
+            cfg = self.config.cameras[cam_name]
+            depth_enabled = hasattr(cfg, 'use_depth') and cfg.use_depth
+            rgb_frame, depth_frame = cam.async_read_depth() if depth_enabled else (cam.async_read(), None)
+            observation[cam_name] = rgb_frame
+            if depth_enabled and depth_frame is not None:
+                observation[f"{cam_name}_depth"] = depth_frame
 
         return observation
 

@@ -7,3 +7,10 @@
 # Linux mlerobot-linux 6.14.0-27-generic #27~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue Jul 22 17:38:49 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
 
 -e .[all]
+# Optional: Orbbec SDK for depth support
+# Install with one of (matching your Python and platform):
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp311-cp311-linux_x86_64.whl
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-linux_x86_64.whl
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp311-cp311-linux_aarch64.whl
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-linux_aarch64.whl
+#   pip install https://github.com/orbbec/pyorbbecsdk/releases/download/v2.0.13/pyorbbecsdk-2.0.13-cp312-cp312-win_amd64.whl
