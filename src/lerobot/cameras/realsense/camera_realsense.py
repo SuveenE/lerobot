@@ -479,7 +479,6 @@ class RealSenseCamera(Camera):
             # Check if still connected before attempting to read
             if not self.is_connected:
                 break
-                
             try:
                 frame = self._read_from_hardware()
                 color_frame_raw = frame.get_color_frame()
