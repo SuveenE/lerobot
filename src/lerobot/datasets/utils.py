@@ -349,7 +349,11 @@ def write_tasks(tasks: pandas.DataFrame, local_dir: Path) -> None:
 
 
 def load_tasks(local_dir: Path) -> pandas.DataFrame:
-    tasks = pd.read_parquet(local_dir / DEFAULT_TASKS_PATH)
+    tasks = pd.read_parquet(
+        local_dir / DEFAULT_TASKS_PATH,
+        engine="pyarrow",
+        use_pandas_metadata=False,
+    )
     return tasks
 
 
