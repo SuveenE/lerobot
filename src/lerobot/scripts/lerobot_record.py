@@ -103,6 +103,7 @@ from lerobot.robots import (  # noqa: F401
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
+    bi_gello_leader,
     bi_so100_leader,
     bi_yam_leader,
     homunculus,
