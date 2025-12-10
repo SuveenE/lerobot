@@ -35,10 +35,10 @@ DEFAULT_BAUDRATE = 1000000
 # Right GELLO (ttyUSB0, port 6002) -> controls can_follower_r
 GELLO_CONFIGS = {
     "left": {
-        "joint_offsets": [3.142, 3.142, 3.142, 1.571, 6.283, 4.712],
+        "joint_offsets": [9.425, 3.142, 1.571, 3.142, 3.142, 3.142],
         "joint_signs": [1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
-        "gripper_close": 53.4,
-        "gripper_open": 112.9,
+        "gripper_close": 50.5,
+        "gripper_open": 110.0,
     },
     "right": {
         "joint_offsets": [3.142, 3.142, 1.571, 3.142, 3.142, 3.142],
