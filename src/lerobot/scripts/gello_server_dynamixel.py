@@ -60,7 +60,8 @@ class DynamixelGelloRobot:
         if joint_ids is None:
             joint_ids = [1, 2, 3, 4, 5, 6]
         if joint_offsets is None:
-            joint_offsets = [math.pi] * 6
+            # Offsets: [π, π, π, π/2, 3π/2, 3π/2]
+            joint_offsets = [3.142, 3.142, 3.142, 1.571, 4.712, 4.712]
         if joint_signs is None:
             joint_signs = [1.0, -1.0, 1.0, 1.0, 1.0, 1.0]
 
@@ -156,10 +157,12 @@ class DynamixelGelloRobot:
             gripper_raw = positions["gripper"]
             gripper_rad = gripper_raw * (2 * math.pi / 4096)
             gripper_deg = math.degrees(gripper_rad)
-            # GELLO gripper typically ranges from ~-34 to ~25 degrees
-            # Normalize to 0-1 (closed to open)
-            gripper_normalized = (gripper_deg + 34.1875) / (25.3125 + 34.1875)
-            gripper_normalized = np.clip(gripper_normalized, 0.0, 1.0)
+            # GELLO gripper: close=53.3°, open=112.8°
+            # Normalize to 0-1 (0=closed, 1=open)
+            gripper_close = 53.3
+            gripper_open = 112.8
+            gripper_normalized = (gripper_deg - gripper_close) / (gripper_open - gripper_close)
+            gripper_normalized = float(np.clip(gripper_normalized, 0.0, 1.0))
             obs["gripper_pos"] = np.array([gripper_normalized], dtype=np.float32)
 
         return obs
