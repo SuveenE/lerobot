@@ -169,9 +169,11 @@ def launch_gello_dynamixel_process(
         str(server_port),
         "--motor_type",
         motor_type,
-        "--has_gripper",
-        str(has_gripper),
     ]
+
+    # For tyro, boolean flags: use --no_has_gripper to disable, omit for default True
+    if not has_gripper:
+        cmd.append("--no_has_gripper")
 
     print(f"Starting GELLO leader server: {' '.join(cmd)}")
 
