@@ -136,6 +136,9 @@ class LeRobotDatasetMetadata:
             self.writer = pq.ParquetWriter(
                 path, schema=table.schema, compression="snappy", use_dictionary=True
             )
+        else:
+            # Reorder columns to match existing writer schema to avoid schema mismatch errors
+            table = table.select([field.name for field in self.writer.schema])
 
         self.writer.write_table(table)
 
