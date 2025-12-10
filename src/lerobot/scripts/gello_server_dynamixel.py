@@ -16,7 +16,7 @@ Usage:
 
 import math
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Literal
 
 import numpy as np
 import portal
@@ -30,12 +30,22 @@ DEFAULT_SERVER_PORT = 6001
 # Dynamixel baud rate
 DEFAULT_BAUDRATE = 1000000
 
-# GELLO configuration (same for both arms)
-GELLO_CONFIG = {
-    "joint_offsets": [3.14159, 3.14159, 1.5708, 3.14159, 3.14159, 3.14159],
-    "joint_signs": [1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
-    "gripper_close": 50.451171875,
-    "gripper_open": 109.951171875,
+# Per-arm GELLO configurations
+# Left GELLO (ttyUSB1, port 6001) -> controls can_follower_l
+# Right GELLO (ttyUSB0, port 6002) -> controls can_follower_r
+GELLO_CONFIGS = {
+    "left": {
+        "joint_offsets": [3.142, 3.142, 3.142, 1.571, 6.283, 4.712],
+        "joint_signs": [1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
+        "gripper_close": 53.4,
+        "gripper_open": 112.9,
+    },
+    "right": {
+        "joint_offsets": [3.142, 3.142, 1.571, 3.142, 3.142, 3.142],
+        "joint_signs": [1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
+        "gripper_close": 50.5,
+        "gripper_open": 110.0,
+    },
 }
 
 
@@ -72,13 +82,13 @@ class DynamixelGelloRobot:
         self._port = port
         self._motor_type = motor_type
 
-        # Default GELLO configuration
+        # Default GELLO configuration (uses right arm defaults)
         if joint_ids is None:
             joint_ids = [1, 2, 3, 4, 5, 6]
         if joint_offsets is None:
-            joint_offsets = GELLO_CONFIG["joint_offsets"]
+            joint_offsets = GELLO_CONFIGS["right"]["joint_offsets"]
         if joint_signs is None:
-            joint_signs = GELLO_CONFIG["joint_signs"]
+            joint_signs = GELLO_CONFIGS["right"]["joint_signs"]
 
         self._joint_ids = joint_ids
         self._gripper_id = gripper_id
@@ -212,17 +222,23 @@ class Args:
     # Dynamixel motor type
     motor_type: str = "xl330-m288"
 
+    # Which arm (left or right) - determines offsets/signs
+    arm: Literal["left", "right"] = "right"
+
 
 def main(args: Args) -> None:
     """Main function to start the Dynamixel GELLO server."""
-    # Create the robot with GELLO configuration
+    # Get arm-specific configuration
+    config = GELLO_CONFIGS[args.arm]
+
+    # Create the robot with arm-specific configuration
     robot = DynamixelGelloRobot(
         port=args.port,
         motor_type=args.motor_type,
-        joint_offsets=GELLO_CONFIG["joint_offsets"],
-        joint_signs=GELLO_CONFIG["joint_signs"],
-        gripper_close=GELLO_CONFIG["gripper_close"],
-        gripper_open=GELLO_CONFIG["gripper_open"],
+        joint_offsets=config["joint_offsets"],
+        joint_signs=config["joint_signs"],
+        gripper_close=config["gripper_close"],
+        gripper_open=config["gripper_open"],
     )
 
     # Connect
@@ -232,12 +248,12 @@ def main(args: Args) -> None:
     server = ServerRobot(robot, args.server_port)
 
     print(f"\n{'='*60}")
-    print("Dynamixel GELLO Server Started")
+    print(f"Dynamixel GELLO Server Started ({args.arm.upper()} arm)")
     print(f"  Serial Port: {args.port}")
     print(f"  Motor Type: {args.motor_type}")
-    print(f"  Joint Offsets: {GELLO_CONFIG['joint_offsets']}")
-    print(f"  Joint Signs: {GELLO_CONFIG['joint_signs']}")
-    print(f"  Gripper Range: {GELLO_CONFIG['gripper_close']:.1f}° - {GELLO_CONFIG['gripper_open']:.1f}°")
+    print(f"  Joint Offsets: {config['joint_offsets']}")
+    print(f"  Joint Signs: {config['joint_signs']}")
+    print(f"  Gripper Range: {config['gripper_close']:.1f}° - {config['gripper_open']:.1f}°")
     print(f"  Server Port: {args.server_port}")
     print(f"{'='*60}\n")
 

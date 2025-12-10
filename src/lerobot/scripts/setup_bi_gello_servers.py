@@ -150,6 +150,7 @@ def launch_gello_dynamixel_process(
     serial_port: str,
     server_port: int,
     motor_type: str = "xl330-m288",
+    arm: str = "right",
 ):
     """Launch a single server process for a Dynamixel GELLO leader arm (USB serial)."""
     script_path = os.path.join(
@@ -168,9 +169,11 @@ def launch_gello_dynamixel_process(
         str(server_port),
         "--motor_type",
         motor_type,
+        "--arm",
+        arm,
     ]
 
-    print(f"Starting GELLO leader server: {' '.join(cmd)}")
+    print(f"Starting GELLO leader server ({arm}): {' '.join(cmd)}")
 
     try:
         process = subprocess.Popen(cmd)
@@ -293,12 +296,14 @@ def main():
                 "serial_port": args.right_gello_port,
                 "server_port": args.right_gello_server_port,
                 "motor_type": args.gello_motor_type,
+                "arm": "right",
             },
             # Left GELLO leader arm
             {
                 "serial_port": args.left_gello_port,
                 "server_port": args.left_gello_server_port,
                 "motor_type": args.gello_motor_type,
+                "arm": "left",
             },
         ]
 
