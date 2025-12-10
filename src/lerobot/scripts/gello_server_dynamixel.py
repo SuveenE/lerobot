@@ -69,16 +69,16 @@ class DynamixelGelloRobot:
         self._joint_offsets = np.array(joint_offsets, dtype=np.float32)
         self._joint_signs = np.array(joint_signs, dtype=np.float32)
 
-        # Create motor configuration using RAW mode to avoid calibration requirement
+        # Create motor configuration (we'll read raw values with normalize=False)
         motor_names = ["joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5"]
         motors = {}
         for name, motor_id in zip(motor_names, joint_ids):
-            motors[name] = Motor(motor_id, motor_type, MotorNormMode.RAW)
+            motors[name] = Motor(motor_id, motor_type, MotorNormMode.DEGREES)
 
         if gripper_id is not None:
             # Gripper is often a different motor model (xl330-m077)
             gripper_motor_type = "xl330-m077"
-            motors["gripper"] = Motor(gripper_id, gripper_motor_type, MotorNormMode.RAW)
+            motors["gripper"] = Motor(gripper_id, gripper_motor_type, MotorNormMode.DEGREES)
             motor_names.append("gripper")
 
         # Initial bus creation (will be recreated in connect with proper baud rate)
@@ -111,8 +111,9 @@ class DynamixelGelloRobot:
         return len(self._motor_names)
 
     def get_joint_pos(self) -> np.ndarray:
-        """Get current joint positions (raw encoder values)."""
-        positions = self._bus.sync_read("Present_Position")
+        """Get current joint positions (raw encoder values converted to radians)."""
+        # Read raw values without normalization (avoids calibration requirement)
+        positions = self._bus.sync_read("Present_Position", normalize=False)
         # Convert raw encoder values to radians
         # XL330 resolution: 4096 counts per revolution
         pos_array = np.array([positions[name] for name in self._motor_names], dtype=np.float32)
@@ -134,7 +135,8 @@ class DynamixelGelloRobot:
         Returns joint positions in radians with offsets and signs applied,
         matching the GELLO software output format.
         """
-        positions = self._bus.sync_read("Present_Position")
+        # Read raw values without normalization (avoids calibration requirement)
+        positions = self._bus.sync_read("Present_Position", normalize=False)
 
         # Get joint positions as raw encoder values and convert to radians
         # XL330 resolution: 4096 counts per revolution
