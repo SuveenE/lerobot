@@ -7,7 +7,11 @@ through the portal RPC interface, allowing LeRobot to read joint positions
 from the GELLO device.
 
 Usage:
-    python -m lerobot.scripts.gello_server_dynamixel --port /dev/ttyUSB0 --server_port 6001
+    # Right arm (ttyUSB0):
+    python -m lerobot.scripts.gello_server_dynamixel --port /dev/ttyUSB0 --server_port 6002 --arm right
+
+    # Left arm (ttyUSB1):
+    python -m lerobot.scripts.gello_server_dynamixel --port /dev/ttyUSB1 --server_port 6001 --arm left
 """
 
 import math
@@ -26,6 +30,14 @@ DEFAULT_SERVER_PORT = 6001
 # Dynamixel baud rate
 DEFAULT_BAUDRATE = 1000000
 
+# GELLO configuration (same for both arms)
+GELLO_CONFIG = {
+    "joint_offsets": [3.14159, 3.14159, 1.5708, 3.14159, 3.14159, 3.14159],
+    "joint_signs": [1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
+    "gripper_close": 50.451171875,
+    "gripper_open": 109.951171875,
+}
+
 
 class DynamixelGelloRobot:
     """
@@ -41,6 +53,8 @@ class DynamixelGelloRobot:
         gripper_id: int | None = 7,
         joint_offsets: list[float] | None = None,
         joint_signs: list[float] | None = None,
+        gripper_close: float = 53.3,
+        gripper_open: float = 112.8,
     ):
         """
         Initialize the Dynamixel GELLO robot.
@@ -50,8 +64,10 @@ class DynamixelGelloRobot:
             motor_type: Dynamixel motor model
             joint_ids: List of joint motor IDs (default: [1, 2, 3, 4, 5, 6])
             gripper_id: Gripper motor ID (default: 7, None for no gripper)
-            joint_offsets: Offsets to add to joint positions (default: [π, π, π, π, π, π])
-            joint_signs: Signs to multiply joint positions (default: [1, -1, 1, 1, 1, 1])
+            joint_offsets: Offsets to add to joint positions
+            joint_signs: Signs to multiply joint positions
+            gripper_close: Gripper angle in degrees when closed
+            gripper_open: Gripper angle in degrees when open
         """
         self._port = port
         self._motor_type = motor_type
@@ -60,15 +76,16 @@ class DynamixelGelloRobot:
         if joint_ids is None:
             joint_ids = [1, 2, 3, 4, 5, 6]
         if joint_offsets is None:
-            # Offsets: [π, π, π, π/2, 3π/2, 3π/2]
-            joint_offsets = [3.142, 3.142, 3.142, 1.571, 4.712, 4.712]
+            joint_offsets = GELLO_CONFIG["joint_offsets"]
         if joint_signs is None:
-            joint_signs = [1.0, -1.0, 1.0, 1.0, 1.0, 1.0]
+            joint_signs = GELLO_CONFIG["joint_signs"]
 
         self._joint_ids = joint_ids
         self._gripper_id = gripper_id
         self._joint_offsets = np.array(joint_offsets, dtype=np.float32)
         self._joint_signs = np.array(joint_signs, dtype=np.float32)
+        self._gripper_close = gripper_close
+        self._gripper_open = gripper_open
 
         # Create motor configuration (we'll read raw values with normalize=False)
         motor_names = ["joint_0", "joint_1", "joint_2", "joint_3", "joint_4", "joint_5"]
@@ -157,11 +174,8 @@ class DynamixelGelloRobot:
             gripper_raw = positions["gripper"]
             gripper_rad = gripper_raw * (2 * math.pi / 4096)
             gripper_deg = math.degrees(gripper_rad)
-            # GELLO gripper: close=53.3°, open=112.8°
             # Normalize to 0-1 (0=closed, 1=open)
-            gripper_close = 53.3
-            gripper_open = 112.8
-            gripper_normalized = (gripper_deg - gripper_close) / (gripper_open - gripper_close)
+            gripper_normalized = (gripper_deg - self._gripper_close) / (self._gripper_open - self._gripper_close)
             gripper_normalized = float(np.clip(gripper_normalized, 0.0, 1.0))
             obs["gripper_pos"] = np.array([gripper_normalized], dtype=np.float32)
 
@@ -201,17 +215,17 @@ class Args:
 
 def main(args: Args) -> None:
     """Main function to start the Dynamixel GELLO server."""
-    # Create the robot with default GELLO configuration
+    # Create the robot with GELLO configuration
     robot = DynamixelGelloRobot(
         port=args.port,
         motor_type=args.motor_type,
-        # Uses default GELLO config:
-        # joint_ids=[1,2,3,4,5,6], gripper_id=7
-        # joint_offsets=[π,π,π,π,π,π]
-        # joint_signs=[1,-1,1,1,1,1]
+        joint_offsets=GELLO_CONFIG["joint_offsets"],
+        joint_signs=GELLO_CONFIG["joint_signs"],
+        gripper_close=GELLO_CONFIG["gripper_close"],
+        gripper_open=GELLO_CONFIG["gripper_open"],
     )
 
-    # Connect (will try multiple baud rates)
+    # Connect
     robot.connect()
 
     # Start the server
@@ -221,8 +235,9 @@ def main(args: Args) -> None:
     print("Dynamixel GELLO Server Started")
     print(f"  Serial Port: {args.port}")
     print(f"  Motor Type: {args.motor_type}")
-    print(f"  Joint IDs: [1, 2, 3, 4, 5, 6]")
-    print(f"  Gripper ID: 7")
+    print(f"  Joint Offsets: {GELLO_CONFIG['joint_offsets']}")
+    print(f"  Joint Signs: {GELLO_CONFIG['joint_signs']}")
+    print(f"  Gripper Range: {GELLO_CONFIG['gripper_close']:.1f}° - {GELLO_CONFIG['gripper_open']:.1f}°")
     print(f"  Server Port: {args.server_port}")
     print(f"{'='*60}\n")
 
