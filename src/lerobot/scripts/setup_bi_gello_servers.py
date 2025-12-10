@@ -150,7 +150,6 @@ def launch_gello_dynamixel_process(
     serial_port: str,
     server_port: int,
     motor_type: str = "xl330-m288",
-    has_gripper: bool = True,
 ):
     """Launch a single server process for a Dynamixel GELLO leader arm (USB serial)."""
     script_path = os.path.join(
@@ -170,10 +169,6 @@ def launch_gello_dynamixel_process(
         "--motor_type",
         motor_type,
     ]
-
-    # For tyro, boolean flags: use --no_has_gripper to disable, omit for default True
-    if not has_gripper:
-        cmd.append("--no_has_gripper")
 
     print(f"Starting GELLO leader server: {' '.join(cmd)}")
 
@@ -219,12 +214,6 @@ def main():
         default="xl330-m288",
         help="Dynamixel motor type for GELLO arms (e.g., xl330-m288, xl330-m077)",
     )
-    parser.add_argument(
-        "--gello_no_gripper",
-        action="store_true",
-        help="GELLO arms don't have a gripper motor",
-    )
-
     # YAM follower arguments (CAN)
     parser.add_argument(
         "--left_follower_can",
@@ -304,14 +293,12 @@ def main():
                 "serial_port": args.right_gello_port,
                 "server_port": args.right_gello_server_port,
                 "motor_type": args.gello_motor_type,
-                "has_gripper": not args.gello_no_gripper,
             },
             # Left GELLO leader arm
             {
                 "serial_port": args.left_gello_port,
                 "server_port": args.left_gello_server_port,
                 "motor_type": args.gello_motor_type,
-                "has_gripper": not args.gello_no_gripper,
             },
         ]
 
