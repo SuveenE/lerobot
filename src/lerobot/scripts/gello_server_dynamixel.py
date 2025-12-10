@@ -23,8 +23,8 @@ from lerobot.motors.dynamixel import DynamixelMotorsBus
 
 DEFAULT_SERVER_PORT = 6001
 
-# Common Dynamixel baud rates to try
-BAUDRATES_TO_TRY = [1000000, 57600, 115200, 2000000, 3000000, 4000000]
+# Dynamixel baud rate
+DEFAULT_BAUDRATE = 1000000
 
 
 class DynamixelGelloRobot:
@@ -88,46 +88,16 @@ class DynamixelGelloRobot:
         self._initial_motors = motors
 
     def connect(self) -> None:
-        """Connect to the motors, trying different baud rates."""
+        """Connect to the motors."""
         print(f"Connecting to GELLO on {self._port}...")
 
-        last_error = None
-        # Try different baud rates
-        for baudrate in BAUDRATES_TO_TRY:
-            try:
-                print(f"  Trying baud rate {baudrate}...")
-                
-                # Create a fresh bus for each attempt
-                self._bus = DynamixelMotorsBus(port=self._port, motors=self._initial_motors)
-                self._bus.default_baudrate = baudrate
-                self._bus.connect()
-                
-                print(f"  ✓ Connected at baud rate {baudrate}")
+        self._bus = DynamixelMotorsBus(port=self._port, motors=self._initial_motors)
+        self._bus.default_baudrate = DEFAULT_BAUDRATE
+        self._bus.connect()
 
-                # Disable torque so the arm can be moved freely (leader mode)
-                self._bus.disable_torque()
-                print(f"Connected to GELLO on {self._port}")
-                return
-            except Exception as e:
-                last_error = e
-                # If connection failed, try to clean up
-                try:
-                    if self._bus.is_connected:
-                        self._bus.disconnect()
-                except Exception:
-                    pass
-                # Close port handler if it's open
-                try:
-                    if hasattr(self._bus, 'port_handler') and self._bus.port_handler.is_open:
-                        self._bus.port_handler.closePort()
-                except Exception:
-                    pass
-        
-        raise RuntimeError(
-            f"Could not connect to GELLO on {self._port}. "
-            f"Tried baud rates: {BAUDRATES_TO_TRY}. "
-            f"Last error: {last_error}"
-        )
+        # Disable torque so the arm can be moved freely (leader mode)
+        self._bus.disable_torque()
+        print(f"Connected to GELLO on {self._port} at {DEFAULT_BAUDRATE} baud")
 
     def disconnect(self) -> None:
         """Disconnect from the motors."""
