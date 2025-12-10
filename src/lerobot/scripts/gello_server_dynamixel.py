@@ -76,7 +76,9 @@ class DynamixelGelloRobot:
             motors[name] = Motor(motor_id, motor_type, MotorNormMode.DEGREES)
 
         if gripper_id is not None:
-            motors["gripper"] = Motor(gripper_id, motor_type, MotorNormMode.DEGREES)
+            # Gripper is often a different motor model (xl330-m077)
+            gripper_motor_type = "xl330-m077"
+            motors["gripper"] = Motor(gripper_id, gripper_motor_type, MotorNormMode.DEGREES)
             motor_names.append("gripper")
 
         # Initial bus creation (will be recreated in connect with proper baud rate)
