@@ -116,12 +116,16 @@ def create_camera_instance(cam_meta: dict[str, Any]) -> Any | None:
         if cam_type == "OpenCV":
             config = OpenCVCameraConfig(
                 index_or_path=cam_id,
+                width=640,
+                height=360,
                 color_mode=ColorMode.BGR,
             )
             camera = OpenCVCamera(config)
         elif cam_type == "RealSense":
             config = RealSenseCameraConfig(
                 serial_number_or_name=cam_id,
+                width=640,
+                height=360,
                 color_mode=ColorMode.BGR,
             )
             camera = RealSenseCamera(config)
