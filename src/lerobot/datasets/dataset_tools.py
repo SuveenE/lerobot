@@ -265,6 +265,7 @@ def merge_datasets(
         aggr_repo_id=output_repo_id,
         roots=roots,
         aggr_root=output_dir,
+        video_files_size_in_mb=8000,
     )
 
     merged_dataset = LeRobotDataset(
