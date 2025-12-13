@@ -136,6 +136,9 @@ class LeRobotDatasetMetadata:
             self.writer = pq.ParquetWriter(
                 path, schema=table.schema, compression="snappy", use_dictionary=True
             )
+        else:
+            # Reorder columns to match existing writer schema to avoid schema mismatch errors
+            table = table.select([field.name for field in self.writer.schema])
 
         self.writer.write_table(table)
 
@@ -1039,7 +1042,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
-            video_frames = self._query_videos(query_timestamps, ep_idx)
+            try:
+                video_frames = self._query_videos(query_timestamps, ep_idx)
+            except Exception as e:
+                raise RuntimeError(f"VIDEO_DECODE_FAIL ep_idx={ep_idx}") from e
             item = {**video_frames, **item}
 
         if self.image_transforms is not None:
