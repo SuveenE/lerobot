@@ -48,7 +48,7 @@ from lerobot.transport import (
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
 from lerobot.policies.utils import populate_queues
-from lerobot.utils.constants import OBS_IMAGES, ACTION
+from lerobot.utils.constants import OBS_IMAGES, OBS_LANGUAGE, ACTION
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES
@@ -355,7 +355,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
             # Filter observation to only include keys the policy queues expect
             # This prevents predict_action_chunk from trying to stack empty queues
-            observation = {k: v for k, v in observation.items() if k in self.policy._queues and k != ACTION}
+            # But preserve image and language keys which are processed separately by VLA policies
+            observation = {
+                k: v for k, v in observation.items()
+                if (k in self.policy._queues and k != ACTION)
+                or k.startswith(OBS_IMAGES)
+                or k.startswith(OBS_LANGUAGE)
+            }
             self.logger.info(f"Filtered observation keys: {list(observation.keys())}")
 
         self.logger.info(f"Observation keys passed to predict_action_chunk: {list(observation.keys())}")
