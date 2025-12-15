@@ -814,7 +814,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         license: str | None = "apache-2.0",
         tag_version: bool = True,
         push_videos: bool = True,
-        private: bool = False,
+        private: bool = True,
         allow_patterns: list[str] | str | None = None,
         upload_large_folder: bool = False,
         **card_kwargs,
