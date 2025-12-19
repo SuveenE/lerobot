@@ -438,7 +438,6 @@ def test_factory(env_name, repo_id, policy_name):
 
 
 # TODO(alexander-soare): If you're hunting for savings on testing time, this takes about 5 seconds.
-@pytest.mark.skip("TODO after fix multidataset")
 def test_multidataset_frames():
     """Check that all dataset frames are incorporated."""
     # Note: use the image variants of the dataset to make the test approx 3x faster.

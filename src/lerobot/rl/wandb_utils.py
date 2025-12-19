@@ -33,7 +33,13 @@ def cfg_to_group(cfg: TrainPipelineConfig, return_list: bool = False) -> list[st
         f"seed:{cfg.seed}",
     ]
     if cfg.dataset is not None:
-        lst.append(f"dataset:{cfg.dataset.repo_id}")
+        repo_id = cfg.dataset.repo_id
+        if isinstance(repo_id, list):
+            # For multi-dataset, use count and first dataset name (truncated)
+            first_repo = repo_id[0].split("/")[-1][:20] if "/" in repo_id[0] else repo_id[0][:20]
+            lst.append(f"datasets:{len(repo_id)}x_{first_repo}")
+        else:
+            lst.append(f"dataset:{repo_id}")
     if cfg.env is not None:
         lst.append(f"env:{cfg.env.type}")
     return lst if return_list else "-".join(lst)

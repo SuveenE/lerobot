@@ -22,11 +22,23 @@ from lerobot.datasets.video_utils import get_safe_default_codec
 
 @dataclass
 class DatasetConfig:
-    # You may provide a list of datasets here. `train.py` creates them all and concatenates them. Note: only data
-    # keys common between the datasets are kept. Each dataset gets and additional transform that inserts the
+    # You may provide a single dataset repo_id as a string, or a list of datasets for multi-dataset training.
+    # When multiple datasets are provided, `train.py` creates them all and concatenates them. Note: only data
+    # keys common between the datasets are kept. Each dataset gets an additional transform that inserts the
     # "dataset_index" into the returned item. The index mapping is made according to the order in which the
     # datasets are provided.
-    repo_id: str
+    # For CLI usage with a single dataset: --dataset.repo_id=lerobot/pusht
+    # For multi-dataset training, use a YAML config file with repo_ids as a list.
+    repo_id: str | list[str]
+
+    def __post_init__(self):
+        # Handle case where YAML parser might pass a list but draccus converts it to string
+        if isinstance(self.repo_id, str) and self.repo_id.startswith("[") and self.repo_id.endswith("]"):
+            import ast
+            try:
+                self.repo_id = ast.literal_eval(self.repo_id)
+            except (ValueError, SyntaxError):
+                pass  # Keep as string if parsing fails
     # Root directory where the dataset will be stored (e.g. 'dataset/path').
     root: str | None = None
     episodes: list[int] | None = None

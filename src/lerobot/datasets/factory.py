@@ -74,9 +74,6 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
     Args:
         cfg (TrainPipelineConfig): A TrainPipelineConfig config which contains a DatasetConfig and a PreTrainedConfig.
 
-    Raises:
-        NotImplementedError: The MultiLeRobotDataset is currently deactivated.
-
     Returns:
         LeRobotDataset | MultiLeRobotDataset
     """
@@ -112,13 +109,26 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
                 tolerance_s=cfg.tolerance_s,
             )
     else:
-        raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
+        # Multi-dataset support: create a MultiLeRobotDataset from multiple repo_ids
+        repo_ids = cfg.dataset.repo_id
+
+        if cfg.dataset.streaming:
+            raise NotImplementedError("Streaming mode is not supported for multi-dataset training.")
+
+        # Resolve delta_timestamps using the first dataset's metadata
+        # All datasets are expected to have the same fps
+        first_ds_meta = LeRobotDatasetMetadata(
+            repo_ids[0], root=cfg.dataset.root, revision=cfg.dataset.revision
+        )
+        delta_timestamps = resolve_delta_timestamps(cfg.policy, first_ds_meta)
+
         dataset = MultiLeRobotDataset(
-            cfg.dataset.repo_id,
-            # TODO(aliberts): add proper support for multi dataset
-            # delta_timestamps=delta_timestamps,
+            repo_ids,
+            root=cfg.dataset.root,
+            delta_timestamps=delta_timestamps,
             image_transforms=image_transforms,
             video_backend=cfg.dataset.video_backend,
+            tolerances_s={repo_id: cfg.tolerance_s for repo_id in repo_ids},
         )
         logging.info(
             "Multiple datasets were provided. Applied the following index mapping to the provided datasets: "

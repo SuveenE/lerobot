@@ -15,9 +15,11 @@
 # limitations under the License.
 import concurrent.futures
 import contextlib
+import copy
 import logging
 import shutil
 import tempfile
+from bisect import bisect_right
 from collections.abc import Callable
 from pathlib import Path
 
@@ -1597,7 +1599,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         root: str | Path | None = None,
         episodes: dict | None = None,
         image_transforms: Callable | None = None,
-        delta_timestamps: dict[str, list[float]] | None = None,
+        delta_timestamps: dict[str, list[float]] | dict[str, dict[str, list[float]]] | None = None,
         tolerances_s: dict | None = None,
         download_videos: bool = True,
         video_backend: str | None = None,
@@ -1606,21 +1608,46 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         self.repo_ids = repo_ids
         self.root = Path(root) if root else HF_LEROBOT_HOME
         self.tolerances_s = tolerances_s if tolerances_s else dict.fromkeys(repo_ids, 0.0001)
-        # Construct the underlying datasets passing everything but `transform` and `delta_timestamps` which
-        # are handled by this class.
-        self._datasets = [
-            LeRobotDataset(
-                repo_id,
-                root=self.root / repo_id,
-                episodes=episodes[repo_id] if episodes else None,
-                image_transforms=image_transforms,
-                delta_timestamps=delta_timestamps,
-                tolerance_s=self.tolerances_s[repo_id],
-                download_videos=download_videos,
-                video_backend=video_backend,
-            )
-            for repo_id in repo_ids
-        ]
+        self._meta = None  # Cache for the combined metadata
+        self._cumulative_frames: list[int] | None = None  # Cache for O(1) __getitem__ lookup
+
+        # Support per-dataset delta_timestamps (dict of dicts) or shared delta_timestamps
+        self._per_dataset_delta_timestamps = (
+            isinstance(delta_timestamps, dict)
+            and len(delta_timestamps) > 0
+            and isinstance(next(iter(delta_timestamps.values())), dict)
+        )
+
+        # Construct the underlying datasets
+        self._datasets = []
+        for repo_id in repo_ids:
+            # Determine delta_timestamps for this dataset
+            if self._per_dataset_delta_timestamps:
+                ds_delta_timestamps = delta_timestamps.get(repo_id) if delta_timestamps else None
+            else:
+                ds_delta_timestamps = delta_timestamps
+
+            try:
+                dataset = LeRobotDataset(
+                    repo_id,
+                    root=self.root / repo_id,
+                    episodes=episodes.get(repo_id) if episodes else None,
+                    image_transforms=image_transforms,
+                    delta_timestamps=ds_delta_timestamps,
+                    tolerance_s=self.tolerances_s.get(repo_id, 0.0001),
+                    download_videos=download_videos,
+                    video_backend=video_backend,
+                )
+                self._datasets.append(dataset)
+            except Exception as e:
+                logging.warning(f"Failed to load dataset {repo_id}: {e}")
+                continue
+
+        if len(self._datasets) == 0:
+            raise RuntimeError("No datasets were successfully loaded.")
+
+        # Update repo_ids to only include successfully loaded datasets
+        self.repo_ids = [ds.repo_id for ds in self._datasets]
 
         # Disable any data keys that are not common across all of the datasets. Note: we may relax this
         # restriction in future iterations of this class. For now, this is necessary at least for being able
@@ -1636,10 +1663,11 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
             )
         for repo_id, ds in zip(self.repo_ids, self._datasets, strict=True):
             extra_keys = set(ds.features).difference(intersection_features)
-            logging.warning(
-                f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the "
-                "other datasets."
-            )
+            if extra_keys:
+                logging.warning(
+                    f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the "
+                    "other datasets."
+                )
             self.disabled_features.update(extra_keys)
 
         self.image_transforms = image_transforms
@@ -1656,6 +1684,80 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         This index is incorporated as a data key in the dictionary returned by `__getitem__`.
         """
         return {repo_id: i for i, repo_id in enumerate(self.repo_ids)}
+
+    @property
+    def meta(self) -> LeRobotDatasetMetadata:
+        """Return metadata compatible with training pipeline.
+
+        Returns a deep copy of the metadata from the dataset with the most cameras,
+        updated with aggregated stats and combined episode information.
+        """
+        if self._meta is not None:
+            return self._meta
+
+        # Get metadata from dataset with most cameras (following v2 pattern)
+        base_meta = None
+        for ds in self._datasets:
+            if base_meta is None or len(ds.meta.camera_keys) > len(base_meta.camera_keys):
+                base_meta = ds.meta
+
+        # Create a deep copy to avoid modifying the original
+        meta = copy.deepcopy(base_meta)
+
+        # Update with aggregated values
+        meta.stats = self.stats
+        meta.info["total_episodes"] = self.num_episodes
+        meta.info["total_frames"] = self.num_frames
+        meta.episodes = self._build_combined_episodes()
+
+        self._meta = meta
+        return meta
+
+    def _build_combined_episodes(self) -> datasets.Dataset:
+        """Build combined episode Dataset with offset indices for EpisodeAwareSampler.
+
+        Concatenates episode metadata from all sub-datasets, adjusting the
+        `dataset_from_index` and `dataset_to_index` columns to account for
+        frame offsets.
+        """
+        all_episode_dicts = []
+        frame_offset = 0
+        episode_offset = 0
+
+        for ds in self._datasets:
+            # Convert the HF dataset to a list of dicts for easier manipulation
+            for i in range(len(ds.meta.episodes)):
+                ep_dict = {key: ds.meta.episodes[i][key] for key in ds.meta.episodes.features}
+                # Offset the frame indices
+                ep_dict["dataset_from_index"] = ep_dict["dataset_from_index"] + frame_offset
+                ep_dict["dataset_to_index"] = ep_dict["dataset_to_index"] + frame_offset
+                # Update episode_index to be globally unique
+                ep_dict["episode_index"] = episode_offset + i
+                all_episode_dicts.append(ep_dict)
+
+            frame_offset += ds.num_frames
+            episode_offset += ds.num_episodes
+
+        # Convert back to HF Dataset
+        if len(all_episode_dicts) == 0:
+            return datasets.Dataset.from_dict({})
+
+        # Build dict of lists from list of dicts
+        combined_dict = {key: [] for key in all_episode_dicts[0]}
+        for ep_dict in all_episode_dicts:
+            for key in combined_dict:
+                combined_dict[key].append(ep_dict[key])
+
+        return datasets.Dataset.from_dict(combined_dict)
+
+    @property
+    def episodes(self) -> list[int] | None:
+        """Episode indices to use. Returns None to indicate all episodes should be used.
+
+        Note: For MultiLeRobotDataset, episode filtering is done per-dataset at construction time.
+        This property returns None to tell EpisodeAwareSampler to use all combined episodes.
+        """
+        return None
 
     @property
     def fps(self) -> int:
@@ -1727,22 +1829,27 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.num_frames
 
+    def _get_cumulative_frames(self) -> list[int]:
+        """Get or compute the cumulative frame counts for O(1) __getitem__ lookup."""
+        if self._cumulative_frames is None:
+            self._cumulative_frames = [0]
+            for ds in self._datasets:
+                self._cumulative_frames.append(self._cumulative_frames[-1] + ds.num_frames)
+        return self._cumulative_frames
+
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         if idx >= len(self):
             raise IndexError(f"Index {idx} out of bounds.")
-        # Determine which dataset to get an item from based on the index.
-        start_idx = 0
-        dataset_idx = 0
-        for dataset in self._datasets:
-            if idx >= start_idx + dataset.num_frames:
-                start_idx += dataset.num_frames
-                dataset_idx += 1
-                continue
-            break
-        else:
-            raise AssertionError("We expect the loop to break out as long as the index is within bounds.")
+
+        # Use binary search with cumulative frames for O(1) lookup
+        cumulative_frames = self._get_cumulative_frames()
+        dataset_idx = bisect_right(cumulative_frames, idx) - 1
+        start_idx = cumulative_frames[dataset_idx]
+
         item = self._datasets[dataset_idx][idx - start_idx]
         item["dataset_index"] = torch.tensor(dataset_idx)
+
+        # Remove disabled features
         for data_key in self.disabled_features:
             if data_key in item:
                 del item[data_key]
