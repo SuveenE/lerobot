@@ -152,7 +152,7 @@ def validate_dataset(
     repo_id: str,
     root: str | Path | None = None,
     quick: bool = False,
-    sample_rate: float = 0.1,
+    sample_rate: float = 1.0,
 ) -> dict:
     """
     Validate a LeRobot dataset for potential training issues.
@@ -303,23 +303,44 @@ def validate_dataset(
             num_samples = max(1, int(len(dataset) * sample_rate))
             indices = torch.randperm(len(dataset))[:num_samples].tolist()
 
+            failed_indices = []
             for i, idx in enumerate(indices):
                 try:
                     _ = dataset[idx]
                     results["samples_checked"] += 1
-                except RuntimeError as e:
-                    if "Invalid frame index" in str(e):
-                        results["issues"].append({
-                            "type": "runtime_frame_error",
-                            "sample_idx": idx,
-                            "message": str(e),
-                            "severity": "error",
-                        })
+                except (RuntimeError, AssertionError) as e:
+                    error_msg = str(e)
+                    # Try to get episode info for this sample
+                    try:
+                        episode_idx = dataset.hf_dataset[idx]["episode_index"]
+                        frame_idx = dataset.hf_dataset[idx]["frame_index"]
+                    except Exception:
+                        episode_idx = "unknown"
+                        frame_idx = "unknown"
+                    
+                    failed_indices.append(idx)
+                    
+                    if "Invalid frame index" in error_msg:
+                        error_type = "runtime_frame_error"
+                    elif "tolerance" in error_msg.lower():
+                        error_type = "tolerance_error"
                     else:
-                        raise
+                        error_type = "load_error"
+                    
+                    results["issues"].append({
+                        "type": error_type,
+                        "sample_idx": idx,
+                        "episode_idx": episode_idx,
+                        "frame_idx": frame_idx,
+                        "message": error_msg[:200],  # Truncate long messages
+                        "severity": "error",
+                    })
 
-                if (i + 1) % 100 == 0:
-                    logger.info(f"Deep validation: checked {i + 1}/{num_samples} samples...")
+                if (i + 1) % 500 == 0:
+                    logger.info(f"Deep validation: checked {i + 1}/{num_samples} samples, {len(failed_indices)} failures...")
+            
+            if failed_indices:
+                logger.info(f"Deep validation complete: {len(failed_indices)} failed samples out of {num_samples}")
         else:
             logger.info(f"Skipping deep validation due to {errors_before} errors found in metadata check")
 
@@ -341,19 +362,44 @@ def print_results(results: dict) -> None:
     errors = [i for i in results["issues"] if i.get("severity") == "error"]
     warnings = [i for i in results["issues"] if i.get("severity") == "warning"]
 
+    repo_id = results['repo_id']
+    
     if not results["issues"]:
         print("\n✅ No issues found! Dataset is ready for training.")
     else:
         if errors:
             print(f"\n❌ ERRORS ({len(errors)}):")
             print("-" * 50)
-            for issue in errors[:20]:  # Show first 20 errors
-                print(f"  • {issue['message']}")
-                if issue["type"] == "timestamp_exceeds_video_duration":
-                    print(f"    Video has {issue['num_frames']} frames at {issue['video_fps']:.1f} fps")
-                    print(f"    Dataset expects {issue['dataset_fps']} fps")
-            if len(errors) > 20:
-                print(f"  ... and {len(errors) - 20} more errors")
+            
+            # Group errors by type
+            error_types = {}
+            for issue in errors:
+                error_type = issue.get("type", "unknown")
+                if error_type not in error_types:
+                    error_types[error_type] = []
+                error_types[error_type].append(issue)
+            
+            for error_type, type_errors in error_types.items():
+                print(f"\n  [{error_type}] ({len(type_errors)} errors):")
+                for issue in type_errors[:10]:  # Show first 10 of each type
+                    if issue.get("episode_idx") is not None:
+                        print(f"    • Sample {issue.get('sample_idx')}: Episode {issue.get('episode_idx')}, Frame {issue.get('frame_idx')}")
+                        print(f"      {issue['message'][:100]}")
+                    elif issue["type"] == "timestamp_exceeds_video_duration":
+                        print(f"    • {issue['message']}")
+                        print(f"      Video has {issue['num_frames']} frames at {issue['video_fps']:.1f} fps, dataset expects {issue['dataset_fps']} fps")
+                    else:
+                        print(f"    • {issue['message']}")
+                if len(type_errors) > 10:
+                    print(f"    ... and {len(type_errors) - 10} more {error_type} errors")
+            
+            # Print failed samples in CSV format for easy copy-paste
+            failed_samples = [i for i in errors if i.get("sample_idx") is not None]
+            if failed_samples:
+                print("\n  FAILED SAMPLES (CSV format):")
+                print("  dataset,episode,frame,sample_idx,error_type")
+                for issue in failed_samples:
+                    print(f"  {repo_id},{issue.get('episode_idx', 'N/A')},{issue.get('frame_idx', 'N/A')},{issue.get('sample_idx', 'N/A')},{issue.get('type', 'unknown')}")
 
         if warnings:
             print(f"\n⚠️  WARNINGS ({len(warnings)}):")
@@ -364,6 +410,34 @@ def print_results(results: dict) -> None:
                 print(f"  ... and {len(warnings) - 10} more warnings")
 
     print("\n" + "=" * 70)
+
+
+def write_errors_to_file(results: dict, output_file: str) -> None:
+    """Write errors to a CSV file for easy analysis."""
+    import csv
+    
+    repo_id = results['repo_id']
+    errors = [i for i in results["issues"] if i.get("severity") == "error"]
+    
+    # Check if file exists to determine if we need to write header
+    file_exists = Path(output_file).exists()
+    
+    with open(output_file, 'a', newline='') as f:
+        writer = csv.writer(f)
+        
+        # Write header if file is new
+        if not file_exists:
+            writer.writerow(['dataset', 'episode', 'frame', 'sample_idx', 'error_type', 'message'])
+        
+        for issue in errors:
+            writer.writerow([
+                repo_id,
+                issue.get('episode_idx', 'N/A'),
+                issue.get('frame_idx', 'N/A'),
+                issue.get('sample_idx', 'N/A'),
+                issue.get('type', 'unknown'),
+                issue.get('message', '')[:200].replace('\n', ' '),  # Truncate and remove newlines
+            ])
 
 
 def main():
@@ -390,8 +464,14 @@ def main():
     parser.add_argument(
         "--sample-rate",
         type=float,
-        default=0.1,
-        help="Fraction of samples to check in deep validation (default: 0.1)",
+        default=1.0,
+        help="Fraction of samples to check in deep validation (default: 1.0 = all samples)",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=str,
+        default=None,
+        help="Path to write errors CSV file (e.g., errors.csv)",
     )
 
     args = parser.parse_args()
@@ -405,8 +485,13 @@ def main():
 
     print_results(results)
 
-    # Exit with error code if there are errors
+    # Write errors to CSV file if specified
     errors = [i for i in results["issues"] if i.get("severity") == "error"]
+    if args.output_file and errors:
+        write_errors_to_file(results, args.output_file)
+        print(f"\n📁 Errors written to: {args.output_file}")
+
+    # Exit with error code if there are errors
     if errors:
         exit(1)
 
