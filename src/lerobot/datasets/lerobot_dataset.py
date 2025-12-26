@@ -32,6 +32,7 @@ import torch
 import torch.utils
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import RevisionNotFoundError
+from requests import HTTPError
 
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
@@ -803,7 +804,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         card.push_to_hub(repo_id=self.repo_id, repo_type="dataset", revision=branch)
 
         if tag_version:
-            with contextlib.suppress(RevisionNotFoundError):
+            with contextlib.suppress(RevisionNotFoundError, HTTPError):
                 hub_api.delete_tag(self.repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
             hub_api.create_tag(self.repo_id, tag=CODEBASE_VERSION, revision=branch, repo_type="dataset")
 
