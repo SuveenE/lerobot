@@ -32,6 +32,7 @@ import torch
 import torch.utils
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import RevisionNotFoundError
+from requests import HTTPError
 
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
@@ -136,6 +137,9 @@ class LeRobotDatasetMetadata:
             self.writer = pq.ParquetWriter(
                 path, schema=table.schema, compression="snappy", use_dictionary=True
             )
+        else:
+            # Reorder columns to match existing writer schema to avoid schema mismatch errors
+            table = table.select([field.name for field in self.writer.schema])
 
         self.writer.write_table(table)
 
@@ -557,7 +561,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         episodes: list[int] | None = None,
         image_transforms: Callable | None = None,
         delta_timestamps: dict[str, list[float]] | None = None,
-        tolerance_s: float = 1e-4,
+        tolerance_s: float = 1e-3,
         revision: str | None = None,
         force_cache_sync: bool = False,
         download_videos: bool = True,
@@ -800,7 +804,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         card.push_to_hub(repo_id=self.repo_id, repo_type="dataset", revision=branch)
 
         if tag_version:
-            with contextlib.suppress(RevisionNotFoundError):
+            with contextlib.suppress(RevisionNotFoundError, HTTPError):
                 hub_api.delete_tag(self.repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
             hub_api.create_tag(self.repo_id, tag=CODEBASE_VERSION, revision=branch, repo_type="dataset")
 
@@ -1039,7 +1043,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
-            video_frames = self._query_videos(query_timestamps, ep_idx)
+            try:
+                video_frames = self._query_videos(query_timestamps, ep_idx)
+            except Exception as e:
+                raise RuntimeError(f"VIDEO_DECODE_FAIL ep_idx={ep_idx}") from e
             item = {**video_frames, **item}
 
         if self.image_transforms is not None:
@@ -1537,7 +1544,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         root: str | Path | None = None,
         robot_type: str | None = None,
         use_videos: bool = True,
-        tolerance_s: float = 1e-4,
+        tolerance_s: float = 1e-3,
         image_writer_processes: int = 0,
         image_writer_threads: int = 0,
         video_backend: str | None = None,
