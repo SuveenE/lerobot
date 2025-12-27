@@ -20,6 +20,7 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 import tqdm
 
 from lerobot.datasets.compute_stats import aggregate_stats
@@ -407,7 +408,9 @@ def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_si
         src_path = src_meta.root / DEFAULT_DATA_PATH.format(
             chunk_index=src_chunk_idx, file_index=src_file_idx
         )
-        df = pd.read_parquet(src_path)
+        # Use pyarrow to read parquet files with nested list types that pandas can't handle directly
+        table = pq.read_table(src_path)
+        df = table.to_pandas(types_mapper=pd.ArrowDtype)
         df = update_data_df(df, src_meta, dst_meta)
 
         data_idx = append_or_create_parquet_file(
@@ -452,7 +455,9 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx):
     chunk_file_ids = sorted(chunk_file_ids)
     for chunk_idx, file_idx in chunk_file_ids:
         src_path = src_meta.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
-        df = pd.read_parquet(src_path)
+        # Use pyarrow to read parquet files with nested list types that pandas can't handle directly
+        table = pq.read_table(src_path)
+        df = table.to_pandas(types_mapper=pd.ArrowDtype)
         df = update_meta_data(
             df,
             dst_meta,
@@ -527,7 +532,9 @@ def append_or_create_parquet_file(
         final_df = df
         target_path = new_path
     else:
-        existing_df = pd.read_parquet(dst_path)
+        # Use pyarrow to read parquet files with nested list types that pandas can't handle directly
+        existing_table = pq.read_table(dst_path)
+        existing_df = existing_table.to_pandas(types_mapper=pd.ArrowDtype)
         final_df = pd.concat([existing_df, df], ignore_index=True)
         target_path = dst_path
 
