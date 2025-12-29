@@ -674,7 +674,11 @@ class RobotClient:
         recording_active = self.dataset is not None
 
         if recording_active:
-            self.logger.info(f"Recording episode {self.dataset.num_episodes}...")
+            num_episodes_target = self.config.dataset.num_episodes
+            if num_episodes_target is not None:
+                self.logger.info(f"Recording episode {self.dataset.num_episodes} of {num_episodes_target}...")
+            else:
+                self.logger.info(f"Recording episode {self.dataset.num_episodes}...")
 
         while self.running:
             control_loop_start = time.perf_counter()
@@ -704,13 +708,22 @@ class RobotClient:
                 if should_save:
                     self._save_current_episode()
 
+                    # Check if we've reached the target number of episodes
+                    num_episodes_target = self.config.dataset.num_episodes
+                    if num_episodes_target is not None and self.dataset.num_episodes >= num_episodes_target:
+                        self.logger.info(f"Reached target of {num_episodes_target} episodes. Stopping recording.")
+                        should_stop = True
+
                     if should_stop:
-                        self.logger.info("Recording stopped by user request")
+                        self.logger.info("Recording complete")
                         break
                     else:
                         # Start new episode
                         episode_start_time = time.perf_counter()
-                        self.logger.info(f"Starting new episode {self.dataset.num_episodes}...")
+                        if num_episodes_target is not None:
+                            self.logger.info(f"Starting episode {self.dataset.num_episodes} of {num_episodes_target}...")
+                        else:
+                            self.logger.info(f"Starting new episode {self.dataset.num_episodes}...")
 
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency

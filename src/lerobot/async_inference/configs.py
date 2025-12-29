@@ -134,6 +134,11 @@ class DatasetRecordingConfig:
         default=None, metadata={"help": "Maximum episode duration in seconds (None for keyboard-only control)"}
     )
 
+    # Number of episodes to record (None = unlimited, use keyboard to stop)
+    num_episodes: int | None = field(
+        default=None, metadata={"help": "Number of episodes to record (None for unlimited)"}
+    )
+
     # Number of image writer processes
     num_image_writer_processes: int = field(
         default=0, metadata={"help": "Number of subprocesses for saving frames as PNG (0 = threads only)"}
@@ -151,6 +156,9 @@ class DatasetRecordingConfig:
 
         if self.max_episode_seconds is not None and self.max_episode_seconds <= 0:
             raise ValueError(f"max_episode_seconds must be positive, got {self.max_episode_seconds}")
+
+        if self.num_episodes is not None and self.num_episodes <= 0:
+            raise ValueError(f"num_episodes must be positive, got {self.num_episodes}")
 
         if self.root is not None:
             self.root = Path(self.root)
