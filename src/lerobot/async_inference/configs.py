@@ -14,6 +14,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 
@@ -100,6 +101,62 @@ class PolicyServerConfig:
 
 
 @dataclass
+class DatasetRecordingConfig:
+    """Configuration for dataset recording during evaluation.
+
+    This class defines all configurable parameters for recording evaluation
+    rollouts as a LeRobotDataset v3.
+    """
+
+    # Enable/disable recording
+    enabled: bool = field(default=False, metadata={"help": "Enable dataset recording during evaluation"})
+
+    # Dataset identifier (e.g., 'username/eval_yam_async')
+    repo_id: str | None = field(default=None, metadata={"help": "Dataset repository ID (e.g., 'user/eval_dataset')"})
+
+    # Local directory override
+    root: str | Path | None = field(default=None, metadata={"help": "Local directory to store the dataset"})
+
+    # Push to HuggingFace Hub on completion
+    push_to_hub: bool = field(default=False, metadata={"help": "Push dataset to HuggingFace Hub on completion"})
+
+    # Make the dataset private on the Hub
+    private: bool = field(default=True, metadata={"help": "Make the dataset private on HuggingFace Hub"})
+
+    # Tags for the dataset
+    tags: list[str] | None = field(default=None, metadata={"help": "Tags to add to the dataset on the Hub"})
+
+    # Store as video (True) or images (False)
+    use_videos: bool = field(default=True, metadata={"help": "Store camera data as video (True) or images (False)"})
+
+    # Max episode duration in seconds (None = keyboard only)
+    max_episode_seconds: float | None = field(
+        default=None, metadata={"help": "Maximum episode duration in seconds (None for keyboard-only control)"}
+    )
+
+    # Number of image writer processes
+    num_image_writer_processes: int = field(
+        default=0, metadata={"help": "Number of subprocesses for saving frames as PNG (0 = threads only)"}
+    )
+
+    # Number of image writer threads per camera
+    num_image_writer_threads_per_camera: int = field(
+        default=4, metadata={"help": "Number of threads per camera for writing frames"}
+    )
+
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if self.enabled and not self.repo_id:
+            raise ValueError("repo_id must be provided when dataset recording is enabled")
+
+        if self.max_episode_seconds is not None and self.max_episode_seconds <= 0:
+            raise ValueError(f"max_episode_seconds must be positive, got {self.max_episode_seconds}")
+
+        if self.root is not None:
+            self.root = Path(self.root)
+
+
+@dataclass
 class RobotClientConfig:
     """Configuration for RobotClient.
 
@@ -140,6 +197,12 @@ class RobotClientConfig:
     # Debug configuration
     debug_visualize_queue_size: bool = field(
         default=False, metadata={"help": "Visualize the action queue size"}
+    )
+
+    # Dataset recording configuration
+    dataset: DatasetRecordingConfig = field(
+        default_factory=DatasetRecordingConfig,
+        metadata={"help": "Configuration for dataset recording during evaluation"},
     )
 
     @property
@@ -190,4 +253,12 @@ class RobotClientConfig:
             "task": self.task,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
+            "dataset": {
+                "enabled": self.dataset.enabled,
+                "repo_id": self.dataset.repo_id,
+                "root": str(self.dataset.root) if self.dataset.root else None,
+                "push_to_hub": self.dataset.push_to_hub,
+                "use_videos": self.dataset.use_videos,
+                "max_episode_seconds": self.dataset.max_episode_seconds,
+            },
         }

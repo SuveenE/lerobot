@@ -30,8 +30,28 @@ python src/lerobot/async_inference/robot_client.py \
     --aggregate_fn_name=weighted_average \
     --debug_visualize_queue_size=True
 ```
+
+Example with dataset recording:
+```shell
+python src/lerobot/async_inference/robot_client.py \
+    --robot.type=bi_yam_follower \
+    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+    --task="Pick and place cube" \
+    --server_address=remote-gpu:8080 \
+    --policy_type=act \
+    --pretrained_name_or_path=user/model \
+    --dataset.enabled=true \
+    --dataset.repo_id=user/eval_yam_async \
+    --dataset.push_to_hub=true \
+    --dataset.max_episode_seconds=30
+
+# Keyboard controls when recording:
+#   'n' + Enter: Save current episode and start new one
+#   's' + Enter: Save current episode and stop recording
+```
 """
 
+import contextlib
 import logging
 import pickle  # nosec
 import threading
@@ -48,6 +68,10 @@ import torch
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
+from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
+from lerobot.processor import make_default_processors
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
@@ -63,6 +87,8 @@ from lerobot.transport import (
     services_pb2_grpc,  # type: ignore
 )
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
+from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.utils.control_utils import init_keyboard_listener, is_headless
 
 from .configs import RobotClientConfig
 from .constants import SUPPORTED_ROBOTS
@@ -136,6 +162,66 @@ class RobotClient:
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set - observations qualify for direct processing
 
+        # Dataset recording initialization
+        self.dataset: LeRobotDataset | None = None
+        self.dataset_features: dict | None = None
+        self.keyboard_listener = None
+        self.keyboard_events: dict | None = None
+
+        if config.dataset.enabled:
+            self._init_dataset_recording()
+
+    def _init_dataset_recording(self):
+        """Initialize dataset recording for evaluation."""
+        self.logger.info("Initializing dataset recording...")
+
+        # Get default processors for feature transformation
+        teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+
+        # Build dataset features from robot observation and action features
+        self.dataset_features = combine_feature_dicts(
+            aggregate_pipeline_dataset_features(
+                pipeline=teleop_action_processor,
+                initial_features=create_initial_features(action=self.robot.action_features),
+                use_videos=self.config.dataset.use_videos,
+            ),
+            aggregate_pipeline_dataset_features(
+                pipeline=robot_observation_processor,
+                initial_features=create_initial_features(observation=self.robot.observation_features),
+                use_videos=self.config.dataset.use_videos,
+            ),
+        )
+
+        # Determine number of cameras for image writer threads
+        num_cameras = len(self.robot.cameras) if hasattr(self.robot, "cameras") else 0
+        num_image_writer_threads = self.config.dataset.num_image_writer_threads_per_camera * max(num_cameras, 1)
+
+        # Create the dataset
+        self.dataset = LeRobotDataset.create(
+            repo_id=self.config.dataset.repo_id,
+            fps=self.config.fps,
+            root=self.config.dataset.root,
+            robot_type=self.robot.name if hasattr(self.robot, "name") else None,
+            features=self.dataset_features,
+            use_videos=self.config.dataset.use_videos,
+            image_writer_processes=self.config.dataset.num_image_writer_processes,
+            image_writer_threads=num_image_writer_threads,
+        )
+
+        self.logger.info(f"Dataset created at {self.dataset.root} with features: {list(self.dataset_features.keys())}")
+
+        # Initialize keyboard listener for episode control
+        if not is_headless():
+            self.keyboard_listener, self.keyboard_events = init_keyboard_listener()
+            self.logger.info("Keyboard controls enabled: 'n' = save episode, 's' = stop recording")
+        else:
+            self.keyboard_events = {
+                "exit_early": False,
+                "rerecord_episode": False,
+                "stop_recording": False,
+            }
+            self.logger.warning("Headless mode: keyboard controls not available. Use time-based episodes only.")
+
     @property
     def running(self):
         return not self.shutdown_event.is_set()
@@ -171,8 +257,39 @@ class RobotClient:
             return False
 
     def stop(self):
-        """Stop the robot client"""
+        """Stop the robot client and finalize dataset if recording"""
         self.shutdown_event.set()
+
+        # Finalize dataset recording
+        if self.dataset is not None:
+            try:
+                # Check if there are any unsaved frames in the buffer
+                if self.dataset.episode_buffer is not None and self.dataset.episode_buffer.get("size", 0) > 0:
+                    self.logger.info("Saving final episode before shutdown...")
+                    self._save_current_episode()
+
+                # Finalize the dataset (close parquet writers)
+                self.logger.info("Finalizing dataset...")
+                self.dataset.finalize()
+
+                # Push to hub if configured
+                if self.config.dataset.push_to_hub:
+                    self.logger.info(f"Pushing dataset to HuggingFace Hub: {self.config.dataset.repo_id}")
+                    self.dataset.push_to_hub(
+                        tags=self.config.dataset.tags,
+                        private=self.config.dataset.private,
+                    )
+                    self.logger.info("Dataset pushed to Hub successfully")
+
+                self.logger.info(f"Dataset recording complete. Total episodes: {self.dataset.num_episodes}")
+
+            except Exception as e:
+                self.logger.error(f"Error finalizing dataset: {e}")
+
+        # Stop keyboard listener if active
+        if self.keyboard_listener is not None:
+            with contextlib.suppress(Exception):
+                self.keyboard_listener.stop()
 
         self.robot.disconnect()
         self.logger.debug("Robot disconnected")
@@ -352,6 +469,64 @@ class RobotClient:
         action = {key: action_tensor[i].item() for i, key in enumerate(self.robot.action_features)}
         return action
 
+    def _build_recording_frame(
+        self,
+        observation: RawObservation,
+        action: dict[str, Any],
+        task: str,
+        timestamp: float,
+    ) -> dict:
+        """Build a frame dict for dataset recording.
+
+        Args:
+            observation: Raw observation from the robot
+            action: Action dict that was executed
+            task: Task description string
+            timestamp: Timestamp for this frame (relative to episode start)
+
+        Returns:
+            Frame dict ready for dataset.add_frame()
+        """
+        # Build observation frame
+        obs_frame = build_dataset_frame(self.dataset_features, observation, prefix=OBS_STR)
+
+        # Build action frame
+        action_frame = build_dataset_frame(self.dataset_features, action, prefix=ACTION)
+
+        # Combine into a single frame with task and timestamp
+        frame = {
+            **obs_frame,
+            **action_frame,
+            "task": task,
+            "timestamp": timestamp,
+        }
+
+        return frame
+
+    def _record_frame(
+        self,
+        observation: RawObservation,
+        action: dict[str, Any],
+        task: str,
+        timestamp: float,
+    ) -> None:
+        """Record a single frame to the dataset.
+
+        Args:
+            observation: Raw observation from the robot
+            action: Action dict that was executed
+            task: Task description string
+            timestamp: Timestamp for this frame
+        """
+        if self.dataset is None:
+            return
+
+        try:
+            frame = self._build_recording_frame(observation, action, task, timestamp)
+            self.dataset.add_frame(frame)
+        except Exception as e:
+            self.logger.error(f"Error recording frame: {e}")
+
     def control_loop_action(self, verbose: bool = False) -> dict[str, Any]:
         """Reading and performing actions in local queue"""
 
@@ -440,6 +615,51 @@ class RobotClient:
         except Exception as e:
             self.logger.error(f"Error in observation sender: {e}")
 
+    def _check_episode_end(self, episode_start_time: float) -> tuple[bool, bool]:
+        """Check if the current episode should end.
+
+        Args:
+            episode_start_time: The time when the current episode started
+
+        Returns:
+            Tuple of (should_save_episode, should_stop_recording)
+        """
+        should_save = False
+        should_stop = False
+
+        # Check keyboard events
+        if self.keyboard_events is not None:
+            if self.keyboard_events.get("exit_early", False):
+                should_save = True
+                self.keyboard_events["exit_early"] = False
+                self.logger.info("Keyboard trigger: Saving episode...")
+
+            if self.keyboard_events.get("stop_recording", False):
+                should_save = True
+                should_stop = True
+                self.logger.info("Keyboard trigger: Stopping recording...")
+
+        # Check time-based trigger
+        max_seconds = self.config.dataset.max_episode_seconds
+        if max_seconds is not None and self.dataset is not None:
+            elapsed = time.perf_counter() - episode_start_time
+            if elapsed >= max_seconds:
+                should_save = True
+                self.logger.info(f"Time trigger: Episode reached {max_seconds}s, saving...")
+
+        return should_save, should_stop
+
+    def _save_current_episode(self) -> None:
+        """Save the current episode to the dataset."""
+        if self.dataset is None:
+            return
+
+        try:
+            self.dataset.save_episode()
+            self.logger.info(f"Episode {self.dataset.num_episodes - 1} saved successfully")
+        except Exception as e:
+            self.logger.error(f"Error saving episode: {e}")
+
     def control_loop(self, task: str, verbose: bool = False) -> tuple[Observation, Action]:
         """Combined function for executing actions and streaming observations"""
         # Wait at barrier for synchronized start
@@ -449,8 +669,16 @@ class RobotClient:
         _performed_action = None
         _captured_observation = None
 
+        # Episode tracking for dataset recording
+        episode_start_time = time.perf_counter()
+        recording_active = self.dataset is not None
+
+        if recording_active:
+            self.logger.info(f"Recording episode {self.dataset.num_episodes}...")
+
         while self.running:
             control_loop_start = time.perf_counter()
+
             """Control loop: (1) Performing actions, when available"""
             if self.actions_available():
                 _performed_action = self.control_loop_action(verbose)
@@ -458,6 +686,31 @@ class RobotClient:
             """Control loop: (2) Streaming observations to the remote policy server"""
             if self._ready_to_send_observation():
                 _captured_observation = self.control_loop_observation(task, verbose)
+
+            """Control loop: (3) Recording frame to dataset (if enabled)"""
+            if recording_active and _performed_action is not None and _captured_observation is not None:
+                frame_timestamp = time.perf_counter() - episode_start_time
+                self._record_frame(
+                    observation=_captured_observation,
+                    action=_performed_action,
+                    task=task,
+                    timestamp=frame_timestamp,
+                )
+
+            """Control loop: (4) Check for episode boundaries (keyboard or time-based)"""
+            if recording_active:
+                should_save, should_stop = self._check_episode_end(episode_start_time)
+
+                if should_save:
+                    self._save_current_episode()
+
+                    if should_stop:
+                        self.logger.info("Recording stopped by user request")
+                        break
+                    else:
+                        # Start new episode
+                        episode_start_time = time.perf_counter()
+                        self.logger.info(f"Starting new episode {self.dataset.num_episodes}...")
 
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency
