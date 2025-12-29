@@ -474,7 +474,6 @@ class RobotClient:
         observation: RawObservation,
         action: dict[str, Any],
         task: str,
-        timestamp: float,
     ) -> dict:
         """Build a frame dict for dataset recording.
 
@@ -482,7 +481,6 @@ class RobotClient:
             observation: Raw observation from the robot
             action: Action dict that was executed
             task: Task description string
-            timestamp: Timestamp for this frame (relative to episode start)
 
         Returns:
             Frame dict ready for dataset.add_frame()
@@ -493,12 +491,12 @@ class RobotClient:
         # Build action frame
         action_frame = build_dataset_frame(self.dataset_features, action, prefix=ACTION)
 
-        # Combine into a single frame with task and timestamp
+        # Combine into a single frame with task
+        # Note: timestamp is automatically computed by add_frame() from frame_index / fps
         frame = {
             **obs_frame,
             **action_frame,
             "task": task,
-            "timestamp": timestamp,
         }
 
         return frame
@@ -508,7 +506,6 @@ class RobotClient:
         observation: RawObservation,
         action: dict[str, Any],
         task: str,
-        timestamp: float,
     ) -> None:
         """Record a single frame to the dataset.
 
@@ -516,13 +513,12 @@ class RobotClient:
             observation: Raw observation from the robot
             action: Action dict that was executed
             task: Task description string
-            timestamp: Timestamp for this frame
         """
         if self.dataset is None:
             return
 
         try:
-            frame = self._build_recording_frame(observation, action, task, timestamp)
+            frame = self._build_recording_frame(observation, action, task)
             self.dataset.add_frame(frame)
         except Exception as e:
             self.logger.error(f"Error recording frame: {e}")
@@ -693,12 +689,10 @@ class RobotClient:
 
             """Control loop: (3) Recording frame to dataset (if enabled)"""
             if recording_active and _performed_action is not None and _captured_observation is not None:
-                frame_timestamp = time.perf_counter() - episode_start_time
                 self._record_frame(
                     observation=_captured_observation,
                     action=_performed_action,
                     task=task,
-                    timestamp=frame_timestamp,
                 )
 
             """Control loop: (4) Check for episode boundaries (keyboard or time-based)"""
