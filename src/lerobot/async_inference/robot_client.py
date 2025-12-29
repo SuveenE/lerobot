@@ -669,6 +669,9 @@ class RobotClient:
         episode_start_time = time.perf_counter()
         recording_active = self.dataset is not None
 
+        # For consistent recording: track last executed action
+        _last_action: dict[str, Any] | None = None
+
         if recording_active:
             num_episodes_target = self.config.dataset.num_episodes
             if num_episodes_target is not None:
@@ -682,16 +685,25 @@ class RobotClient:
             """Control loop: (1) Performing actions, when available"""
             if self.actions_available():
                 _performed_action = self.control_loop_action(verbose)
+                _last_action = _performed_action  # Track for recording
 
             """Control loop: (2) Streaming observations to the remote policy server"""
             if self._ready_to_send_observation():
                 _captured_observation = self.control_loop_observation(task, verbose)
 
-            """Control loop: (3) Recording frame to dataset (if enabled)"""
-            if recording_active and _performed_action is not None and _captured_observation is not None:
+            """Control loop: (3) Recording frame to dataset (if enabled)
+
+            For smooth recording at consistent FPS:
+            - Always capture fresh observation for recording (not just when sending to server)
+            - Use the most recently executed action
+            - Record every loop iteration once we have valid data
+            """
+            if recording_active and _last_action is not None:
+                # Get fresh observation for recording (independent of server send rate)
+                recording_observation = self.robot.get_observation()
                 self._record_frame(
-                    observation=_captured_observation,
-                    action=_performed_action,
+                    observation=recording_observation,
+                    action=_last_action,
                     task=task,
                 )
 
@@ -714,6 +726,7 @@ class RobotClient:
                     else:
                         # Start new episode
                         episode_start_time = time.perf_counter()
+                        _last_action = None  # Reset so we wait for first action of new episode
                         if num_episodes_target is not None:
                             self.logger.info(f"Starting episode {self.dataset.num_episodes} of {num_episodes_target}...")
                         else:
