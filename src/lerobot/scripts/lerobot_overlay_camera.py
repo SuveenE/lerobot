@@ -484,7 +484,7 @@ def run_overlay_camera(
     camera_id: str,
     reference_image: str,
     width: int = 640,
-    height: int = 480,
+    height: int = 360,
     fps: int = 30,
     port: int = 8000,
     initial_blend: float = 0.5,
@@ -601,8 +601,8 @@ def main():
     parser.add_argument(
         "--height",
         type=int,
-        default=480,
-        help="Camera height resolution (default: 480).",
+        default=360,
+        help="Camera height resolution (default: 360).",
     )
     parser.add_argument(
         "--fps",
