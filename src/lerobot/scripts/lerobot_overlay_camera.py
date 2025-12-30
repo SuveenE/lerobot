@@ -397,17 +397,13 @@ def generate_html_page() -> str:
             const value = slider.value;
             valueDisplay.textContent = value + '%';
             
-            // Update stream URL with new blend value
-            fetch('/set_blend?alpha=' + (value / 100));
+            // Update blend value with cache-busting
+            fetch('/set_blend?alpha=' + (value / 100) + '&t=' + Date.now(), {
+                cache: 'no-store'
+            });
         }
         
         slider.addEventListener('input', updateBlend);
-        
-        // Refresh stream periodically to ensure smooth updates
-        setInterval(() => {
-            const newSrc = '/stream?' + new Date().getTime();
-            // Only update src if there's a change to avoid flicker
-        }, 100);
     </script>
 </body>
 </html>'''
@@ -444,6 +440,8 @@ class OverlayStreamHandler(BaseHTTPRequestHandler):
                 blend_alpha = max(0.0, min(1.0, alpha))
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
                 self.end_headers()
                 self.wfile.write(b"OK")
             except ValueError:
