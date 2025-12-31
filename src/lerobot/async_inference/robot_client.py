@@ -288,6 +288,17 @@ class RobotClient:
                     self.logger.info("Saving final episode before shutdown...")
                     self._save_current_episode()
 
+                # Encode any remaining episodes that haven't been batch encoded into videos
+                if hasattr(self.dataset, "episodes_since_last_encoding") and self.dataset.episodes_since_last_encoding > 0:
+                    start_ep = self.dataset.num_episodes - self.dataset.episodes_since_last_encoding
+                    end_ep = self.dataset.num_episodes
+                    self.logger.info(
+                        f"Encoding remaining {self.dataset.episodes_since_last_encoding} episodes "
+                        f"(episodes {start_ep} to {end_ep - 1}) into videos..."
+                    )
+                    self.dataset._batch_save_episode_video(start_ep, end_ep)
+                    self.dataset.episodes_since_last_encoding = 0
+
                 # Finalize the dataset (close parquet writers)
                 self.logger.info("Finalizing dataset...")
                 self.dataset.finalize()
