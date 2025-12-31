@@ -196,19 +196,39 @@ class RobotClient:
         num_cameras = len(self.robot.cameras) if hasattr(self.robot, "cameras") else 0
         num_image_writer_threads = self.config.dataset.num_image_writer_threads_per_camera * max(num_cameras, 1)
 
-        # Create the dataset
-        self.dataset = LeRobotDataset.create(
-            repo_id=self.config.dataset.repo_id,
-            fps=self.config.fps,
-            root=self.config.dataset.root,
-            robot_type=self.robot.name if hasattr(self.robot, "name") else None,
-            features=self.dataset_features,
-            use_videos=self.config.dataset.use_videos,
-            image_writer_processes=self.config.dataset.num_image_writer_processes,
-            image_writer_threads=num_image_writer_threads,
-        )
+        if self.config.dataset.resume:
+            # Resume recording to an existing dataset
+            self.dataset = LeRobotDataset(
+                self.config.dataset.repo_id,
+                root=self.config.dataset.root,
+                batch_encoding_size=self.config.dataset.video_encoding_batch_size,
+            )
 
-        self.logger.info(f"Dataset created at {self.dataset.root} with features: {list(self.dataset_features.keys())}")
+            if num_cameras > 0:
+                self.dataset.start_image_writer(
+                    num_processes=self.config.dataset.num_image_writer_processes,
+                    num_threads=num_image_writer_threads,
+                )
+
+            # Use features from the existing dataset
+            self.dataset_features = self.dataset.meta.features
+
+            self.logger.info(f"Resuming dataset at {self.dataset.root} with {self.dataset.num_episodes} existing episodes")
+        else:
+            # Create a new dataset
+            self.dataset = LeRobotDataset.create(
+                repo_id=self.config.dataset.repo_id,
+                fps=self.config.fps,
+                root=self.config.dataset.root,
+                robot_type=self.robot.name if hasattr(self.robot, "name") else None,
+                features=self.dataset_features,
+                use_videos=self.config.dataset.use_videos,
+                image_writer_processes=self.config.dataset.num_image_writer_processes,
+                image_writer_threads=num_image_writer_threads,
+                batch_encoding_size=self.config.dataset.video_encoding_batch_size,
+            )
+
+            self.logger.info(f"Dataset created at {self.dataset.root} with features: {list(self.dataset_features.keys())}")
 
         # Initialize keyboard listener for episode control
         if not is_headless():
@@ -656,6 +676,45 @@ class RobotClient:
         except Exception as e:
             self.logger.error(f"Error saving episode: {e}")
 
+    def _run_reset_period(self, task: str, verbose: bool = False) -> None:
+        """Run a reset period where the robot operates but doesn't record.
+
+        This gives time to manually reset the environment between episodes.
+
+        Args:
+            task: Task description string
+            verbose: Whether to log verbose output
+        """
+        reset_time_s = self.config.dataset.reset_time_s
+        if reset_time_s <= 0:
+            return
+
+        self.logger.info(f"Reset period: {reset_time_s}s to reset the environment...")
+        reset_start_time = time.perf_counter()
+
+        while self.running and (time.perf_counter() - reset_start_time) < reset_time_s:
+            loop_start = time.perf_counter()
+
+            # Continue performing actions (don't record)
+            if self.actions_available():
+                self.control_loop_action(verbose)
+
+            # Continue sending observations to keep policy running
+            if self._ready_to_send_observation():
+                self.control_loop_observation(task, verbose)
+
+            # Check if user wants to exit early from reset period
+            if self.keyboard_events is not None:
+                if self.keyboard_events.get("exit_early", False):
+                    self.keyboard_events["exit_early"] = False
+                    self.logger.info("Exiting reset period early...")
+                    break
+
+            # Maintain control frequency
+            time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - loop_start)))
+
+        self.logger.info("Reset period complete")
+
     def control_loop(self, task: str, verbose: bool = False) -> tuple[Observation, Action]:
         """Combined function for executing actions and streaming observations"""
         # Wait at barrier for synchronized start
@@ -724,6 +783,9 @@ class RobotClient:
                         self.logger.info("Recording complete")
                         break
                     else:
+                        # Run reset period to give time to reset the environment
+                        self._run_reset_period(task, verbose)
+
                         # Start new episode
                         episode_start_time = time.perf_counter()
                         _last_action = None  # Reset so we wait for first action of new episode

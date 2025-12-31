@@ -149,6 +149,21 @@ class DatasetRecordingConfig:
         default=4, metadata={"help": "Number of threads per camera for writing frames"}
     )
 
+    # Video encoding batch size
+    video_encoding_batch_size: int = field(
+        default=1, metadata={"help": "Number of episodes to accumulate before batch encoding videos (1 = immediate encoding)"}
+    )
+
+    # Reset time between episodes
+    reset_time_s: float = field(
+        default=60.0, metadata={"help": "Number of seconds for resetting the environment after each episode"}
+    )
+
+    # Resume recording to an existing dataset
+    resume: bool = field(
+        default=False, metadata={"help": "Resume recording to an existing dataset instead of creating a new one"}
+    )
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.enabled and not self.repo_id:
