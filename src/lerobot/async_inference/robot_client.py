@@ -899,7 +899,11 @@ class RobotClient:
                         should_stop = True
 
                     if should_stop:
-                        self.logger.info("Recording complete")
+                        self.logger.info("Recording complete - moving to initial position before disconnect...")
+                        # Move robot to initial position before stopping
+                        self._clear_action_queue()
+                        self._slow_move_to_position(self.initial_position, num_steps=100, step_sleep=0.1)
+                        self.logger.info("Robot at initial position")
                         break
                     else:
                         # Run reset period to give time to reset the environment
