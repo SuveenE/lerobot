@@ -13,62 +13,63 @@
 # limitations under the License.
 
 """
-Example command:
+Example - Async inference:
 ```shell
-python src/lerobot/async_inference/robot_client.py \
-    --robot.type=so100_follower \
-    --robot.port=/dev/tty.usbmodem58760431541 \
-    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}}" \
-    --robot.id=black \
-    --task="dummy" \
-    --server_address=127.0.0.1:8080 \
-    --policy_type=act \
-    --pretrained_name_or_path=user/model \
-    --policy_device=mps \
-    --actions_per_chunk=50 \
-    --chunk_size_threshold=0.5 \
-    --aggregate_fn_name=weighted_average \
-    --debug_visualize_queue_size=True
+python -m lerobot.async_inference.robot_client \
+  --server_address 35.223.125.29:8000 \
+  --robot.type bi_yam_follower \
+  --robot.left_arm_port 1235 \
+  --robot.right_arm_port 1234 \
+  --robot.cameras '{
+right: {"type": "intelrealsense", "serial_number_or_name": "323622271967", "width": 640, "height": 360, "fps": 30},
+left: {"type": "intelrealsense", "serial_number_or_name": "335122271899", "width": 640, "height": 360, "fps": 30},
+top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width": 640, "height": 360, "fps": 30}
+}' \
+  --task "Pack Container" \
+  --policy_type pi05 \
+  --pretrained_name_or_path cortexairobot/pi05-grocery-30k \
+  --policy_device cuda \
+  --actions_per_chunk 30 \
+  --chunk_size_threshold 0.0 \
+  --aggregate_fn_name weighted_average \
+  --debug_visualize_queue_size True
 ```
 
-Example with dataset recording:
+Example - Async inference with dataset recording:
 ```shell
-python src/lerobot/async_inference/robot_client.py \
-    --robot.type=bi_yam_follower \
-    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
-    --task="Pick and place cube" \
-    --server_address=remote-gpu:8080 \
-    --policy_type=act \
-    --pretrained_name_or_path=user/model \
-    --dataset.enabled=true \
-    --dataset.repo_id=user/eval_yam_async \
-    --dataset.push_to_hub=true \
-    --dataset.max_episode_seconds=30
+python -m lerobot.async_inference.robot_client \
+  --server_address 35.232.231.3:8000 \
+  --robot.type bi_yam_follower \
+  --robot.left_arm_port 1235 \
+  --robot.right_arm_port 1234 \
+  --robot.cameras '{
+right: {"type": "intelrealsense", "serial_number_or_name": "323622271967", "width": 640, "height": 360, "fps": 30},
+left: {"type": "intelrealsense", "serial_number_or_name": "335122271899", "width": 640, "height": 360, "fps": 30},
+top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width": 640, "height": 360, "fps": 30}
+}' \
+  --task "Pack snacks into the container" \
+  --policy_type pi05 \
+  --pretrained_name_or_path cortexairobot/pi05_multi_packing_200k \
+  --policy_device cuda \
+  --actions_per_chunk 30 \
+  --chunk_size_threshold 0.0 \
+  --aggregate_fn_name weighted_average \
+  --debug_visualize_queue_size True \
+  --dataset.enabled true \
+  --dataset.num_episodes 2 \
+  --dataset.repo_id cortexairobot/eval_pi05_multi_packing_200k_02122026_test \
+  --dataset.push_to_hub true \
+  --dataset.max_episode_seconds 300 \
+  --dataset.video_encoding_batch_size 2 \
+  --dataset.reset_time_s 10 \
+  --dataset.resume false
 
 # Keyboard controls when recording:
 #   'n' + Enter: Save current episode and start new one
 #   's' + Enter: Save current episode and stop recording
-```
-
-Example with reset to home position (for multi-episode recording):
-```shell
-python src/lerobot/async_inference/robot_client.py \
-    --robot.type=bi_yam_follower \
-    --robot.left_arm_port=1235 \
-    --robot.right_arm_port=1234 \
-    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
-    --task="Pick and place cube" \
-    --server_address=127.0.0.1:8080 \
-    --policy_type=act \
-    --pretrained_name_or_path=user/model \
-    --dataset.enabled=true \
-    --dataset.repo_id=user/eval_dataset \
-    --dataset.reset_time_s=10 \
-    --dataset.initial_position_blend_s=5
-
+#
 # During reset, robot smoothly moves to the hardcoded initial_position
-# (defined in RobotClient.__init__) over 5 seconds, then holds there.
-# Update self.initial_position in robot_client.py to your desired home position.
+# (defined in RobotClient.__init__). Update self.initial_position to your desired home position.
 ```
 """
 
@@ -317,15 +318,44 @@ class RobotClient:
             return False
 
     def stop(self):
-        """Stop the robot client and finalize dataset if recording"""
+        """Stop the robot client and finalize dataset if recording.
+
+        Robot is disconnected FIRST, before video encoding starts.
+        This allows starting a new inference session in another terminal
+        while video encoding happens in the background.
+        """
         self.shutdown_event.set()
 
-        # Finalize dataset recording
+        # Clear action queue first
+        self._clear_action_queue()
+        self.logger.info("Action queue cleared")
+
+        # Stop keyboard listener if active
+        if self.keyboard_listener is not None:
+            with contextlib.suppress(Exception):
+                self.keyboard_listener.stop()
+
+        # Disconnect robot FIRST - before video encoding
+        # This frees up the robot for another inference session
+        self.robot.disconnect()
+        self.logger.info("Robot disconnected")
+
+        # Disconnect from policy server
+        try:
+            self.channel.close()
+            self.logger.info("Disconnected from policy server")
+        except Exception as e:
+            self.logger.warning(f"Error closing policy server connection: {e}")
+
+        self.logger.info("=== Robot and policy server disconnected ===")
+        self.logger.info("You can now start a new inference session in another terminal")
+
+        # Now do video encoding and dataset finalization (can take a while)
         if self.dataset is not None:
             try:
                 # Check if there are any unsaved frames in the buffer
                 if self.dataset.episode_buffer is not None and self.dataset.episode_buffer.get("size", 0) > 0:
-                    self.logger.info("Saving final episode before shutdown...")
+                    self.logger.info("Saving final episode...")
                     self._save_current_episode()
 
                 # Encode any remaining episodes that haven't been batch encoded into videos
@@ -336,6 +366,7 @@ class RobotClient:
                         f"Encoding remaining {self.dataset.episodes_since_last_encoding} episodes "
                         f"(episodes {start_ep} to {end_ep - 1}) into videos..."
                     )
+                    self.logger.info("(Robot is free - you can start another inference session now)")
                     self.dataset._batch_save_episode_video(start_ep, end_ep)
                     self.dataset.episodes_since_last_encoding = 0
 
@@ -356,17 +387,6 @@ class RobotClient:
 
             except Exception as e:
                 self.logger.error(f"Error finalizing dataset: {e}")
-
-        # Stop keyboard listener if active
-        if self.keyboard_listener is not None:
-            with contextlib.suppress(Exception):
-                self.keyboard_listener.stop()
-
-        self.robot.disconnect()
-        self.logger.debug("Robot disconnected")
-
-        self.channel.close()
-        self.logger.debug("Client stopped, channel closed")
 
     def send_observation(
         self,
