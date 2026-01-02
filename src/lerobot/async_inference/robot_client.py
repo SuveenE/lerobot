@@ -89,6 +89,7 @@ from lerobot.transport import (
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import init_keyboard_listener, is_headless
+from lerobot.utils.utils import log_say
 
 from .configs import RobotClientConfig
 from .constants import SUPPORTED_ROBOTS
@@ -861,6 +862,7 @@ class RobotClient:
                 self.logger.info(f"=== EPISODE {self.dataset.num_episodes} of {num_episodes_target} - POLICY ACTIVE ===")
             else:
                 self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
+            log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
 
         while self.running:
             control_loop_start = time.perf_counter()
@@ -904,6 +906,7 @@ class RobotClient:
                         should_stop = True
 
                     if should_stop:
+                        log_say("Stop recording", self.config.play_sounds, blocking=True)
                         self.logger.info("Recording complete - moving to initial position before disconnect...")
                         # Move robot to initial position before stopping
                         self._clear_action_queue()
@@ -924,6 +927,7 @@ class RobotClient:
                         break
                     else:
                         # Run reset period to give time to reset the environment
+                        log_say("Reset the environment", self.config.play_sounds)
                         self._run_reset_period(task, verbose)
 
                         # Start new episode
@@ -933,6 +937,7 @@ class RobotClient:
                             self.logger.info(f"=== EPISODE {self.dataset.num_episodes} of {num_episodes_target} - POLICY ACTIVE ===")
                         else:
                             self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
+                        log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
 
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency

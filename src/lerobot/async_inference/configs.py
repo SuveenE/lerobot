@@ -228,6 +228,11 @@ class RobotClientConfig:
         default=False, metadata={"help": "Visualize the action queue size"}
     )
 
+    # Use vocal synthesis to read events
+    play_sounds: bool = field(
+        default=True, metadata={"help": "Use vocal synthesis to announce events (recording, reset, etc.)"}
+    )
+
     # Dataset recording configuration
     dataset: DatasetRecordingConfig = field(
         default_factory=DatasetRecordingConfig,
