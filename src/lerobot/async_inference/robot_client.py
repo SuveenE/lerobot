@@ -13,28 +13,6 @@
 # limitations under the License.
 
 """
-Example - Async inference:
-```shell
-python -m lerobot.async_inference.robot_client \
-  --server_address 35.223.125.29:8000 \
-  --robot.type bi_yam_follower \
-  --robot.left_arm_port 1235 \
-  --robot.right_arm_port 1234 \
-  --robot.cameras '{
-right: {"type": "intelrealsense", "serial_number_or_name": "323622271967", "width": 640, "height": 360, "fps": 30},
-left: {"type": "intelrealsense", "serial_number_or_name": "335122271899", "width": 640, "height": 360, "fps": 30},
-top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width": 640, "height": 360, "fps": 30}
-}' \
-  --task "Pack Container" \
-  --policy_type pi05 \
-  --pretrained_name_or_path cortexairobot/pi05-grocery-30k \
-  --policy_device cuda \
-  --actions_per_chunk 30 \
-  --chunk_size_threshold 0.0 \
-  --aggregate_fn_name weighted_average \
-  --debug_visualize_queue_size True
-```
-
 Example - Async inference with dataset recording:
 ```shell
 python -m lerobot.async_inference.robot_client \
