@@ -49,6 +49,24 @@ python src/lerobot/async_inference/robot_client.py \
 #   'n' + Enter: Save current episode and start new one
 #   's' + Enter: Save current episode and stop recording
 ```
+
+Example with manual reset for multi-episode recording:
+```shell
+python src/lerobot/async_inference/robot_client.py \
+    --robot.type=bi_yam_follower \
+    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+    --task="Pick and place cube" \
+    --server_address=127.0.0.1:8080 \
+    --policy_type=act \
+    --pretrained_name_or_path=user/model \
+    --dataset.enabled=true \
+    --dataset.repo_id=user/eval_dataset \
+    --dataset.reset_time_s=30
+
+# During reset period, policy actions are paused and the robot syncs to its
+# current position. You can manually reposition the robot by hand without
+# it snapping back to the previous position.
+```
 """
 
 import contextlib
@@ -687,44 +705,95 @@ class RobotClient:
         except Exception as e:
             self.logger.error(f"Error saving episode: {e}")
 
-    def _run_reset_period(self, task: str, verbose: bool = False) -> None:
-        """Run a reset period where the robot operates but doesn't record.
+    def _clear_action_queue(self) -> None:
+        """Clear all pending actions from the queue."""
+        with self.action_queue_lock:
+            while not self.action_queue.empty():
+                try:
+                    self.action_queue.get_nowait()
+                except Exception:
+                    break
+        self.logger.debug("Action queue cleared")
 
-        This gives time to manually reset the environment between episodes.
+    def _sync_to_current_position(self) -> None:
+        """Sync internal state to the robot's current physical position.
 
-        Args:
-            task: Task description string
-            verbose: Whether to log verbose output
+        This prevents the robot from jumping to the last commanded position
+        after manual repositioning.
+        """
+        # Read current robot position
+        current_obs = self.robot.get_observation()
+
+        # Extract position values and send them as the new goal
+        # This makes the robot "hold" its current position
+        action_dict = {}
+        for key in self.robot.action_features:
+            if key in current_obs:
+                action_dict[key] = current_obs[key]
+
+        if action_dict:
+            self.robot.send_action(action_dict)
+            self.logger.debug(f"Synced to current position: {action_dict}")
+
+    def _run_reset_period_manual(self, verbose: bool = False) -> None:
+        """Run reset period in manual mode - pause actions and allow manual repositioning.
+
+        Actions are paused so the robot won't fight against manual movement.
+        After reset, the robot syncs to its current position to avoid jumping.
         """
         reset_time_s = self.config.dataset.reset_time_s
         if reset_time_s <= 0:
             return
 
-        self.logger.info(f"Reset period: {reset_time_s}s to reset the environment...")
+        self.logger.info(
+            f"Reset period (manual mode): {reset_time_s}s\n"
+            "  -> Robot motors are holding position. You can:\n"
+            "     1. Manually move the robot (it will gently resist but you can overpower it)\n"
+            "     2. Press 'n' + Enter to exit reset early\n"
+            "  -> Position will sync before next episode starts"
+        )
+
+        # Clear pending policy actions
+        self._clear_action_queue()
+
         reset_start_time = time.perf_counter()
 
         while self.running and (time.perf_counter() - reset_start_time) < reset_time_s:
             loop_start = time.perf_counter()
 
-            # Continue performing actions (don't record)
-            if self.actions_available():
-                self.control_loop_action(verbose)
+            # In manual mode, we DON'T execute policy actions
+            # The robot holds its last position (motors still enabled with low torque)
+            # User can manually overpower and reposition
 
-            # Continue sending observations to keep policy running
-            if self._ready_to_send_observation():
-                self.control_loop_observation(task, verbose)
+            # Periodically sync to current position so robot doesn't fight back hard
+            if int((time.perf_counter() - reset_start_time) * 2) % 2 == 0:  # Every 0.5s
+                self._sync_to_current_position()
 
             # Check if user wants to exit early from reset period
-            if self.keyboard_events is not None:
-                if self.keyboard_events.get("exit_early", False):
-                    self.keyboard_events["exit_early"] = False
-                    self.logger.info("Exiting reset period early...")
-                    break
+            if self.keyboard_events is not None and self.keyboard_events.get("exit_early", False):
+                self.keyboard_events["exit_early"] = False
+                self.logger.info("Exiting reset period early...")
+                break
 
             # Maintain control frequency
             time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - loop_start)))
 
-        self.logger.info("Reset period complete")
+        # Final sync to current position before resuming policy
+        self._sync_to_current_position()
+        self.logger.info("Reset period complete (manual mode)")
+
+    def _run_reset_period(self, task: str, verbose: bool = False) -> None:
+        """Run a reset period where the robot can be manually repositioned.
+
+        This gives time to manually reset the environment between episodes.
+        Actions are paused and the robot syncs to its current position,
+        allowing you to manually reposition by hand without snap-back.
+
+        Args:
+            task: Task description string
+            verbose: Whether to log verbose output
+        """
+        self._run_reset_period_manual(verbose)
 
     def control_loop(self, task: str, verbose: bool = False) -> tuple[Observation, Action]:
         """Combined function for executing actions and streaming observations"""
