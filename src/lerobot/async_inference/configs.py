@@ -19,7 +19,6 @@ from pathlib import Path
 import torch
 
 from lerobot.robots.config import RobotConfig
-from lerobot.teleoperators.config import TeleoperatorConfig
 
 from .constants import (
     DEFAULT_FPS,
@@ -165,6 +164,12 @@ class DatasetRecordingConfig:
         default=False, metadata={"help": "Resume recording to an existing dataset instead of creating a new one"}
     )
 
+    # Duration (seconds) for smooth movement to initial position during reset
+    initial_position_blend_s: float = field(
+        default=5.0,
+        metadata={"help": "Duration in seconds to smoothly move to initial position during reset"},
+    )
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.enabled and not self.repo_id:
@@ -227,12 +232,6 @@ class RobotClientConfig:
     dataset: DatasetRecordingConfig = field(
         default_factory=DatasetRecordingConfig,
         metadata={"help": "Configuration for dataset recording during evaluation"},
-    )
-
-    # Optional teleoperator for reset periods ONLY (completely disabled during policy inference)
-    teleop: TeleoperatorConfig | None = field(
-        default=None,
-        metadata={"help": "Teleoperator for reset periods only. Disabled during policy inference."},
     )
 
     @property

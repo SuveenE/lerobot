@@ -50,7 +50,7 @@ python src/lerobot/async_inference/robot_client.py \
 #   's' + Enter: Save current episode and stop recording
 ```
 
-Example with teleop reset (recommended when using bi_yam with teaching handles):
+Example with reset to home position (for multi-episode recording):
 ```shell
 python src/lerobot/async_inference/robot_client.py \
     --robot.type=bi_yam_follower \
@@ -63,14 +63,12 @@ python src/lerobot/async_inference/robot_client.py \
     --pretrained_name_or_path=user/model \
     --dataset.enabled=true \
     --dataset.repo_id=user/eval_dataset \
-    --dataset.reset_time_s=30 \
-    --teleop.type=bi_yam_leader \
-    --teleop.left_arm_port=5002 \
-    --teleop.right_arm_port=5001
+    --dataset.reset_time_s=10 \
+    --dataset.initial_position_blend_s=5
 
-# IMPORTANT: Teleop is ONLY active during reset periods!
-# During episodes, policy controls the robot - teleop is completely disabled.
-# During reset, use teaching handles to smoothly reposition the robot.
+# During reset, robot smoothly moves to the hardcoded initial_position
+# (defined in RobotClient.__init__) over 5 seconds, then holds there.
+# Update self.initial_position in robot_client.py to your desired home position.
 ```
 """
 
@@ -104,12 +102,6 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     so100_follower,
     so101_follower,
-)
-from lerobot.teleoperators import (  # noqa: F401
-    Teleoperator,
-    TeleoperatorConfig,
-    bi_yam_leader,
-    make_teleoperator_from_config,
 )
 from lerobot.transport import (
     services_pb2,  # type: ignore
@@ -200,13 +192,24 @@ class RobotClient:
         if config.dataset.enabled:
             self._init_dataset_recording()
 
-        # Teleoperator for reset periods ONLY (disabled during policy inference)
-        self.teleop: Teleoperator | None = None
-        if config.teleop is not None:
-            self.teleop = make_teleoperator_from_config(config.teleop)
-            self.teleop.connect()
-            self.logger.info(f"Teleoperator connected for RESET PERIODS ONLY: {self.teleop}")
-            self.logger.info("  -> Teleop is DISABLED during policy inference")
+        # Hardcoded initial/home position for bi_yam robot
+        # TODO: Update these values to your desired starting position
+        self.initial_position: dict[str, float] = {
+            "left_joint_0.pos": 0.0,
+            "left_joint_1.pos": 0.0,
+            "left_joint_2.pos": 0.0,
+            "left_joint_3.pos": 0.0,
+            "left_joint_4.pos": 0.0,
+            "left_joint_5.pos": 0.0,
+            "left_gripper.pos": 1.0,
+            "right_joint_0.pos": 0.0,
+            "right_joint_1.pos": 0.0,
+            "right_joint_2.pos": 0.0,
+            "right_joint_3.pos": 0.0,
+            "right_joint_4.pos": 0.0,
+            "right_joint_5.pos": 0.0,
+            "right_gripper.pos": 1.0,
+        }
 
     def _init_dataset_recording(self):
         """Initialize dataset recording for evaluation."""
@@ -358,12 +361,6 @@ class RobotClient:
         if self.keyboard_listener is not None:
             with contextlib.suppress(Exception):
                 self.keyboard_listener.stop()
-
-        # Disconnect teleoperator if connected
-        if self.teleop is not None:
-            with contextlib.suppress(Exception):
-                self.teleop.disconnect()
-            self.logger.debug("Teleoperator disconnected")
 
         self.robot.disconnect()
         self.logger.debug("Robot disconnected")
@@ -760,64 +757,81 @@ class RobotClient:
             self.robot.send_action(action_dict)
             self.logger.debug(f"Synced to current position: {action_dict}")
 
-    def _run_reset_period_teleop(self, verbose: bool = False) -> None:
-        """Run reset period using teleoperator (e.g., teaching handles).
+    def _slow_move_to_position(self, target_position: dict[str, float], num_steps: int = 100, step_sleep: float = 0.03) -> None:
+        """Slowly move robot from current position to target position.
 
-        ONLY active during reset - teleop is completely disabled during policy inference.
+        Matches i2rt's slow_move logic:
+        - Discrete steps (default 100)
+        - Fixed sleep between steps (default 0.03s)
+        - Linear interpolation: target * (i/num_steps) + start * (1 - i/num_steps)
 
-        Uses gradual blending to avoid sudden jumps when teaching handles
-        are in a different position than the robot arms.
+        Args:
+            target_position: Target joint positions
+            num_steps: Number of interpolation steps (default 100, like i2rt)
+            step_sleep: Sleep duration between steps in seconds (default 0.03s, like i2rt)
         """
-        reset_time_s = self.config.dataset.reset_time_s
-        if reset_time_s <= 0:
-            return
-
-        # Blend duration: gradually transition from current position to teleop over this time
-        blend_duration_s = 5.0  # 5 seconds of smooth blending for safety
-
-        self.logger.info(f"=== RESET PERIOD ({reset_time_s}s) - TELEOP ACTIVE ===")
-        self.logger.info(f"  -> First {blend_duration_s:.0f}s: slow move to teaching handle position (like i2rt)")
-        self.logger.info("  -> Then: full teleop control")
-        self.logger.info("  -> Press 'n' + Enter to exit reset early")
-
-        # Clear pending policy actions
-        self._clear_action_queue()
-
-        # Capture the robot's current position as the blend starting point
+        # Get current position as starting point
         current_obs = self.robot.get_observation()
         start_positions = {}
         for key in self.robot.action_features:
             if key in current_obs:
                 start_positions[key] = current_obs[key]
 
+        # Interpolate over num_steps (like i2rt's slow_move)
+        for i in range(num_steps):
+            blend_factor = i / num_steps  # 0 to ~1
+
+            blended_action = {}
+            for key in self.robot.action_features:
+                if key in start_positions and key in target_position:
+                    start_val = start_positions[key]
+                    target_val = target_position[key]
+                    # Same formula as i2rt: target * (i/100) + start * (1 - i/100)
+                    blended_action[key] = target_val * blend_factor + start_val * (1 - blend_factor)
+                elif key in target_position:
+                    blended_action[key] = target_position[key]
+                elif key in start_positions:
+                    blended_action[key] = start_positions[key]
+
+            self.robot.send_action(blended_action)
+            time.sleep(step_sleep)
+
+            # Check for early exit
+            if self.keyboard_events is not None and self.keyboard_events.get("exit_early", False):
+                break
+
+        # Final step: send exact target position
+        self.robot.send_action(target_position)
+
+    def _run_reset_period_initial_position(self, verbose: bool = False) -> None:
+        """Run reset period by moving robot to a fixed initial/home position.
+
+        Uses slow_move logic matching i2rt (100 steps, 0.03s sleep = ~3s move).
+        Then holds at initial position for remaining reset time.
+        """
+        reset_time_s = self.config.dataset.reset_time_s
+
+        if reset_time_s <= 0:
+            return
+
+        self.logger.info(f"=== RESET PERIOD ({reset_time_s}s) - MOVING TO HOME POSITION ===")
+        self.logger.info("  -> Slow move to initial position (100 steps, 0.1s each = 10s)")
+        self.logger.info("  -> Press 'n' + Enter to exit reset early")
+
+        # Clear pending policy actions
+        self._clear_action_queue()
+
         reset_start_time = time.perf_counter()
 
+        # Phase 1: Slow move to initial position (100 steps * 0.1s = 10 seconds)
+        self._slow_move_to_position(self.initial_position, num_steps=100, step_sleep=0.1)
+
+        # Phase 2: Hold at initial position for remaining reset time
         while self.running and (time.perf_counter() - reset_start_time) < reset_time_s:
             loop_start = time.perf_counter()
-            elapsed = time.perf_counter() - reset_start_time
 
-            # Get action from teleoperator
-            teleop_action = self.teleop.get_action()
-
-            # Blend from start position to teleop position
-            if elapsed < blend_duration_s and start_positions:
-                # Calculate blend factor (0 = start position, 1 = full teleop)
-                blend_factor = elapsed / blend_duration_s
-
-                # Interpolate each action value
-                blended_action = {}
-                for key, teleop_val in teleop_action.items():
-                    if key in start_positions:
-                        start_val = start_positions[key]
-                        # Linear interpolation: start * (1-t) + target * t
-                        blended_action[key] = start_val * (1 - blend_factor) + teleop_val * blend_factor
-                    else:
-                        blended_action[key] = teleop_val
-
-                self.robot.send_action(blended_action)
-            else:
-                # After blend period, full teleop control
-                self.robot.send_action(teleop_action)
+            # Hold at initial position
+            self.robot.send_action(self.initial_position)
 
             # Check if user wants to exit early
             if self.keyboard_events is not None and self.keyboard_events.get("exit_early", False):
@@ -828,9 +842,7 @@ class RobotClient:
             # Maintain control frequency
             time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - loop_start)))
 
-        # Sync position before resuming policy
-        self._sync_to_current_position()
-        self.logger.info("=== RESET COMPLETE - TELEOP DISABLED, POLICY ACTIVE ===")
+        self.logger.info("=== RESET COMPLETE - AT HOME POSITION, POLICY ACTIVE ===")
 
     def _run_reset_period_manual(self, verbose: bool = False) -> None:
         """Run reset period in manual mode - pause actions and allow manual repositioning.
@@ -880,26 +892,16 @@ class RobotClient:
         self.logger.info("Reset period complete (manual mode)")
 
     def _run_reset_period(self, task: str, verbose: bool = False) -> None:
-        """Run a reset period where the robot can be repositioned.
+        """Run a reset period where the robot moves to the initial/home position.
 
-        If teleop is configured, uses teaching handles for smooth repositioning.
-        Otherwise, uses manual mode (sync to current position).
-
-        IMPORTANT: Teleop is ONLY active during this reset period.
-        During policy inference (episodes), teleop is completely disabled.
+        Smoothly moves the robot to the hardcoded initial_position over
+        initial_position_blend_s seconds.
 
         Args:
             task: Task description string
             verbose: Whether to log verbose output
         """
-        reset_time_s = self.config.dataset.reset_time_s
-        if reset_time_s <= 0:
-            return
-
-        if self.teleop is not None:
-            self._run_reset_period_teleop(verbose)
-        else:
-            self._run_reset_period_manual(verbose)
+        self._run_reset_period_initial_position(verbose)
 
     def control_loop(self, task: str, verbose: bool = False) -> tuple[Observation, Action]:
         """Combined function for executing actions and streaming observations"""
@@ -923,8 +925,6 @@ class RobotClient:
                 self.logger.info(f"=== EPISODE {self.dataset.num_episodes} of {num_episodes_target} - POLICY ACTIVE ===")
             else:
                 self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
-            if self.teleop is not None:
-                self.logger.info("  -> Teleop DISABLED during policy inference")
 
         while self.running:
             control_loop_start = time.perf_counter()
@@ -981,8 +981,6 @@ class RobotClient:
                             self.logger.info(f"=== EPISODE {self.dataset.num_episodes} of {num_episodes_target} - POLICY ACTIVE ===")
                         else:
                             self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
-                        if self.teleop is not None:
-                            self.logger.info("  -> Teleop DISABLED during policy inference")
 
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency
