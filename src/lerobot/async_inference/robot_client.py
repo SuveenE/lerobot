@@ -717,6 +717,7 @@ class RobotClient:
             if elapsed >= max_seconds:
                 should_save = True
                 self.logger.info(f"Time trigger: Episode reached {max_seconds}s, saving...")
+                log_say("Episode reached time limit. Start reseting the environment safely...", self.config.play_sounds)
 
         return should_save, should_stop
 
