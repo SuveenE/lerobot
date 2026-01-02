@@ -171,6 +171,9 @@ class RobotClient:
         if config.dataset.enabled:
             self._init_dataset_recording()
 
+        # Track if robot was already disconnected (to prevent double disconnect)
+        self._robot_disconnected = False
+
         # Hardcoded initial/home position for bi_yam robot
         # TODO: Update these values to your desired starting position
         self.initial_position: dict[str, float] = {
@@ -217,10 +220,11 @@ class RobotClient:
 
         if self.config.dataset.resume:
             # Resume recording to an existing dataset
+            # Use very high batch_encoding_size to prevent encoding during recording.
             self.dataset = LeRobotDataset(
                 self.config.dataset.repo_id,
                 root=self.config.dataset.root,
-                batch_encoding_size=self.config.dataset.video_encoding_batch_size,
+                batch_encoding_size=9999,  # Never batch encode during recording
             )
 
             if num_cameras > 0:
@@ -235,6 +239,8 @@ class RobotClient:
             self.logger.info(f"Resuming dataset at {self.dataset.root} with {self.dataset.num_episodes} existing episodes")
         else:
             # Create a new dataset
+            # Use very high batch_encoding_size to prevent encoding during recording.
+            # All encoding will happen in stop() AFTER robot is disconnected.
             self.dataset = LeRobotDataset.create(
                 repo_id=self.config.dataset.repo_id,
                 fps=self.config.fps,
@@ -244,7 +250,7 @@ class RobotClient:
                 use_videos=self.config.dataset.use_videos,
                 image_writer_processes=self.config.dataset.num_image_writer_processes,
                 image_writer_threads=num_image_writer_threads,
-                batch_encoding_size=self.config.dataset.video_encoding_batch_size,
+                batch_encoding_size=9999,  # Never batch encode during recording
             )
 
             self.logger.info(f"Dataset created at {self.dataset.root} with features: {list(self.dataset_features.keys())}")
@@ -313,20 +319,19 @@ class RobotClient:
             with contextlib.suppress(Exception):
                 self.keyboard_listener.stop()
 
-        # Disconnect robot FIRST - before video encoding
-        # This frees up the robot for another inference session
-        self.robot.disconnect()
-        self.logger.info("Robot disconnected")
+        # Disconnect robot and policy server (if not already done in control_loop)
+        if not self._robot_disconnected:
+            self.robot.disconnect()
+            self.logger.info("Robot disconnected")
 
-        # Disconnect from policy server
-        try:
-            self.channel.close()
-            self.logger.info("Disconnected from policy server")
-        except Exception as e:
-            self.logger.warning(f"Error closing policy server connection: {e}")
+            try:
+                self.channel.close()
+                self.logger.info("Disconnected from policy server")
+            except Exception as e:
+                self.logger.warning(f"Error closing policy server connection: {e}")
 
-        self.logger.info("=== Robot and policy server disconnected ===")
-        self.logger.info("You can now start a new inference session in another terminal")
+            self.logger.info("=== Robot and policy server disconnected ===")
+            self.logger.info("You can now start a new inference session in another terminal")
 
         # Now do video encoding and dataset finalization (can take a while)
         if self.dataset is not None:
@@ -904,6 +909,18 @@ class RobotClient:
                         self._clear_action_queue()
                         self._slow_move_to_position(self.initial_position, num_steps=100, step_sleep=0.1)
                         self.logger.info("Robot at initial position")
+
+                        # Disconnect robot and policy server NOW, before any remaining encoding
+                        self.robot.disconnect()
+                        self.logger.info("Robot disconnected")
+                        try:
+                            self.channel.close()
+                            self.logger.info("Disconnected from policy server")
+                        except Exception as e:
+                            self.logger.warning(f"Error closing policy server connection: {e}")
+                        self.logger.info("=== Robot and policy server disconnected ===")
+                        self.logger.info("You can now start a new inference session in another terminal")
+                        self._robot_disconnected = True  # Flag to prevent double disconnect in stop()
                         break
                     else:
                         # Run reset period to give time to reset the environment
