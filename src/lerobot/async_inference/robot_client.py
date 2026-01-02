@@ -735,26 +735,6 @@ class RobotClient:
                     break
         self.logger.debug("Action queue cleared")
 
-    def _sync_to_current_position(self) -> None:
-        """Sync internal state to the robot's current physical position.
-
-        This prevents the robot from jumping to the last commanded position
-        after manual repositioning.
-        """
-        # Read current robot position
-        current_obs = self.robot.get_observation()
-
-        # Extract position values and send them as the new goal
-        # This makes the robot "hold" its current position
-        action_dict = {}
-        for key in self.robot.action_features:
-            if key in current_obs:
-                action_dict[key] = current_obs[key]
-
-        if action_dict:
-            self.robot.send_action(action_dict)
-            self.logger.debug(f"Synced to current position: {action_dict}")
-
     def _slow_move_to_position(self, target_position: dict[str, float], num_steps: int = 100, step_sleep: float = 0.03) -> None:
         """Slowly move robot from current position to target position.
 
@@ -841,53 +821,6 @@ class RobotClient:
             time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - loop_start)))
 
         self.logger.info("=== RESET COMPLETE - AT HOME POSITION, POLICY ACTIVE ===")
-
-    def _run_reset_period_manual(self, verbose: bool = False) -> None:
-        """Run reset period in manual mode - pause actions and allow manual repositioning.
-
-        Actions are paused so the robot won't fight against manual movement.
-        After reset, the robot syncs to its current position to avoid jumping.
-        """
-        reset_time_s = self.config.dataset.reset_time_s
-        if reset_time_s <= 0:
-            return
-
-        self.logger.info(
-            f"Reset period (manual mode): {reset_time_s}s\n"
-            "  -> Robot motors are holding position. You can:\n"
-            "     1. Manually move the robot (it will gently resist but you can overpower it)\n"
-            "     2. Press 'n' + Enter to exit reset early\n"
-            "  -> Position will sync before next episode starts"
-        )
-
-        # Clear pending policy actions
-        self._clear_action_queue()
-
-        reset_start_time = time.perf_counter()
-
-        while self.running and (time.perf_counter() - reset_start_time) < reset_time_s:
-            loop_start = time.perf_counter()
-
-            # In manual mode, we DON'T execute policy actions
-            # The robot holds its last position (motors still enabled with low torque)
-            # User can manually overpower and reposition
-
-            # Periodically sync to current position so robot doesn't fight back hard
-            if int((time.perf_counter() - reset_start_time) * 2) % 2 == 0:  # Every 0.5s
-                self._sync_to_current_position()
-
-            # Check if user wants to exit early from reset period
-            if self.keyboard_events is not None and self.keyboard_events.get("exit_early", False):
-                self.keyboard_events["exit_early"] = False
-                self.logger.info("Exiting reset period early...")
-                break
-
-            # Maintain control frequency
-            time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - loop_start)))
-
-        # Final sync to current position before resuming policy
-        self._sync_to_current_position()
-        self.logger.info("Reset period complete (manual mode)")
 
     def _run_reset_period(self, task: str, verbose: bool = False) -> None:
         """Run a reset period where the robot moves to the initial/home position.
