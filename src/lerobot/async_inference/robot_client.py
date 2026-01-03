@@ -853,6 +853,7 @@ class RobotClient:
         # Episode tracking for dataset recording
         episode_start_time = time.perf_counter()
         recording_active = self.dataset is not None
+        recorded_episodes = 0  # Counter for episodes recorded this session
 
         # For consistent recording: track last executed action
         _last_action: dict[str, Any] | None = None
@@ -860,7 +861,7 @@ class RobotClient:
         if recording_active:
             num_episodes_target = self.config.dataset.num_episodes
             if num_episodes_target is not None:
-                self.logger.info(f"=== EPISODE {self.dataset.num_episodes} of {num_episodes_target} - POLICY ACTIVE ===")
+                self.logger.info(f"=== EPISODE {recorded_episodes + 1} of {num_episodes_target} (total index: {self.dataset.num_episodes}) - POLICY ACTIVE ===")
             else:
                 self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
             log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
@@ -899,11 +900,12 @@ class RobotClient:
 
                 if should_save:
                     self._save_current_episode()
+                    recorded_episodes += 1
 
-                    # Check if we've reached the target number of episodes
+                    # Check if we've reached the target number of episodes for this session
                     num_episodes_target = self.config.dataset.num_episodes
-                    if num_episodes_target is not None and self.dataset.num_episodes >= num_episodes_target:
-                        self.logger.info(f"Reached target of {num_episodes_target} episodes. Stopping recording.")
+                    if num_episodes_target is not None and recorded_episodes >= num_episodes_target:
+                        self.logger.info(f"Recorded {recorded_episodes} episodes this session (total: {self.dataset.num_episodes}). Stopping.")
                         should_stop = True
 
                     if should_stop:
@@ -935,7 +937,7 @@ class RobotClient:
                         episode_start_time = time.perf_counter()
                         _last_action = None  # Reset so we wait for first action of new episode
                         if num_episodes_target is not None:
-                            self.logger.info(f"=== EPISODE {self.dataset.num_episodes} of {num_episodes_target} - POLICY ACTIVE ===")
+                            self.logger.info(f"=== EPISODE {recorded_episodes + 1} of {num_episodes_target} (total index: {self.dataset.num_episodes}) - POLICY ACTIVE ===")
                         else:
                             self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
                         log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
