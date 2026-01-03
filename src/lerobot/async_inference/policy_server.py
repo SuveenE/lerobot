@@ -24,6 +24,7 @@ python -m lerobot.async_inference.policy_server \
 ```
 """
 
+import gc
 import logging
 import pickle  # nosec
 import threading
@@ -88,6 +89,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.lerobot_features = None
         self.actions_per_chunk = None
         self.policy = None
+        self.pretrained_name_or_path = None  # Track currently loaded model
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
 
@@ -100,13 +102,37 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         return self.policy.config.image_features
 
     def _reset_server(self) -> None:
-        """Flushes server state when new client connects."""
+        """Flushes server state when new client connects.
+        
+        Note: Does NOT clear the policy model - that's handled conditionally
+        in SendPolicyInstructions() based on whether the model changed.
+        """
         # only running inference on the latest observation received by the server
         self.shutdown_event.set()
         self.observation_queue = Queue(maxsize=1)
 
         with self._predicted_timesteps_lock:
             self._predicted_timesteps = set()
+
+    def _clear_policy(self) -> None:
+        """Explicitly free the policy model from GPU memory."""
+        if self.policy is not None:
+            self.logger.info("Clearing previous policy from memory...")
+            del self.policy
+            self.policy = None
+            self.pretrained_name_or_path = None
+            if self.preprocessor is not None:
+                del self.preprocessor
+                self.preprocessor = None
+            if self.postprocessor is not None:
+                del self.postprocessor
+                self.postprocessor = None
+            # Force garbage collection and clear CUDA cache
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            self.logger.info("Previous policy cleared from memory")
 
     def Ready(self, request, context):  # noqa: N802
         client_id = context.peer()
@@ -144,6 +170,30 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             f"Device: {policy_specs.device}"
         )
 
+        # Check if we can reuse the currently loaded model
+        same_model = (
+            self.policy is not None
+            and self.pretrained_name_or_path == policy_specs.pretrained_name_or_path
+            and self.device == policy_specs.device
+        )
+
+        if same_model:
+            self.logger.info(
+                f"Reusing already loaded model: {policy_specs.pretrained_name_or_path} on {self.device}"
+            )
+            # Update other attributes that may have changed
+            self.policy_type = policy_specs.policy_type
+            self.lerobot_features = policy_specs.lerobot_features
+            self.actions_per_chunk = policy_specs.actions_per_chunk
+            return services_pb2.Empty()
+
+        # Different model requested - clear the old one first
+        if self.policy is not None:
+            self.logger.info(
+                f"Model changed: {self.pretrained_name_or_path} -> {policy_specs.pretrained_name_or_path}"
+            )
+            self._clear_policy()
+
         self.device = policy_specs.device
         self.policy_type = policy_specs.policy_type  # act, pi0, etc.
         self.lerobot_features = policy_specs.lerobot_features
@@ -154,6 +204,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         start = time.perf_counter()
         self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
         self.policy.to(self.device)
+        self.pretrained_name_or_path = policy_specs.pretrained_name_or_path  # Track loaded model
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
@@ -454,6 +505,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     def stop(self):
         """Stop the server"""
         self._reset_server()
+        self._clear_policy()
         self.logger.info("Server stopping...")
 
 
