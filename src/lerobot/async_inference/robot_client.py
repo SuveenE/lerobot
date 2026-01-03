@@ -859,11 +859,7 @@ class RobotClient:
         _last_action: dict[str, Any] | None = None
 
         if recording_active:
-            num_episodes_target = self.config.dataset.num_episodes
-            if num_episodes_target is not None:
-                self.logger.info(f"=== EPISODE {recorded_episodes + 1} of {num_episodes_target} (total index: {self.dataset.num_episodes}) - POLICY ACTIVE ===")
-            else:
-                self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
+            self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
             log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
 
         while self.running:
@@ -905,7 +901,7 @@ class RobotClient:
                     # Check if we've reached the target number of episodes for this session
                     num_episodes_target = self.config.dataset.num_episodes
                     if num_episodes_target is not None and recorded_episodes >= num_episodes_target:
-                        self.logger.info(f"Recorded {recorded_episodes} episodes this session (total: {self.dataset.num_episodes}). Stopping.")
+                        self.logger.info(f"Recorded {num_episodes_target} episodes. Total: {self.dataset.num_episodes}. Stopping.")
                         should_stop = True
 
                     if should_stop:
@@ -936,10 +932,7 @@ class RobotClient:
                         # Start new episode
                         episode_start_time = time.perf_counter()
                         _last_action = None  # Reset so we wait for first action of new episode
-                        if num_episodes_target is not None:
-                            self.logger.info(f"=== EPISODE {recorded_episodes + 1} of {num_episodes_target} (total index: {self.dataset.num_episodes}) - POLICY ACTIVE ===")
-                        else:
-                            self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
+                        self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
                         log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
 
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
