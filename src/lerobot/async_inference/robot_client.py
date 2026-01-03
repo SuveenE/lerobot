@@ -45,6 +45,7 @@ top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width"
 # Keyboard controls when recording:
 #   'n' + Enter: Save current episode and start new one
 #   's' + Enter: Save current episode and stop recording
+#   'b' + Enter: Discard current episode and re-record (restart without saving)
 #
 # During reset, robot smoothly moves to the hardcoded initial_position
 # (defined in RobotClient.__init__). Update self.initial_position to your desired home position.
@@ -259,7 +260,7 @@ class RobotClient:
         # Initialize keyboard listener for episode control
         if not is_headless():
             self.keyboard_listener, self.keyboard_events = init_keyboard_listener()
-            self.logger.info("Keyboard controls enabled: 'n' = save episode, 's' = stop recording")
+            self.logger.info("Keyboard controls enabled: 'n' = save episode, 's' = stop recording, 'b' = re-record episode")
         else:
             self.keyboard_events = {
                 "exit_early": False,
@@ -892,6 +893,28 @@ class RobotClient:
 
             """Control loop: (4) Check for episode boundaries (keyboard or time-based)"""
             if recording_active:
+                # Check for rerecord episode (discard current and restart)
+                if self.keyboard_events is not None and self.keyboard_events.get("rerecord_episode", False):
+                    self.keyboard_events["rerecord_episode"] = False
+                    self.logger.info("Re-recording episode - discarding current episode...")
+                    log_say("Re-record episode", self.config.play_sounds)
+
+                    # Clear episode buffer without saving
+                    self.dataset.clear_episode_buffer()
+
+                    # Clear pending policy actions
+                    self._clear_action_queue()
+
+                    # Run reset period to give time to reset the environment
+                    self._run_reset_period(task, verbose)
+
+                    # Restart episode tracking
+                    episode_start_time = time.perf_counter()
+                    _last_action = None
+                    self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
+                    log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
+                    continue
+
                 should_save, should_stop = self._check_episode_end(episode_start_time)
 
                 if should_save:
