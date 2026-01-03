@@ -176,6 +176,9 @@ class RobotClient:
         # Track if robot was already disconnected (to prevent double disconnect)
         self._robot_disconnected = False
 
+        # Track if current episode should be aborted (don't save on error)
+        self._abort_current_episode = False
+
         # Hardcoded initial/home position for bi_yam robot
         # TODO: Update these values to your desired starting position
         self.initial_position: dict[str, float] = {
@@ -273,6 +276,15 @@ class RobotClient:
     def running(self):
         return not self.shutdown_event.is_set()
 
+    def abort_current_episode(self):
+        """Mark the current episode as aborted (will not be saved).
+
+        Call this when an error occurs to prevent saving corrupted data.
+        The robot will move to the initial position on disconnect.
+        """
+        self._abort_current_episode = True
+        self.logger.warning("Current episode marked as aborted - will not be saved")
+
     def start(self):
         """Start the robot client and connect to the policy server"""
         try:
@@ -323,6 +335,14 @@ class RobotClient:
 
         # Disconnect robot and policy server (if not already done in control_loop)
         if not self._robot_disconnected:
+            # Move robot to initial/home position before disconnecting
+            self.logger.info("Moving robot to initial position before disconnect...")
+            try:
+                self._slow_move_to_position(self.initial_position, num_steps=100, step_sleep=0.1)
+                self.logger.info("Robot at initial position")
+            except Exception as e:
+                self.logger.warning(f"Error moving to initial position: {e}")
+
             self.robot.disconnect()
             self.logger.info("Robot disconnected")
 
@@ -340,8 +360,12 @@ class RobotClient:
             try:
                 # Check if there are any unsaved frames in the buffer
                 if self.dataset.episode_buffer is not None and self.dataset.episode_buffer.get("size", 0) > 0:
-                    self.logger.info("Saving final episode...")
-                    self._save_current_episode()
+                    if self._abort_current_episode:
+                        self.logger.warning("Episode aborted due to error - discarding unsaved data")
+                        self.dataset.clear_episode_buffer()
+                    else:
+                        self.logger.info("Saving final episode...")
+                        self._save_current_episode()
 
                 # Encode any remaining episodes that haven't been batch encoded into videos
                 if hasattr(self.dataset, "episodes_since_last_encoding") and self.dataset.episodes_since_last_encoding > 0:
@@ -987,6 +1011,14 @@ def async_client(cfg: RobotClientConfig):
         try:
             # The main thread runs the control loop
             client.control_loop(task=cfg.task)
+
+        except KeyboardInterrupt:
+            client.logger.warning("KeyboardInterrupt received - aborting current episode")
+            client.abort_current_episode()
+
+        except Exception as e:
+            client.logger.error(f"Error in control loop: {e}")
+            client.abort_current_episode()
 
         finally:
             client.stop()
