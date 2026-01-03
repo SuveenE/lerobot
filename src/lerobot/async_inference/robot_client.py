@@ -896,6 +896,7 @@ class RobotClient:
                 # Check for rerecord episode (discard current and restart)
                 if self.keyboard_events is not None and self.keyboard_events.get("rerecord_episode", False):
                     self.keyboard_events["rerecord_episode"] = False
+                    self.keyboard_events["exit_early"] = False  # Clear to prevent reset period from exiting immediately
                     self.logger.info("Re-recording episode - discarding current episode...")
                     log_say("Re-record episode", self.config.play_sounds)
 
