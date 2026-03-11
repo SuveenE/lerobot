@@ -42,11 +42,15 @@ ip link show can_leader_l
 ```bash
 git clone --recursive https://github.com/SuveenE/lerobot.git
 cd lerobot
+git checkout suveen/linear-bot
+git submodule update --init --recursive
 ```
 
-If you already cloned without submodules:
+If you already cloned without submodules or on a different branch:
 
 ```bash
+git fetch origin
+git checkout suveen/linear-bot
 git submodule update --init --recursive
 ```
 
