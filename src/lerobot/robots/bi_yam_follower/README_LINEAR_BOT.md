@@ -82,6 +82,12 @@ This launches:
 - leader right arm on `localhost:5001`
 - leader left arm on `localhost:5002`
 
+Verify all servers are up:
+
+```bash
+python -m lerobot.scripts.check_linearbot_servers --read
+```
+
 ### Option B: Split hosts
 
 If the follower arms and leader arms are connected to different machines, use the split launchers.
@@ -97,6 +103,14 @@ On the leader machine:
 ```bash
 python -m lerobot.scripts.setup_bi_yam_leader_servers
 ```
+
+Verify all servers are up from the leader machine:
+
+```bash
+python -m lerobot.scripts.check_linearbot_servers --follower_host <FOLLOWER_HOST_IP> --read
+```
+
+This checks TCP connectivity and reads joint positions from all four arms.
 
 This is the recommended setup when:
 - follower arms are connected to a Raspberry Pi
@@ -210,6 +224,18 @@ lsof -ti:1234 | xargs kill -9
 lsof -ti:1235 | xargs kill -9
 lsof -ti:5001 | xargs kill -9
 lsof -ti:5002 | xargs kill -9
+```
+
+### Check server connectivity
+
+Run the check script from the leader machine to verify all servers are reachable and read current joint positions:
+
+```bash
+# Leader servers only
+python -m lerobot.scripts.check_linearbot_servers --read
+
+# All four servers (leaders + followers)
+python -m lerobot.scripts.check_linearbot_servers --follower_host <FOLLOWER_HOST_IP> --read
 ```
 
 ### Connection failures
