@@ -59,14 +59,22 @@ def parse_cameras_json(raw: str) -> dict[str, dict]:
     return json.loads(normalized)
 
 
-def build_camera_configs(cameras_dict: dict[str, dict]) -> dict[str, RealSenseCameraConfig]:
+def build_camera_configs(cameras_dict: dict[str, dict]) -> dict:
     """Build CameraConfig objects from parsed camera dicts."""
-    from lerobot.cameras import CameraConfig
+    from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
+    from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
+
+    type_to_cls = {
+        "intelrealsense": RealSenseCameraConfig,
+        "opencv": OpenCVCameraConfig,
+    }
 
     configs = {}
     for name, cam_params in cameras_dict.items():
         cam_type = cam_params.pop("type", "intelrealsense")
-        cfg_cls = CameraConfig.get_subclass(cam_type)
+        cfg_cls = type_to_cls.get(cam_type)
+        if cfg_cls is None:
+            raise ValueError(f"Unknown camera type '{cam_type}'. Supported: {list(type_to_cls.keys())}")
         configs[name] = cfg_cls(**cam_params)
     return configs
 
