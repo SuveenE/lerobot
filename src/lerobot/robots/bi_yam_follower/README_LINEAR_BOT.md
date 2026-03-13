@@ -231,15 +231,62 @@ handles.
 
 ### Record with `bi_yam_linear_bot` (split hosts)
 
-If the arms, FlowBase, and cameras are spread across multiple machines:
+In this setup:
+- **Follower PC** — connected to follower arms, FlowBase, cameras, and joystick. Runs `lerobot-record`.
+- **Leader PC** — connected to leader arms (teaching handles).
+
+Both machines must be on the same network. Replace `<LEADER_PC_IP>` below
+with the actual IP of the leader machine (e.g. `192.168.1.50`).
+
+#### Step 1 — Leader PC: start leader arm servers
 
 ```bash
+# Terminal 1 on Leader PC
+python -m lerobot.scripts.setup_bi_yam_leader_servers
+```
+
+This starts:
+- Right leader arm on port `5001`
+- Left leader arm on port `5002`
+
+#### Step 2 — Follower PC: start follower arm servers
+
+```bash
+# Terminal 1 on Follower PC
+python -m lerobot.scripts.setup_bi_yam_follower_servers
+```
+
+This starts:
+- Right follower arm on port `1234`
+- Left follower arm on port `1235`
+
+#### Step 3 — Follower PC: start FlowBase server
+
+```bash
+# Terminal 2 on Follower PC
+python i2rt/i2rt/flow_base/flow_base_controller.py --channel can_flow_base
+```
+
+Connect the joystick to this machine to control the base and linear rail.
+
+#### Step 4 — Follower PC: verify all servers
+
+```bash
+python -m lerobot.scripts.check_linearbot_servers \
+  --leader_host <LEADER_PC_IP> \
+  --read
+```
+
+#### Step 5 — Follower PC: record
+
+```bash
+# Terminal 3 on Follower PC
 lerobot-record \
   --robot.type=bi_yam_linear_bot \
-  --robot.arm_server_host=<FOLLOWER_HOST_IP> \
+  --robot.arm_server_host=localhost \
   --robot.left_arm_port=1235 \
   --robot.right_arm_port=1234 \
-  --robot.flow_base_host=<FLOW_BASE_HOST_IP> \
+  --robot.flow_base_host=localhost \
   --robot.with_linear_rail=true \
   --robot.cameras='{
     left: {"type": "intelrealsense", "index_or_path": 6, "width": 640, "height": 480, "fps": 30},
@@ -247,7 +294,7 @@ lerobot-record \
     right: {"type": "intelrealsense", "index_or_path": 18, "width": 640, "height": 480, "fps": 30}
   }' \
   --teleop.type=bi_yam_leader \
-  --teleop.server_host=<LEADER_HOST_IP> \
+  --teleop.server_host=<LEADER_PC_IP> \
   --teleop.left_arm_port=5002 \
   --teleop.right_arm_port=5001 \
   --dataset.repo_id=${HF_USER}/linear-bot-full \
@@ -259,8 +306,9 @@ lerobot-record \
   --resume=false
 ```
 
-Replace `<FOLLOWER_HOST_IP>`, `<FLOW_BASE_HOST_IP>`, and `<LEADER_HOST_IP>`
-with the actual IPs of each machine.
+Since the follower arms, FlowBase, and cameras are all local to the
+follower PC, only `--teleop.server_host` needs the remote IP. Everything
+else points to `localhost`.
 
 ### Recorded fields
 
