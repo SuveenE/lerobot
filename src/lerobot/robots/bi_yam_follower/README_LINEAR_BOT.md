@@ -174,7 +174,103 @@ lerobot-record \
   --resume=false
 ```
 
+## Recording with FlowBase and Linear Rail
+
+The `bi_yam_linear_bot` robot type records arm state alongside FlowBase odometry
+and linear rail state. The FlowBase server must be running on the same or a
+reachable host before starting the recording.
+
+### Start the FlowBase server
+
+On the machine connected to the FlowBase CAN interface:
+
+```bash
+python i2rt/i2rt/flow_base/flow_base_controller.py --channel can_flow_base
+```
+
+### Record with `bi_yam_linear_bot`
+
+```bash
+lerobot-record \
+  --robot.type=bi_yam_linear_bot \
+  --robot.arm_server_host=<FOLLOWER_HOST_IP> \
+  --robot.left_arm_port=1235 \
+  --robot.right_arm_port=1234 \
+  --robot.flow_base_host=<FLOW_BASE_HOST_IP> \
+  --robot.with_linear_rail=true \
+  --robot.cameras='{
+    left: {"type": "intelrealsense", "index_or_path": 6, "width": 640, "height": 480, "fps": 30},
+    top: {"type": "intelrealsense", "index_or_path": 12, "width": 640, "height": 480, "fps": 30},
+    right: {"type": "intelrealsense", "index_or_path": 18, "width": 640, "height": 480, "fps": 30}
+  }' \
+  --teleop.type=bi_yam_leader \
+  --teleop.server_host=<LEADER_HOST_IP> \
+  --teleop.left_arm_port=5002 \
+  --teleop.right_arm_port=5001 \
+  --dataset.repo_id=${HF_USER}/linear-bot-full \
+  --dataset.num_episodes=10 \
+  --dataset.episode_time_s=120 \
+  --dataset.reset_time_s=20 \
+  --dataset.single_task="Pick and place the object" \
+  --display_data=true \
+  --resume=false
+```
+
+### Recorded fields
+
+The dataset will contain the following observation and action fields in
+addition to camera images.
+
+**Observation state** (`observation.state`):
+
+| Key | Description |
+|---|---|
+| `left_joint_0.pos` .. `left_joint_5.pos` | Left arm joint positions |
+| `left_gripper.pos` | Left gripper position |
+| `right_joint_0.pos` .. `right_joint_5.pos` | Right arm joint positions |
+| `right_gripper.pos` | Right gripper position |
+| `base.x` | FlowBase odometry X translation |
+| `base.y` | FlowBase odometry Y translation |
+| `base.theta` | FlowBase odometry rotation |
+| `rail.position` | Linear rail motor position |
+| `rail.velocity` | Linear rail motor velocity |
+| `rail.upper_limit` | Upper limit switch triggered (0.0 / 1.0) |
+| `rail.lower_limit` | Lower limit switch triggered (0.0 / 1.0) |
+| `rail.initialized` | Rail homing completed (0.0 / 1.0) |
+| `rail.brake_on` | Rail brake engaged (0.0 / 1.0) |
+| `base.cmd.x.vel` | Resolved base X velocity command (joystick or remote) |
+| `base.cmd.y.vel` | Resolved base Y velocity command (joystick or remote) |
+| `base.cmd.theta.vel` | Resolved base rotation velocity command (joystick or remote) |
+| `rail.cmd.vel` | Resolved linear rail velocity command (joystick or remote) |
+
+**Action** (`action`):
+
+| Key | Description |
+|---|---|
+| `left_joint_0.pos` .. `left_joint_5.pos` | Left arm joint targets |
+| `left_gripper.pos` | Left gripper target |
+| `right_joint_0.pos` .. `right_joint_5.pos` | Right arm joint targets |
+| `right_gripper.pos` | Right gripper target |
+| `base.x.vel` | Base X velocity command |
+| `base.y.vel` | Base Y velocity command |
+| `base.theta.vel` | Base rotation velocity command |
+| `rail.vel` | Linear rail velocity command |
+
+Rail fields are omitted when `with_linear_rail=false`.
+
 ## Configuration Reference
+
+### `bi_yam_linear_bot`
+
+- `robot.type`: `bi_yam_linear_bot`
+- `robot.arm_server_host`: hostname or IP of the Yam arm follower servers
+- `robot.left_arm_port`: default `1235`
+- `robot.right_arm_port`: default `1234`
+- `robot.flow_base_host`: hostname or IP of the FlowBase server
+- `robot.with_linear_rail`: default `true`
+- `robot.cameras`: camera config dictionary
+- `robot.left_arm_max_relative_target`: optional safety limit
+- `robot.right_arm_max_relative_target`: optional safety limit
 
 ### `bi_yam_follower`
 
