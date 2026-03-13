@@ -100,6 +100,14 @@ class BiYamLinearBot(Robot):
 
         self._flow_base_client = None
 
+        # Keyboard base control speed levels (xy in m/s, theta in rad/s, rail in rad/s)
+        self.speed_levels = [
+            {"xy": 0.1, "theta": 0.3, "rail": 2.0},
+            {"xy": 0.3, "theta": 0.8, "rail": 5.0},
+            {"xy": 0.5, "theta": 1.5, "rail": 10.0},
+        ]
+        self.speed_index = 0
+
     # ------------------------------------------------------------------
     # Feature declarations
     # ------------------------------------------------------------------
@@ -394,6 +402,49 @@ class BiYamLinearBot(Robot):
         if self.config.with_linear_rail:
             fallback["rail.vel"] = float(obs.get("rail.cmd.vel", 0.0))
         return fallback
+
+    def _from_keyboard_to_base_action(self, pressed_keys: dict) -> dict[str, float]:
+        keys = self.config.teleop_keys
+
+        if keys["speed_up"] in pressed_keys:
+            self.speed_index = min(self.speed_index + 1, len(self.speed_levels) - 1)
+        if keys["speed_down"] in pressed_keys:
+            self.speed_index = max(self.speed_index - 1, 0)
+
+        speed = self.speed_levels[self.speed_index]
+
+        x_cmd = 0.0
+        y_cmd = 0.0
+        theta_cmd = 0.0
+
+        if keys["forward"] in pressed_keys:
+            x_cmd += speed["xy"]
+        if keys["backward"] in pressed_keys:
+            x_cmd -= speed["xy"]
+        if keys["left"] in pressed_keys:
+            y_cmd += speed["xy"]
+        if keys["right"] in pressed_keys:
+            y_cmd -= speed["xy"]
+        if keys["rotate_left"] in pressed_keys:
+            theta_cmd += speed["theta"]
+        if keys["rotate_right"] in pressed_keys:
+            theta_cmd -= speed["theta"]
+
+        action: dict[str, float] = {
+            "base.x.vel": x_cmd,
+            "base.y.vel": y_cmd,
+            "base.theta.vel": theta_cmd,
+        }
+
+        if self.config.with_linear_rail:
+            rail_cmd = 0.0
+            if keys["rail_up"] in pressed_keys:
+                rail_cmd += speed["rail"]
+            if keys["rail_down"] in pressed_keys:
+                rail_cmd -= speed["rail"]
+            action["rail.vel"] = rail_cmd
+
+        return action
 
     # ------------------------------------------------------------------
     # Helpers

@@ -41,5 +41,21 @@ class BiYamLinearBotConfig(RobotConfig):
     left_arm_max_relative_target: float | dict[str, float] | None = None
     right_arm_max_relative_target: float | dict[str, float] | None = None
 
+    # Keyboard-to-base key mapping (used when --use_keyboard_base=true)
+    teleop_keys: dict[str, str] = field(
+        default_factory=lambda: {
+            "forward": "w",
+            "backward": "s",
+            "left": "a",
+            "right": "d",
+            "rotate_left": "z",
+            "rotate_right": "x",
+            "rail_up": "t",
+            "rail_down": "g",
+            "speed_up": "r",
+            "speed_down": "f",
+        }
+    )
+
     # Cameras
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
