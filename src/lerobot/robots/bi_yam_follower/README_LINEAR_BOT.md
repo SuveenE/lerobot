@@ -188,7 +188,50 @@ On the machine connected to the FlowBase CAN interface:
 python i2rt/i2rt/flow_base/flow_base_controller.py --channel can_flow_base
 ```
 
-### Record with `bi_yam_linear_bot`
+### Record with `bi_yam_linear_bot` (single PC)
+
+If all arms, FlowBase, and cameras are connected to the same machine:
+
+```bash
+# Terminal 1 — arm servers
+python -m lerobot.scripts.setup_bi_yam_servers
+
+# Terminal 2 — FlowBase server
+python i2rt/i2rt/flow_base/flow_base_controller.py --channel can_flow_base
+
+# Terminal 3 — record
+lerobot-record \
+  --robot.type=bi_yam_linear_bot \
+  --robot.arm_server_host=localhost \
+  --robot.left_arm_port=1235 \
+  --robot.right_arm_port=1234 \
+  --robot.flow_base_host=localhost \
+  --robot.with_linear_rail=true \
+  --robot.cameras='{
+    left: {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30},
+    top: {"type": "opencv", "index_or_path": 1, "width": 640, "height": 480, "fps": 30},
+    right: {"type": "opencv", "index_or_path": 2, "width": 640, "height": 480, "fps": 30}
+  }' \
+  --teleop.type=bi_yam_leader \
+  --teleop.server_host=localhost \
+  --teleop.left_arm_port=5002 \
+  --teleop.right_arm_port=5001 \
+  --dataset.repo_id=${HF_USER}/linear-bot-full \
+  --dataset.num_episodes=10 \
+  --dataset.episode_time_s=120 \
+  --dataset.reset_time_s=20 \
+  --dataset.single_task="Pick and place the object" \
+  --display_data=true \
+  --resume=false
+```
+
+Use the joystick connected to the FlowBase server machine to control base
+movement and the linear rail while teleoperating the arms with the teaching
+handles.
+
+### Record with `bi_yam_linear_bot` (split hosts)
+
+If the arms, FlowBase, and cameras are spread across multiple machines:
 
 ```bash
 lerobot-record \
@@ -215,6 +258,9 @@ lerobot-record \
   --display_data=true \
   --resume=false
 ```
+
+Replace `<FOLLOWER_HOST_IP>`, `<FLOW_BASE_HOST_IP>`, and `<LEADER_HOST_IP>`
+with the actual IPs of each machine.
 
 ### Recorded fields
 
