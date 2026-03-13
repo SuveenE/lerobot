@@ -365,11 +365,20 @@ class BiYamLinearBot(Robot):
                 action.get("base.theta.vel", 0.0),
             ])
 
+            # Policy outputs are physical velocities (m/s, rad/s) recorded
+            # from get_current_command, but the FlowBase controller expects
+            # normalised [-1, 1] commands and scales internally by max_vel /
+            # lift_max_vel.  Divide here to avoid double-scaling.
+            base_max = np.array(self.config.base_max_vel)
+            base_vel_norm = base_vel / np.where(base_max != 0, base_max, 1.0)
+
             if self.config.with_linear_rail:
                 rail_vel = action.get("rail.vel", 0.0)
-                vel_cmd = np.concatenate([base_vel, [rail_vel]])
+                rail_max = self.config.rail_max_vel if self.config.rail_max_vel != 0 else 1.0
+                rail_vel_norm = rail_vel / rail_max
+                vel_cmd = np.concatenate([base_vel_norm, [rail_vel_norm]])
             else:
-                vel_cmd = base_vel
+                vel_cmd = base_vel_norm
 
             # Send directly via the portal RPC client (the heartbeat thread
             # is stopped to avoid sending unwanted zeros, so we bypass
