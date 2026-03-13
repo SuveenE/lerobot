@@ -382,6 +382,20 @@ class BiYamLinearBot(Robot):
         return action
 
     # ------------------------------------------------------------------
+    # Teleop helpers
+    # ------------------------------------------------------------------
+
+    def teleop_action_from_obs(self, obs: dict[str, Any]) -> dict[str, float]:
+        fallback: dict[str, float] = {
+            "base.x.vel": float(obs.get("base.cmd.x.vel", 0.0)),
+            "base.y.vel": float(obs.get("base.cmd.y.vel", 0.0)),
+            "base.theta.vel": float(obs.get("base.cmd.theta.vel", 0.0)),
+        }
+        if self.config.with_linear_rail:
+            fallback["rail.vel"] = float(obs.get("rail.cmd.vel", 0.0))
+        return fallback
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 

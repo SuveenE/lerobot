@@ -352,6 +352,13 @@ addition to camera images.
 
 Rail fields are omitted when `with_linear_rail=false`.
 
+> **Note on base/rail actions during teleop:** The leader arms only produce
+> arm joint targets. Base and rail velocity actions (`base.x.vel`,
+> `base.y.vel`, `base.theta.vel`, `rail.vel`) are automatically filled
+> from the FlowBase's resolved command observations (`base.cmd.x.vel`,
+> etc.) so the dataset captures the actual joystick-driven base movement.
+> This allows a trained policy to reproduce both arm and base behavior.
+
 ## Configuration Reference
 
 ### `bi_yam_linear_bot`
