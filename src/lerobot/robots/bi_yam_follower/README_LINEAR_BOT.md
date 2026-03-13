@@ -274,6 +274,7 @@ Connect the joystick to this machine to control the base and linear rail.
 ```bash
 python -m lerobot.scripts.check_linearbot_servers \
   --leader_host <LEADER_PC_IP> \
+  --follower_host localhost \
   --read
 ```
 

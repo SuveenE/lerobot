@@ -6,8 +6,6 @@ import time
 
 import numpy as np
 
-LEADER_HOST = "localhost"
-
 LEADER_SERVERS = [
     ("Right leader", 5001),
     ("Left leader",  5002),
@@ -52,6 +50,12 @@ def format_array(arr) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Check Linear Bot arm servers and read joint positions.")
     parser.add_argument(
+        "--leader_host",
+        type=str,
+        default="localhost",
+        help="IP or hostname of the leader machine (default: localhost).",
+    )
+    parser.add_argument(
         "--follower_host",
         type=str,
         default=None,
@@ -64,7 +68,7 @@ def main():
     )
     args = parser.parse_args()
 
-    servers = [(name, LEADER_HOST, port) for name, port in LEADER_SERVERS]
+    servers = [(name, args.leader_host, port) for name, port in LEADER_SERVERS]
     if args.follower_host:
         for name, port in FOLLOWER_SERVERS:
             servers.append((name, args.follower_host, port))
