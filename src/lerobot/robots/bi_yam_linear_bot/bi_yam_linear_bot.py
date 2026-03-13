@@ -208,6 +208,14 @@ class BiYamLinearBot(Robot):
             host=self.config.flow_base_host,
             with_linear_rail=self.config.with_linear_rail,
         )
+        # Stop the heartbeat thread that FlowBaseClient starts automatically.
+        # It sends zeros at 50 Hz which would override joystick input on the
+        # FlowBase controller.  We send explicit velocity commands in
+        # send_action() only when the action dict contains base keys (i.e.
+        # during policy deployment, not during teleoperation).
+        self._flow_base_client.running = False
+        if self._flow_base_client._thread.is_alive():
+            self._flow_base_client._thread.join(timeout=1.0)
         logger.info(
             f"Connected to FlowBase at {self.config.flow_base_host} "
             f"(linear rail: {self.config.with_linear_rail})"
@@ -344,19 +352,32 @@ class BiYamLinearBot(Robot):
             self.right_arm.command_joint_pos(np.array(right_action))
 
         # --- FlowBase velocity ---
-        base_vel = np.array([
-            action.get("base.x.vel", 0.0),
-            action.get("base.y.vel", 0.0),
-            action.get("base.theta.vel", 0.0),
-        ])
+        # Only send velocity commands when the action dict actually contains
+        # base keys.  During teleoperation the leader only produces arm keys,
+        # so we must NOT send zeros -- that would override joystick input on
+        # the FlowBase controller (its remote-command timeout keeps the
+        # joystick blocked while valid remote commands arrive).
+        has_base_action = "base.x.vel" in action or "base.y.vel" in action or "base.theta.vel" in action
+        if has_base_action:
+            base_vel = np.array([
+                action.get("base.x.vel", 0.0),
+                action.get("base.y.vel", 0.0),
+                action.get("base.theta.vel", 0.0),
+            ])
 
-        if self.config.with_linear_rail:
-            rail_vel = action.get("rail.vel", 0.0)
-            vel_cmd = np.concatenate([base_vel, [rail_vel]])
-        else:
-            vel_cmd = base_vel
+            if self.config.with_linear_rail:
+                rail_vel = action.get("rail.vel", 0.0)
+                vel_cmd = np.concatenate([base_vel, [rail_vel]])
+            else:
+                vel_cmd = base_vel
 
-        self._flow_base_client.set_target_velocity(vel_cmd, frame="local")
+            # Send directly via the portal RPC client (the heartbeat thread
+            # is stopped to avoid sending unwanted zeros, so we bypass
+            # FlowBaseClient.set_target_velocity which only updates an
+            # internal dict read by the heartbeat).
+            self._flow_base_client.client.set_target_velocity(
+                {"target_velocity": vel_cmd, "frame": "local"}
+            ).result()
 
         return action
 
