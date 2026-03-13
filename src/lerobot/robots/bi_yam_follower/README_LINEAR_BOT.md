@@ -358,6 +358,50 @@ Rail fields are omitted when `with_linear_rail=false`.
 > from the FlowBase's resolved command observations (`base.cmd.x.vel`,
 > etc.) so the dataset captures the actual joystick-driven base movement.
 > This allows a trained policy to reproduce both arm and base behavior.
+> When `--use_keyboard_base=true` is set, keyboard commands take
+> precedence over the joystick for base/rail actions.
+
+## Keyboard Base Control
+
+You can control the FlowBase and linear rail from the keyboard instead of
+(or in addition to) a joystick by adding `--use_keyboard_base=true` to
+your `lerobot-record` command. This creates a keyboard listener alongside
+the arm teleoperator.
+
+### Default key bindings
+
+| Key | Action |
+|---|---|
+| W / S | Forward / backward |
+| A / D | Strafe left / right |
+| Z / X | Rotate left / right |
+| T / G | Rail up / down |
+| R / F | Speed up / down |
+
+Three speed levels cycle with R/F (slow, medium, fast).
+
+### Example
+
+```bash
+lerobot-record \
+  --robot.type=bi_yam_linear_bot \
+  --robot.arm_server_host=localhost \
+  --robot.flow_base_host=localhost \
+  --robot.with_linear_rail=true \
+  --robot.cameras='{ top: {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30} }' \
+  --teleop.type=bi_yam_leader \
+  --teleop.server_host=localhost \
+  --dataset.repo_id=${HF_USER}/linear-bot-keyboard \
+  --dataset.num_episodes=5 \
+  --dataset.single_task="Navigate and pick up object" \
+  --use_keyboard_base=true
+```
+
+Key bindings are configurable via `--robot.teleop_keys`:
+
+```bash
+--robot.teleop_keys='{"forward": "w", "backward": "s", "left": "a", "right": "d", "rotate_left": "z", "rotate_right": "x", "rail_up": "t", "rail_down": "g", "speed_up": "r", "speed_down": "f"}'
+```
 
 ## Configuration Reference
 

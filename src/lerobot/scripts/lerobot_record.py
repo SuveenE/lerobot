@@ -112,6 +112,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so100_leader,
     so101_leader,
 )
+from lerobot.teleoperators.keyboard.configuration_keyboard import KeyboardTeleopConfig
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import (
@@ -189,6 +190,8 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Enable keyboard control for base/rail alongside the arm teleoperator
+    use_keyboard_base: bool = False
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -264,23 +267,22 @@ def record_loop(
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
 
     teleop_arm = teleop_keyboard = None
+    _MULTI_TELEOP_ROBOTS = {"lekiwi_client", "bi_yam_linear_bot"}
     if isinstance(teleop, list):
         teleop_keyboard = next((t for t in teleop if isinstance(t, KeyboardTeleop)), None)
         teleop_arm = next(
             (
                 t
                 for t in teleop
-                if isinstance(
-                    t,
-                    (so100_leader.SO100Leader | so101_leader.SO101Leader | koch_leader.KochLeader),
-                )
+                if not isinstance(t, KeyboardTeleop)
             ),
             None,
         )
 
-        if not (teleop_arm and teleop_keyboard and len(teleop) == 2 and robot.name == "lekiwi_client"):
+        if not (teleop_arm and teleop_keyboard and len(teleop) == 2 and robot.name in _MULTI_TELEOP_ROBOTS):
             raise ValueError(
-                "For multi-teleop, the list must contain exactly one KeyboardTeleop and one arm teleoperator. Currently only supported for LeKiwi robot."
+                "For multi-teleop, the list must contain exactly one KeyboardTeleop and one arm "
+                f"teleoperator. Supported robots: {_MULTI_TELEOP_ROBOTS}."
             )
 
     # Reset policy and processor if they are provided
@@ -330,7 +332,8 @@ def record_loop(
 
         elif policy is None and isinstance(teleop, list):
             arm_action = teleop_arm.get_action()
-            arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
+            if robot.name == "lekiwi_client":
+                arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
             keyboard_action = teleop_keyboard.get_action()
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
@@ -447,6 +450,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     if teleop is not None:
         teleop.connect()
 
+    if cfg.use_keyboard_base and teleop is not None:
+        keyboard_teleop = KeyboardTeleop(KeyboardTeleopConfig())
+        keyboard_teleop.connect()
+        teleop = [teleop, keyboard_teleop]
+
     listener, events = init_keyboard_listener()
 
     with VideoEncodingManager(dataset):
@@ -500,7 +508,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 log_say("Stop recording", cfg.play_sounds, blocking=True)
 
                 robot.disconnect()
-                if teleop is not None:
+                if isinstance(teleop, list):
+                    for t in teleop:
+                        t.disconnect()
+                elif teleop is not None:
                     teleop.disconnect()
 
                 if not is_headless() and listener is not None:
