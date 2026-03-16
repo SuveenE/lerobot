@@ -371,8 +371,15 @@ class RealSenseCamera(Camera):
 
         return frame
 
+        depth_map_processed = self._postprocess_image(depth_map, depth_frame=True)
+
+        read_duration_ms = (time.perf_counter() - start_time) * 1e3
+        logger.debug(f"{self} read took: {read_duration_ms:.1f}ms")
+
+        return depth_map_processed
+
     @check_if_not_connected
-    def read(self, color_mode: ColorMode | None = None, timeout_ms: int = 0) -> NDArray[Any]:
+    def read(self, color_mode: ColorMode | None = None, timeout_ms: int = 300) -> NDArray[Any]:
         """
         Reads a single frame (color) synchronously from the camera.
 
@@ -472,6 +479,9 @@ class RealSenseCamera(Camera):
 
         failure_count = 0
         while not self.stop_event.is_set():
+            # Check if still connected before attempting to read
+            if not self.is_connected:
+                break
             try:
                 frame = self._read_from_hardware()
                 color_frame_raw = frame.get_color_frame()
@@ -495,6 +505,13 @@ class RealSenseCamera(Camera):
 
             except DeviceNotConnectedError:
                 break
+            except RuntimeError as e:
+                # Check if this is a pipeline error (device disconnected/stopped)
+                error_msg = str(e)
+                if "try_wait_for_frames" in error_msg or "before start()" in error_msg:
+                    logger.debug(f"Pipeline stopped for {self}, exiting read loop.")
+                    break
+                logger.warning(f"Runtime error reading frame in background thread for {self}: {e}")
             except Exception as e:
                 if failure_count <= 10:
                     failure_count += 1

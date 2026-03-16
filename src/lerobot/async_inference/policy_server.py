@@ -33,7 +33,6 @@ from dataclasses import asdict
 from pprint import pformat
 from queue import Empty, Queue
 from typing import Any
-
 import draccus
 import grpc
 import torch
@@ -45,7 +44,9 @@ from lerobot.transport import (
     services_pb2_grpc,  # type: ignore
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
+from lerobot.policies.utils import populate_queues
 from lerobot.types import PolicyAction
+from lerobot.utils.constants import OBS_IMAGES, OBS_LANGUAGE, ACTION
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES
@@ -261,8 +262,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             return services_pb2.Empty()
 
         except Exception as e:
+            import traceback
             self.logger.error(f"Error in StreamActions: {e}")
-
+            self.logger.error(f"Full traceback:\n{traceback.format_exc()}")
             return services_pb2.Empty()
 
     def _obs_sanity_checks(self, obs: TimedObservation, previous_obs: TimedObservation) -> bool:
@@ -320,10 +322,52 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         ]
 
     def _get_action_chunk(self, observation: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Get an action chunk from the policy. The chunk contains only"""
+        """Get an action chunk from the policy."""
+        
+        self.logger.info(f"Observation keys before processing: {list(observation.keys())}")
+        
+        # For policies that use internal queues (diffusion, vqbet, tdmpc),
+        # we need to populate their queues before calling predict_action_chunk
+        if hasattr(self.policy, '_queues') and self.policy._queues is not None:
+            self.logger.info(f"Policy has queues with keys: {list(self.policy._queues.keys())}")
+            self.logger.info(f"Queue sizes before populate: {[(k, len(v)) for k, v in self.policy._queues.items()]}")
+            
+            # Stack images into OBS_IMAGES if the policy expects it
+            if self.policy.config.image_features:
+                self.logger.info(f"Policy image_features: {list(self.policy.config.image_features.keys())}")
+                observation = dict(observation)  # shallow copy
+                try:
+                    observation[OBS_IMAGES] = torch.stack(
+                        [observation[key] for key in self.policy.config.image_features],
+                        dim=-4
+                    )
+                    self.logger.info(f"Stacked images shape: {observation[OBS_IMAGES].shape}")
+                except KeyError as e:
+                    self.logger.error(f"Missing key when stacking images: {e}")
+                    self.logger.error(f"Available keys: {list(observation.keys())}")
+                    raise
+
+            # Populate the policy's internal queues (exclude ACTION to avoid None values)
+            self.policy._queues = populate_queues(self.policy._queues, observation, exclude_keys=[ACTION])
+            self.logger.info(f"Queue sizes after populate: {[(k, len(v)) for k, v in self.policy._queues.items()]}")
+
+            # Filter observation to only include keys the policy queues expect
+            # This prevents predict_action_chunk from trying to stack empty queues
+            # But preserve image and language keys which are processed separately by VLA policies
+            observation = {
+                k: v for k, v in observation.items()
+                if (k in self.policy._queues and k != ACTION)
+                or k.startswith(OBS_IMAGES)
+                or k.startswith(OBS_LANGUAGE)
+            }
+            self.logger.info(f"Filtered observation keys: {list(observation.keys())}")
+
+        self.logger.info(f"Observation keys passed to predict_action_chunk: {list(observation.keys())}")
         chunk = self.policy.predict_action_chunk(observation)
+        self.logger.info(f"Action chunk shape from policy: {chunk.shape}")
+        
         if chunk.ndim != 3:
-            chunk = chunk.unsqueeze(0)  # adding batch dimension, now shape is (B, chunk_size, action_dim)
+            chunk = chunk.unsqueeze(0)
 
         return chunk[:, : self.actions_per_chunk, :]
 

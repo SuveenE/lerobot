@@ -205,6 +205,20 @@ class Robot(abc.ABC):
         """
         pass
 
+    def teleop_action_from_obs(self, obs: dict[str, Any]) -> dict[str, float]:
+        """Return action values derivable from the current observation.
+
+        During teleoperation some action dimensions may not be provided by
+        the leader device (e.g. a mobile-base velocity controlled via
+        joystick).  Override this method to extract those values from the
+        robot's observation so they are recorded in the dataset instead of
+        being left as zero.
+
+        The returned dict is merged *under* the teleop action -- keys that
+        the teleop already provides are never overwritten.
+        """
+        return {}
+
     @abc.abstractmethod
     def disconnect(self) -> None:
         """Disconnect from the robot and perform any necessary cleanup."""
