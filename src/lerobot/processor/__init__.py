@@ -14,19 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .batch_processor import AddBatchDimensionProcessorStep
-from .converters import (
-    batch_to_transition,
-    create_transition,
-    transition_to_batch,
-)
-from .core import (
+from lerobot.types import (
     EnvAction,
     EnvTransition,
     PolicyAction,
     RobotAction,
     RobotObservation,
     TransitionKey,
+)
+
+from .batch_processor import AddBatchDimensionProcessorStep
+from .converters import (
+    batch_to_transition,
+    create_transition,
+    transition_to_batch,
 )
 from .delta_action_processor import MapDeltaActionToRobotActionStep, MapTensorToDeltaActionDictStep
 from .device_processor import DeviceProcessorStep
@@ -44,12 +45,12 @@ from .hil_processor import (
     AddTeleopActionAsComplimentaryDataStep,
     AddTeleopEventsAsInfoStep,
     GripperPenaltyProcessorStep,
+    GymHILAdapterProcessorStep,
     ImageCropResizeProcessorStep,
     InterventionActionProcessorStep,
     RewardClassifierProcessorStep,
     TimeLimitProcessorStep,
 )
-from .joint_observations_processor import JointVelocityProcessorStep, MotorCurrentProcessorStep
 from .normalize_processor import NormalizerProcessorStep, UnnormalizerProcessorStep, hotswap_stats
 from .observation_processor import VanillaObservationProcessorStep
 from .pipeline import (
@@ -75,7 +76,7 @@ from .policy_robot_bridge import (
     RobotActionToPolicyActionProcessorStep,
 )
 from .rename_processor import RenameObservationsProcessorStep
-from .tokenizer_processor import TokenizerProcessorStep
+from .tokenizer_processor import ActionTokenizerProcessorStep, TokenizerProcessorStep
 
 __all__ = [
     "ActionProcessorStep",
@@ -88,20 +89,19 @@ __all__ = [
     "DoneProcessorStep",
     "EnvAction",
     "EnvTransition",
+    "GymHILAdapterProcessorStep",
     "GripperPenaltyProcessorStep",
     "hotswap_stats",
     "IdentityProcessorStep",
     "ImageCropResizeProcessorStep",
     "InfoProcessorStep",
     "InterventionActionProcessorStep",
-    "JointVelocityProcessorStep",
     "make_default_processors",
     "make_default_teleop_action_processor",
     "make_default_robot_action_processor",
     "make_default_robot_observation_processor",
     "MapDeltaActionToRobotActionStep",
     "MapTensorToDeltaActionDictStep",
-    "MotorCurrentProcessorStep",
     "NormalizerProcessorStep",
     "Numpy2TorchActionProcessorStep",
     "ObservationProcessorStep",
@@ -122,6 +122,7 @@ __all__ = [
     "AddBatchDimensionProcessorStep",
     "RobotProcessorPipeline",
     "TokenizerProcessorStep",
+    "ActionTokenizerProcessorStep",
     "Torch2NumpyActionProcessorStep",
     "RobotActionToPolicyActionProcessorStep",
     "PolicyActionToRobotActionProcessorStep",
