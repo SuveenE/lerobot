@@ -151,6 +151,53 @@ from lerobot.utils.utils import (
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
+INITIAL_POSITION: dict[str, float] = {
+    "left_joint_0.pos": 0.0,
+    "left_joint_1.pos": 0.0,
+    "left_joint_2.pos": 0.0,
+    "left_joint_3.pos": 0.0,
+    "left_joint_4.pos": 0.0,
+    "left_joint_5.pos": 0.0,
+    "left_gripper.pos": 1.0,
+    "right_joint_0.pos": 0.0,
+    "right_joint_1.pos": 0.0,
+    "right_joint_2.pos": 0.0,
+    "right_joint_3.pos": 0.0,
+    "right_joint_4.pos": 0.0,
+    "right_joint_5.pos": 0.0,
+    "right_gripper.pos": 1.0,
+}
+
+
+def slow_move_to_position(
+    robot: Robot,
+    target_position: dict[str, float],
+    num_steps: int = 100,
+    step_sleep: float = 0.1,
+) -> None:
+    """Slowly move robot from current position to target position via linear interpolation.
+
+    Matches i2rt's slow_move logic: discrete steps with fixed sleep between them.
+    Only interpolates keys present in both the robot's action_features and target_position.
+    """
+    current_obs = robot.get_observation()
+    start_positions = {k: current_obs[k] for k in robot.action_features if k in current_obs}
+
+    for i in range(num_steps):
+        blend = i / num_steps
+        blended_action = {}
+        for key in robot.action_features:
+            if key in start_positions and key in target_position:
+                blended_action[key] = target_position[key] * blend + start_positions[key] * (1 - blend)
+            elif key in target_position:
+                blended_action[key] = target_position[key]
+            elif key in start_positions:
+                blended_action[key] = start_positions[key]
+        robot.send_action(blended_action)
+        time.sleep(step_sleep)
+
+    robot.send_action(target_position)
+
 
 @dataclass
 class DatasetRecordConfig:
@@ -582,6 +629,19 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     dataset.clear_episode_buffer()
                     continue
 
+                if recorded_episodes + 1 == cfg.dataset.num_episodes:
+                    log_say("Stop recording", cfg.play_sounds, blocking=True)
+                    try:
+                        logging.info("Moving robot to initial position before disconnect...")
+                        slow_move_to_position(robot, INITIAL_POSITION)
+                        logging.info("Robot at initial position")
+                    except Exception as e:
+                        logging.warning(f"Error moving to initial position: {e}")
+                    if robot.is_connected:
+                        robot.disconnect()
+                    if teleop and teleop.is_connected:
+                        teleop.disconnect()
+
                 dataset.save_episode()
                 recorded_episodes += 1
     finally:
@@ -591,6 +651,12 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             dataset.finalize()
 
         if robot.is_connected:
+            try:
+                logging.info("Moving robot to initial position before disconnect...")
+                slow_move_to_position(robot, INITIAL_POSITION)
+                logging.info("Robot at initial position")
+            except Exception as e:
+                logging.warning(f"Error moving to initial position: {e}")
             robot.disconnect()
         if teleop and teleop.is_connected:
             teleop.disconnect()
