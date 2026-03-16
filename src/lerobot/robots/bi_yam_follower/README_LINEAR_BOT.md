@@ -264,7 +264,24 @@ This starts:
 
 ```bash
 # Terminal 2 on Follower PC
-python i2rt/i2rt/flow_base/flow_base_controller.py --channel can_flow_base
+python3 i2rt/i2rt/flow_base/flow_base_controller.py --channel can_linearbot
+```
+
+##### With RPi
+
+If the GPIO limit switches are wired to a Raspberry Pi, start the GPIO
+satellite server on the Pi first, then point the controller at it:
+
+```bash
+# On the Raspberry Pi
+python i2rt/i2rt/flow_base/gpio_satellite_server.py --port 8765
+```
+
+```bash
+# Terminal 3 on Follower PC
+python i2rt/i2rt/flow_base/flow_base_controller.py \
+  --channel can_linearbot \
+  --gpio-host <RPI_IP>:8765
 ```
 
 Connect the joystick to this machine to control the base and linear rail.
