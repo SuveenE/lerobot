@@ -395,11 +395,19 @@ class BiYamLinearBot(Robot):
     # ------------------------------------------------------------------
 
     def teleop_action_from_obs(self, obs: dict[str, Any]) -> dict[str, float]:
-        fallback: dict[str, float] = {
+        fallback: dict[str, float] = {}
+
+        # When no leader is attached, record the current arm pose as the
+        # effective action so dataset action vectors stay fully populated.
+        for key in self._arm_ft:
+            if key in obs:
+                fallback[key] = float(obs[key])
+
+        fallback.update({
             "base.x.vel": float(obs.get("base.cmd.x.vel", 0.0)),
             "base.y.vel": float(obs.get("base.cmd.y.vel", 0.0)),
             "base.theta.vel": float(obs.get("base.cmd.theta.vel", 0.0)),
-        }
+        })
         if self.config.with_linear_rail:
             fallback["rail.vel"] = float(obs.get("rail.cmd.vel", 0.0))
         return fallback

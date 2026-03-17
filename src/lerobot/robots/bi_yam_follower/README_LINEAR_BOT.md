@@ -328,6 +328,50 @@ Since the follower arms, FlowBase, and cameras are all local to the
 follower PC, only `--teleop.server_host` needs the remote IP. Everything
 else points to `localhost`.
 
+#### Optional: record without leader arms
+
+If you do not have the leader arms connected, you can still record a
+passive dataset from the follower PC only. In that mode:
+
+- Skip Step 1 entirely.
+- Skip the leader-host check in Step 4.
+- Omit all `--teleop.*` flags from `lerobot-record`.
+- Add `--passive_recording=true`.
+
+```bash
+# Terminal 3 on Follower PC
+lerobot-record \
+  --robot.type=bi_yam_linear_bot \
+  --robot.arm_server_host=localhost \
+  --robot.left_arm_port=1235 \
+  --robot.right_arm_port=1234 \
+  --robot.flow_base_host=localhost \
+  --robot.with_linear_rail=true \
+  --robot.cameras='{
+    left: {"type": "intelrealsense", "index_or_path": 6, "width": 640, "height": 480, "fps": 30},
+    top: {"type": "intelrealsense", "index_or_path": 12, "width": 640, "height": 480, "fps": 30},
+    right: {"type": "intelrealsense", "index_or_path": 18, "width": 640, "height": 480, "fps": 30}
+  }' \
+  --passive_recording=true \
+  --dataset.repo_id=${HF_USER}/linear-bot-passive \
+  --dataset.num_episodes=10 \
+  --dataset.episode_time_s=120 \
+  --dataset.reset_time_s=20 \
+  --dataset.single_task="Drive and observe the scene" \
+  --display_data=true \
+  --resume=false
+```
+
+In passive mode, the recorded action fields are synthesized from the
+robot state:
+
+- Arm actions mirror the current follower arm joint positions.
+- Base and rail actions mirror the resolved FlowBase command (for example
+  from the joystick).
+
+This is useful for logging follower-only or joystick-driven runs, but it
+is not equivalent to recording demonstrations from the teaching handles.
+
 ### Recorded fields
 
 The dataset will contain the following observation and action fields in

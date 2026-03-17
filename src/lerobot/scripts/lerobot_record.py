@@ -264,6 +264,9 @@ class RecordConfig:
     teleop: TeleoperatorConfig | None = None
     # Whether to control the robot with a policy
     policy: PreTrainedConfig | None = None
+    # Allow recording without a teleoperator or policy by deriving the action
+    # values from the robot state.
+    passive_recording: bool = False
     # Display all cameras on screen
     display_data: bool = False
     # Display data on a remote Rerun server
@@ -287,8 +290,11 @@ class RecordConfig:
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
 
-        if self.teleop is None and self.policy is None:
-            raise ValueError("Choose a policy, a teleoperator or both to control the robot")
+        if self.teleop is None and self.policy is None and not self.passive_recording:
+            raise ValueError(
+                "Choose a policy, a teleoperator or both to control the robot, "
+                "or pass --passive_recording=true to record from robot state only"
+            )
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -347,6 +353,7 @@ def record_loop(
     postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None,
     control_time_s: int | None = None,
     single_task: str | None = None,
+    passive_recording: bool = False,
     display_data: bool = False,
     display_compressed_images: bool = False,
 ):
@@ -384,7 +391,7 @@ def record_loop(
         preprocessor.reset()
         postprocessor.reset()
 
-    no_action_count = 0
+    passive_recording_logged = False
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
@@ -434,14 +441,17 @@ def record_loop(
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
             act_processed_teleop = teleop_action_processor((act, obs))
         else:
-            no_action_count += 1
-            if no_action_count == 1 or no_action_count % 10 == 0:
-                logging.warning(
-                    "No policy or teleoperator provided, skipping action generation. "
-                    "This is likely to happen when resetting the environment without a teleop device. "
-                    "The robot won't be at its rest position at the start of the next episode."
+            if not passive_recording:
+                raise ValueError(
+                    "Passive recording is disabled but no teleoperator or policy was provided."
                 )
-            continue
+            if not passive_recording_logged:
+                logging.info(
+                    "No policy or teleoperator provided. Recording passive observations and "
+                    "deriving action values from the robot state."
+                )
+                passive_recording_logged = True
+            act_processed_teleop = {}
 
         # Applies a pipeline to the action, default is IdentityProcessor
         if policy is not None and act_processed_policy is not None:
@@ -598,6 +608,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     dataset=dataset,
                     control_time_s=cfg.dataset.episode_time_s,
                     single_task=cfg.dataset.single_task,
+                    passive_recording=cfg.passive_recording,
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
                 )
@@ -619,6 +630,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         teleop=teleop,
                         control_time_s=cfg.dataset.reset_time_s,
                         single_task=cfg.dataset.single_task,
+                        passive_recording=cfg.passive_recording,
                         display_data=cfg.display_data,
                     )
 
