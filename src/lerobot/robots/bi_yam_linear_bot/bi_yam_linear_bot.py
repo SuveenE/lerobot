@@ -17,7 +17,7 @@
 import logging
 import time
 from functools import cached_property
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import portal
@@ -99,6 +99,8 @@ class BiYamLinearBot(Robot):
         self._right_dofs = None
 
         self._flow_base_client = None
+        self._flow_base_rpc_timeout_s = 2.0
+        self._flow_base_slow_rpc_ms = 100.0
 
     # ------------------------------------------------------------------
     # Feature declarations
@@ -243,6 +245,25 @@ class BiYamLinearBot(Robot):
     # Observation
     # ------------------------------------------------------------------
 
+    def _call_flow_base_rpc(self, name: str, rpc_call: Callable[[float], Any]) -> Any:
+        start_t = time.perf_counter()
+        try:
+            result = rpc_call(self._flow_base_rpc_timeout_s)
+        except Exception:
+            dt_ms = (time.perf_counter() - start_t) * 1e3
+            logger.exception(
+                "FlowBase RPC failed: %s after %.1fms (timeout=%.1fs)",
+                name,
+                dt_ms,
+                self._flow_base_rpc_timeout_s,
+            )
+            raise
+
+        dt_ms = (time.perf_counter() - start_t) * 1e3
+        if dt_ms > self._flow_base_slow_rpc_ms:
+            logger.warning("FlowBase RPC slow: %s took %.1fms", name, dt_ms)
+        return result
+
     def get_observation(self) -> dict[str, Any]:
         obs_dict: dict[str, Any] = {}
 
@@ -272,7 +293,10 @@ class BiYamLinearBot(Robot):
                 obs_dict[f"right_joint_{i}.pos"] = pos
 
         # --- FlowBase odometry ---
-        odometry = self._flow_base_client.get_odometry()
+        odometry = self._call_flow_base_rpc(
+            "get_odometry",
+            lambda timeout: self._flow_base_client.client.get_odometry({}).result(timeout=timeout),
+        )
         translation = odometry["translation"]
         rotation = odometry["rotation"]
         obs_dict["base.x"] = float(translation[0])
@@ -281,7 +305,10 @@ class BiYamLinearBot(Robot):
 
         # --- Linear rail ---
         if self.config.with_linear_rail:
-            rail = self._flow_base_client.get_linear_rail_state()
+            rail = self._call_flow_base_rpc(
+                "get_linear_rail_state",
+                lambda timeout: self._flow_base_client.client.get_linear_rail_state({}).result(timeout=timeout),
+            )
             obs_dict["rail.position"] = float(rail["position"])
             obs_dict["rail.velocity"] = float(rail["velocity"])
             obs_dict["rail.upper_limit"] = 1.0 if rail.get("upper_limit_triggered") else 0.0
@@ -290,7 +317,10 @@ class BiYamLinearBot(Robot):
             obs_dict["rail.brake_on"] = 1.0 if rail.get("brake_on") else 0.0
 
         # --- Resolved command (captures joystick and/or remote input) ---
-        resolved = self._flow_base_client.get_current_command()
+        resolved = self._call_flow_base_rpc(
+            "get_current_command",
+            lambda timeout: self._flow_base_client.client.get_current_command({}).result(timeout=timeout),
+        )
         vel = resolved["velocity"]
         obs_dict["base.cmd.x.vel"] = float(vel[0])
         obs_dict["base.cmd.y.vel"] = float(vel[1])
@@ -384,9 +414,12 @@ class BiYamLinearBot(Robot):
             # is stopped to avoid sending unwanted zeros, so we bypass
             # FlowBaseClient.set_target_velocity which only updates an
             # internal dict read by the heartbeat).
-            self._flow_base_client.client.set_target_velocity(
-                {"target_velocity": vel_cmd, "frame": "local"}
-            ).result()
+            self._call_flow_base_rpc(
+                "set_target_velocity",
+                lambda timeout: self._flow_base_client.client.set_target_velocity(
+                    {"target_velocity": vel_cmd, "frame": "local"}
+                ).result(timeout=timeout),
+            )
 
         return action
 
