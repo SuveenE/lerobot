@@ -40,8 +40,8 @@ class BiYamLinearBotConfig(RobotConfig):
     # FlowBase controller velocity limits – must match the values used by the
     # running flow_base_controller so that policy outputs (physical velocities)
     # are correctly normalised to the [-1, 1] range the controller expects.
-    base_max_vel: tuple[float, float, float] = (0.8, 0.8, 3.0)
-    rail_max_vel: float = 14.0
+    base_max_vel: tuple[float, float, float] = (0.4, 0.4, 1.5)
+    rail_max_vel: float = 7.0
 
     # Optional: Maximum relative target for arm safety
     left_arm_max_relative_target: float | dict[str, float] | None = None
