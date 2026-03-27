@@ -141,8 +141,6 @@ class BiYamLinearBot(Robot):
                 "rail.velocity": float,
                 "rail.upper_limit": float,
                 "rail.lower_limit": float,
-                "rail.initialized": float,
-                "rail.brake_on": float,
             })
         ft.update({
             "base.cmd.x.vel": float,
@@ -286,8 +284,6 @@ class BiYamLinearBot(Robot):
             obs_dict["rail.velocity"] = float(rail["velocity"])
             obs_dict["rail.upper_limit"] = 1.0 if rail.get("upper_limit_triggered") else 0.0
             obs_dict["rail.lower_limit"] = 1.0 if rail.get("lower_limit_triggered") else 0.0
-            obs_dict["rail.initialized"] = 1.0 if rail.get("initialized") else 0.0
-            obs_dict["rail.brake_on"] = 1.0 if rail.get("brake_on") else 0.0
 
         # --- Resolved command (captures joystick and/or remote input) ---
         resolved = self._flow_base_client.get_current_command()

@@ -331,8 +331,6 @@ addition to camera images.
 | `rail.velocity` | Linear rail motor velocity |
 | `rail.upper_limit` | Upper limit switch triggered (0.0 / 1.0) |
 | `rail.lower_limit` | Lower limit switch triggered (0.0 / 1.0) |
-| `rail.initialized` | Rail homing completed (0.0 / 1.0) |
-| `rail.brake_on` | Rail brake engaged (0.0 / 1.0) |
 | `base.cmd.x.vel` | Resolved base X velocity command (joystick or remote) |
 | `base.cmd.y.vel` | Resolved base Y velocity command (joystick or remote) |
 | `base.cmd.theta.vel` | Resolved base rotation velocity command (joystick or remote) |
