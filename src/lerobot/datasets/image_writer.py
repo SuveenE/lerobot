@@ -18,6 +18,7 @@ import queue
 import threading
 from pathlib import Path
 
+import cv2
 import numpy as np
 import PIL.Image
 import torch
@@ -39,9 +40,37 @@ def safe_stop_image_writer(func):
 
 
 def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) -> PIL.Image.Image:
-    # TODO(aliberts): handle 1 channel and 4 for depth images
+    # Handle single-channel (depth) images
+    if image_array.ndim == 2:
+        # Depth image: encode 16-bit depth into RGB channels to preserve precision
+        if image_array.dtype == np.uint16:
+            # ENCODING EXPLANATION:
+            # A uint16 number stores values 0-65535 using 2 bytes (16 bits total).
+            # Since video codecs only support 8-bit channels (0-255), we split each
+            # 16-bit depth value into two 8-bit values:
+            #
+            # Example: depth value = 5000 (millimeters)
+            # - Binary: 00010011 10001000 (16 bits)
+            # - High byte (upper 8 bits): 00010011 = 19 (bits 15-8)
+            # - Low byte (lower 8 bits):  10001000 = 136 (bits 7-0)
+            # - Reconstruction: 19 * 256 + 136 = 4864 + 136 = 5000 ✓
+            #
+            # We store these bytes in RGB channels:
+            # - R channel = high byte (the "bigger" part, represents 0-255 * 256)
+            # - G channel = low byte (the "smaller" part, represents 0-255)
+            # - B channel = 0 (unused)
+            high_byte = (image_array >> 8).astype(np.uint8)  # Upper 8 bits: shift right by 8
+            low_byte = (image_array & 0xFF).astype(np.uint8)   # Lower 8 bits: mask with 0xFF (255)
+            zero_channel = np.zeros_like(high_byte, dtype=np.uint8)  # B channel = 0
+            # Stack as RGB: (H, W, 3)
+            rgb_depth = np.stack([high_byte, low_byte, zero_channel], axis=-1)
+            return PIL.Image.fromarray(rgb_depth)
+        else:
+            raise ValueError(f"Unsupported depth image dtype: {image_array.dtype}")
+    
+    # Handle 3-channel (RGB) images
     if image_array.ndim != 3:
-        raise ValueError(f"The array has {image_array.ndim} dimensions, but 3 is expected for an image.")
+        raise ValueError(f"The array has {image_array.ndim} dimensions, but 2 (depth) or 3 (RGB) is expected for an image.")
 
     if image_array.shape[0] == 3:
         # Transpose from pytorch convention (C, H, W) to (H, W, C)
@@ -49,7 +78,7 @@ def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) 
 
     elif image_array.shape[-1] != 3:
         raise NotImplementedError(
-            f"The image has {image_array.shape[-1]} channels, but 3 is required for now."
+            f"The image has {image_array.shape[-1]} channels, but 3 is required for RGB images."
         )
 
     if image_array.dtype != np.uint8:

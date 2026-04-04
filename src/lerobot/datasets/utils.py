@@ -128,7 +128,8 @@ def serialize_dict(stats: dict[str, torch.Tensor | np.ndarray | dict]) -> dict:
         elif isinstance(value, (int, float)):
             serialized_dict[key] = value
         else:
-            raise NotImplementedError(f"The value '{value}' of type '{type(value)}' is not supported.")
+            raise NotImplementedError(
+                f"The value '{value}' of type '{type(value)}' is not supported.")
     return unflatten_dict(serialized_dict)
 
 
@@ -186,7 +187,8 @@ def write_stats(stats: dict, local_dir: Path):
 
 
 def cast_stats_to_numpy(stats) -> dict[str, dict[str, np.ndarray]]:
-    stats = {key: np.array(value) for key, value in flatten_dict(stats).items()}
+    stats = {key: np.array(value)
+             for key, value in flatten_dict(stats).items()}
     return unflatten_dict(stats)
 
 
@@ -207,8 +209,10 @@ def write_task(task_index: int, task: dict, local_dir: Path):
 
 def load_tasks(local_dir: Path) -> tuple[dict, dict]:
     tasks = load_jsonlines(local_dir / TASKS_PATH)
-    tasks = {item["task_index"]: item["task"] for item in sorted(tasks, key=lambda x: x["task_index"])}
-    task_to_task_index = {task: task_index for task_index, task in tasks.items()}
+    tasks = {item["task_index"]: item["task"]
+             for item in sorted(tasks, key=lambda x: x["task_index"])}
+    task_to_task_index = {
+        task: task_index for task_index, task in tasks.items()}
     return tasks, task_to_task_index
 
 
@@ -224,7 +228,8 @@ def load_episodes(local_dir: Path) -> dict:
 def write_episode_stats(episode_index: int, episode_stats: dict, local_dir: Path):
     # We wrap episode_stats in a dictionary since `episode_stats["episode_index"]`
     # is a dictionary of stats and not an integer.
-    episode_stats = {"episode_index": episode_index, "stats": serialize_dict(episode_stats)}
+    episode_stats = {"episode_index": episode_index,
+                     "stats": serialize_dict(episode_stats)}
     append_jsonlines(episode_stats, local_dir / EPISODES_STATS_PATH)
 
 
@@ -268,7 +273,8 @@ def hf_transform_to_torch(items_dict: dict[torch.Tensor | None]):
         elif first_item is None:
             pass
         else:
-            items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in items_dict[key]]
+            items_dict[key] = [x if isinstance(
+                x, str) else torch.tensor(x) for x in items_dict[key]]
     return items_dict
 
 
@@ -321,7 +327,8 @@ def get_safe_version(repo_id: str, version: str | packaging.version.Version) -> 
     Otherwise, will throw a `CompatibilityError`.
     """
     target_version = (
-        packaging.version.parse(version) if not isinstance(version, packaging.version.Version) else version
+        packaging.version.parse(version) if not isinstance(
+            version, packaging.version.Version) else version
     )
     hub_versions = get_repo_versions(repo_id)
 
@@ -347,7 +354,8 @@ def get_safe_version(repo_id: str, version: str | packaging.version.Version) -> 
     if compatibles:
         return_version = max(compatibles)
         if return_version < target_version:
-            logging.warning(f"Revision {version} for {repo_id} not found, using version v{return_version}")
+            logging.warning(
+                f"Revision {version} for {repo_id} not found, using version v{return_version}")
         return f"v{return_version}"
 
     lower_major = [v for v in hub_versions if v.major < target_version.major]
@@ -370,16 +378,21 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
             hf_features[key] = datasets.Value(dtype=ft["dtype"])
         elif len(ft["shape"]) == 1:
             hf_features[key] = datasets.Sequence(
-                length=ft["shape"][0], feature=datasets.Value(dtype=ft["dtype"])
+                length=ft["shape"][0], feature=datasets.Value(
+                    dtype=ft["dtype"])
             )
         elif len(ft["shape"]) == 2:
-            hf_features[key] = datasets.Array2D(shape=ft["shape"], dtype=ft["dtype"])
+            hf_features[key] = datasets.Array2D(
+                shape=ft["shape"], dtype=ft["dtype"])
         elif len(ft["shape"]) == 3:
-            hf_features[key] = datasets.Array3D(shape=ft["shape"], dtype=ft["dtype"])
+            hf_features[key] = datasets.Array3D(
+                shape=ft["shape"], dtype=ft["dtype"])
         elif len(ft["shape"]) == 4:
-            hf_features[key] = datasets.Array4D(shape=ft["shape"], dtype=ft["dtype"])
+            hf_features[key] = datasets.Array4D(
+                shape=ft["shape"], dtype=ft["dtype"])
         elif len(ft["shape"]) == 5:
-            hf_features[key] = datasets.Array5D(shape=ft["shape"], dtype=ft["dtype"])
+            hf_features[key] = datasets.Array5D(
+                shape=ft["shape"], dtype=ft["dtype"])
         else:
             raise ValueError(f"Corresponding feature is not valid: {ft}")
 
@@ -387,17 +400,21 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
 
 
 def _validate_feature_names(features: dict[str, dict]) -> None:
-    invalid_features = {name: ft for name, ft in features.items() if "/" in name}
+    invalid_features = {name: ft for name,
+                        ft in features.items() if "/" in name}
     if invalid_features:
-        raise ValueError(f"Feature names should not contain '/'. Found '/' in '{invalid_features}'.")
+        raise ValueError(
+            f"Feature names should not contain '/'. Found '/' in '{invalid_features}'.")
 
 
 def hw_to_dataset_features(
     hw_features: dict[str, type | tuple], prefix: str, use_video: bool = True
 ) -> dict[str, dict]:
     features = {}
-    joint_fts = {key: ftype for key, ftype in hw_features.items() if ftype is float}
-    cam_fts = {key: shape for key, shape in hw_features.items() if isinstance(shape, tuple)}
+    joint_fts = {key: ftype for key, ftype in hw_features.items()
+                 if ftype is float}
+    cam_fts = {key: shape for key, shape in hw_features.items()
+               if isinstance(shape, tuple)}
 
     if joint_fts and prefix == "action":
         features[prefix] = {
@@ -414,11 +431,24 @@ def hw_to_dataset_features(
         }
 
     for key, shape in cam_fts.items():
-        features[f"{prefix}.images.{key}"] = {
-            "dtype": "video" if use_video else "image",
-            "shape": shape,
-            "names": ["height", "width", "channels"],
-        }
+        # Detect if this is a depth image (2D) or RGB image (3D)
+        if len(shape) == 2:
+            # Depth image: (height, width)
+            features[f"{prefix}.images.{key}"] = {
+                "dtype": "video" if use_video else "image",
+                "shape": shape,
+                "names": ["height", "width"],
+            }
+        elif len(shape) == 3:
+            # RGB image: (height, width, channels)
+            features[f"{prefix}.images.{key}"] = {
+                "dtype": "video" if use_video else "image",
+                "shape": shape,
+                "names": ["height", "width", "channels"],
+            }
+        else:
+            raise ValueError(
+                f"Invalid camera feature shape for '{key}': {shape}. Expected 2D or 3D tuple.")
 
     _validate_feature_names(features)
     return features
@@ -432,7 +462,8 @@ def build_dataset_frame(
         if key in DEFAULT_FEATURES or not key.startswith(prefix):
             continue
         elif ft["dtype"] == "float32" and len(ft["shape"]) == 1:
-            frame[key] = np.array([values[name] for name in ft["names"]], dtype=np.float32)
+            frame[key] = np.array([values[name]
+                                  for name in ft["names"]], dtype=np.float32)
         elif ft["dtype"] in ["image", "video"]:
             frame[key] = values[key.removeprefix(f"{prefix}.images.")]
 
@@ -446,13 +477,22 @@ def dataset_to_policy_features(features: dict[str, dict]) -> dict[str, PolicyFea
         shape = ft["shape"]
         if ft["dtype"] in ["image", "video"]:
             type = FeatureType.VISUAL
-            if len(shape) != 3:
-                raise ValueError(f"Number of dimensions of {key} != 3 (shape={shape})")
 
-            names = ft["names"]
-            # Backward compatibility for "channel" which is an error introduced in LeRobotDataset v2.0 for ported datasets.
-            if names[2] in ["channel", "channels"]:  # (h, w, c) -> (c, h, w)
-                shape = (shape[2], shape[0], shape[1])
+            # Handle both 3D RGB images and 2D depth images
+            if len(shape) == 3:
+                # RGB image: (h, w, c) -> potentially reorder to (c, h, w)
+                names = ft["names"]
+                # Backward compatibility for "channel" which is an error introduced in LeRobotDataset v2.0 for ported datasets.
+                # (h, w, c) -> (c, h, w)
+                if names[2] in ["channel", "channels"]:
+                    shape = (shape[2], shape[0], shape[1])
+            elif len(shape) == 2:
+                # Depth image: (h, w) - keep as is
+                pass
+            else:
+                raise ValueError(
+                    f"Number of dimensions of {key} must be 2 or 3 (shape={shape})")
+
         elif key == "observation.environment_state":
             type = FeatureType.ENV
         elif key.startswith("observation"):
@@ -497,9 +537,11 @@ def create_empty_dataset_info(
 def get_episode_data_index(
     episode_dicts: dict[dict], episodes: list[int] | None = None
 ) -> dict[str, torch.Tensor]:
-    episode_lengths = {ep_idx: ep_dict["length"] for ep_idx, ep_dict in episode_dicts.items()}
+    episode_lengths = {ep_idx: ep_dict["length"]
+                       for ep_idx, ep_dict in episode_dicts.items()}
     if episodes is not None:
-        episode_lengths = {ep_idx: episode_lengths[ep_idx] for ep_idx in episodes}
+        episode_lengths = {
+            ep_idx: episode_lengths[ep_idx] for ep_idx in episodes}
 
     cumulative_lengths = list(accumulate(episode_lengths.values()))
     return {
@@ -547,7 +589,8 @@ def check_timestamps_sync(
 
     # Mask to ignore differences at the boundaries between episodes
     mask = np.ones(len(diffs), dtype=bool)
-    ignored_diffs = episode_data_index["to"][:-1] - 1  # indices at the end of each episode
+    # indices at the end of each episode
+    ignored_diffs = episode_data_index["to"][:-1] - 1
     mask[ignored_diffs] = False
     filtered_within_tolerance = within_tolerance[mask]
 
@@ -556,7 +599,8 @@ def check_timestamps_sync(
         # Track original indices before masking
         original_indices = np.arange(len(diffs))
         filtered_indices = original_indices[mask]
-        outside_tolerance_filtered_indices = np.nonzero(~filtered_within_tolerance)[0]
+        outside_tolerance_filtered_indices = np.nonzero(
+            ~filtered_within_tolerance)[0]
         outside_tolerance_indices = filtered_indices[outside_tolerance_filtered_indices]
 
         outside_tolerances = []
@@ -590,7 +634,8 @@ def check_delta_timestamps(
     """
     outside_tolerance = {}
     for key, delta_ts in delta_timestamps.items():
-        within_tolerance = [abs(ts * fps - round(ts * fps)) / fps <= tolerance_s for ts in delta_ts]
+        within_tolerance = [
+            abs(ts * fps - round(ts * fps)) / fps <= tolerance_s for ts in delta_ts]
         if not all(within_tolerance):
             outside_tolerance[key] = [
                 ts for ts, is_within in zip(delta_ts, within_tolerance, strict=True) if not is_within
@@ -676,7 +721,8 @@ def create_lerobot_dataset_card(
         ],
     )
 
-    card_template = (importlib.resources.files("lerobot.datasets") / "card_template.md").read_text()
+    card_template = (importlib.resources.files(
+        "lerobot.datasets") / "card_template.md").read_text()
 
     return DatasetCard.from_template(
         card_data=card_data,
@@ -744,11 +790,13 @@ def validate_frame(frame: dict, features: dict):
     expected_features = set(features) - set(DEFAULT_FEATURES)
     actual_features = set(frame)
 
-    error_message = validate_features_presence(actual_features, expected_features)
+    error_message = validate_features_presence(
+        actual_features, expected_features)
 
     common_features = actual_features & expected_features
     for name in common_features - {"task"}:
-        error_message += validate_feature_dtype_and_shape(name, features[name], frame[name])
+        error_message += validate_feature_dtype_and_shape(
+            name, features[name], frame[name])
 
     if error_message:
         raise ValueError(error_message)
@@ -779,7 +827,8 @@ def validate_feature_dtype_and_shape(name: str, feature: dict, value: np.ndarray
     elif expected_dtype == "string":
         return validate_feature_string(name, value)
     else:
-        raise NotImplementedError(f"The feature dtype '{expected_dtype}' is not implemented yet.")
+        raise NotImplementedError(
+            f"The feature dtype '{expected_dtype}' is not implemented yet.")
 
 
 def validate_feature_numpy_array(
@@ -806,9 +855,20 @@ def validate_feature_image_or_video(name: str, expected_shape: list[str], value:
     error_message = ""
     if isinstance(value, np.ndarray):
         actual_shape = value.shape
-        c, h, w = expected_shape
-        if len(actual_shape) != 3 or (actual_shape != (c, h, w) and actual_shape != (h, w, c)):
-            error_message += f"The feature '{name}' of shape '{actual_shape}' does not have the expected shape '{(c, h, w)}' or '{(h, w, c)}'.\n"
+        expected_len = len(expected_shape)
+        
+        if expected_len == 2:
+            # Depth image: (height, width)
+            h, w = expected_shape
+            if len(actual_shape) != 2 or actual_shape != (h, w):
+                error_message += f"The feature '{name}' of shape '{actual_shape}' does not have the expected shape '{(h, w)}'.\n"
+        elif expected_len == 3:
+            # RGB image: (height, width, channels) or (channels, height, width)
+            c, h, w = expected_shape
+            if len(actual_shape) != 3 or (actual_shape != (c, h, w) and actual_shape != (h, w, c)):
+                error_message += f"The feature '{name}' of shape '{actual_shape}' does not have the expected shape '{(c, h, w)}' or '{(h, w, c)}'.\n"
+        else:
+            error_message += f"The feature '{name}' has an invalid expected_shape length '{expected_len}'. Expected 2 (depth) or 3 (RGB) dimensions.\n"
     elif isinstance(value, PILImage.Image):
         pass
     else:
@@ -838,7 +898,8 @@ def validate_episode_buffer(episode_buffer: dict, total_episodes: int, features:
         )
 
     if episode_buffer["size"] == 0:
-        raise ValueError("You must add one or several frames with `add_frame` before calling `add_episode`.")
+        raise ValueError(
+            "You must add one or several frames with `add_frame` before calling `add_episode`.")
 
     buffer_keys = set(episode_buffer.keys()) - {"task", "size"}
     if not buffer_keys == set(features):

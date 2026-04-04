@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import av
+import cv2
+import numpy as np
 import pyarrow as pa
 import torch
 import torchvision
@@ -331,6 +333,112 @@ def encode_video_frames(
         raise OSError(f"Video encoding did not work. File not found: {video_path}.")
 
 
+def encode_depth_preview_frames(
+    imgs_dir: Path | str,
+    preview_path: Path | str,
+    fps: int,
+    colormap: bool = False,
+) -> None:
+    """
+    Encode a human-visible preview video from RGB-encoded depth frames.
+    
+    This function reads RGB-encoded depth PNG frames (where R=high byte, G=low byte),
+    reconstructs the uint16 depth values, normalizes them to 0-255 for visualization
+    using per-frame min/max normalization, and encodes as a standard RGB video.
+    
+    The preview video is saved separately and does not interfere with dataset loading.
+    It's useful for human inspection/debugging but should not be used for training.
+    
+    Args:
+        imgs_dir: Directory containing frame_XXXXXX.png files (RGB-encoded depth)
+        preview_path: Output path for the preview video (.mp4)
+        fps: Frames per second for the video
+        colormap: If True, applies VIRIDIS colormap for better visualization
+    
+    Raises:
+        FileNotFoundError: If no PNG frames found in imgs_dir
+        OSError: If video encoding fails
+    """
+    imgs_dir = Path(imgs_dir)
+    preview_path = Path(preview_path)
+    
+    # Get input frames
+    template = "frame_" + ("[0-9]" * 6) + ".png"
+    input_list = sorted(
+        glob.glob(str(imgs_dir / template)), key=lambda x: int(x.split("_")[-1].split(".")[0])
+    )
+    
+    if len(input_list) == 0:
+        raise FileNotFoundError(f"No images found in {imgs_dir}.")
+    
+    # Get frame dimensions from first frame
+    dummy_image = Image.open(input_list[0])
+    width, height = dummy_image.size
+    
+    # Create output directory
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Set logging level
+    logging.getLogger("libav").setLevel(av.logging.ERROR)
+    
+    # Create and open output file
+    with av.open(str(preview_path), "w") as output:
+        # Use h264 codec for better compatibility with video players
+        output_stream = output.add_stream("h264", fps)
+        output_stream.pix_fmt = "yuv420p"
+        output_stream.width = width
+        output_stream.height = height
+        
+        # Process each frame
+        for input_path in input_list:
+            # Load RGB-encoded depth frame
+            rgb_image = Image.open(input_path)
+            rgb_array = np.array(rgb_image)  # (H, W, 3)
+            
+            # Reconstruct uint16 depth: depth = (R << 8) | G
+            depth = (rgb_array[:, :, 0].astype(np.uint16) << 8) | rgb_array[:, :, 1].astype(np.uint16)
+            
+            # Normalize to 0-255 for visualization using per-frame min/max normalization
+            # Note: We must reconstruct first because RGB channels are high/low bytes, not actual depth values
+            # Normalizing RGB directly would give incorrect results
+            nonzero_mask = depth > 0
+            if nonzero_mask.any():
+                # Normalize only nonzero pixels, keep zeros as black
+                vis_array = np.zeros_like(depth, dtype=np.uint8)
+                vis_array[nonzero_mask] = cv2.normalize(
+                    depth[nonzero_mask], None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                )
+            else:
+                # No valid depth, output all zeros
+                vis_array = np.zeros_like(depth, dtype=np.uint8)
+            
+            # Apply colormap if requested
+            if colormap:
+                colored = cv2.applyColorMap(vis_array, cv2.COLORMAP_VIRIDIS)  # Returns BGR
+                vis_rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+                vis_image = Image.fromarray(vis_rgb)
+            else:
+                # Convert grayscale to RGB (3 channels) for video encoding
+                vis_image = Image.fromarray(vis_array, mode="L").convert("RGB")
+            
+            # Encode frame
+            input_frame = av.VideoFrame.from_image(vis_image)
+            packet = output_stream.encode(input_frame)
+            if packet:
+                output.mux(packet)
+        
+        # Flush the encoder
+        packet = output_stream.encode()
+        if packet:
+            output.mux(packet)
+    
+    # Reset logging level
+    av.logging.restore_default_callback()
+    
+    if not preview_path.exists():
+        raise OSError(f"Preview video encoding did not work. File not found: {preview_path}.")
+
+
 @dataclass
 class VideoFrame:
     # TODO(rcadene, lhoestq): move to Hugging Face `datasets` repo
@@ -515,3 +623,56 @@ class VideoEncodingManager:
             logging.debug(f"Images directory is not empty, containing {len(png_files)} PNG files")
 
         return False  # Don't suppress the original exception
+
+
+def reconstruct_depth_from_rgb(frames: torch.Tensor) -> torch.Tensor:
+    """
+    Reconstruct 16-bit depth from RGB-encoded video frames.
+    
+    DECODING EXPLANATION:
+    When depth images are encoded into videos, each 16-bit depth value is split into
+    two 8-bit values stored in RGB channels:
+    - R channel = high byte (upper 8 bits, represents values 0-255 * 256)
+    - G channel = low byte (lower 8 bits, represents values 0-255)
+    - B channel = 0 (unused)
+    
+    To reconstruct the original depth value:
+    1. Read R channel (high byte) and multiply by 256 (shift left 8 bits)
+    2. Read G channel (low byte) and add it
+    3. Result = (high_byte * 256) + low_byte
+    
+    Example reconstruction:
+    - R channel = 19, G channel = 136
+    - Reconstructed depth = (19 * 256) + 136 = 4864 + 136 = 5000 millimeters ✓
+    
+    This preserves full 16-bit precision (0-65535) instead of losing precision
+    by normalizing to 8-bit (0-255).
+    
+    Args:
+        frames: Tensor of shape (..., C, H, W) where C=3, values in [0, 1] float32
+                R channel contains high byte, G channel contains low byte
+                Can handle batches: (N, C, H, W) or single: (C, H, W)
+    
+    Returns:
+        Tensor of shape (..., H, W) with uint16 depth values (millimeters)
+    """
+    # Handle batch dimension
+    if frames.ndim == 3:  # (C, H, W)
+        frames = frames.unsqueeze(0)
+        squeeze_output = True
+    else:
+        squeeze_output = False
+    
+    # Convert from [0, 1] float32 back to uint8 [0, 255]
+    # Video decoders return values in [0, 1] range, so multiply by 255 to get bytes
+    r = (frames[:, 0, :, :] * 255).clamp(0, 255).byte()  # High byte (R channel)
+    g = (frames[:, 1, :, :] * 255).clamp(0, 255).byte()  # Low byte (G channel)
+    
+    # Reconstruct uint16: depth = (high_byte * 256) + low_byte
+    # Left shift by 8 bits = multiply by 256, then OR with low byte = add
+    depth = (r.to(torch.uint16) << 8) | g.to(torch.uint16)
+    
+    if squeeze_output:
+        depth = depth.squeeze(0)
+    
+    return depth

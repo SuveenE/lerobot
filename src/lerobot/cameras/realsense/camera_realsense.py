@@ -116,10 +116,13 @@ class RealSenseCamera(Camera):
 
         self.config = config
 
-        if config.serial_number_or_name.isdigit():
-            self.serial_number = config.serial_number_or_name
+        # Ensure serial_number_or_name is a string (handles case where JSON parsing returns int)
+        serial_str = str(config.serial_number_or_name) if not isinstance(config.serial_number_or_name, str) else config.serial_number_or_name
+        
+        if serial_str.isdigit():
+            self.serial_number = serial_str
         else:
-            self.serial_number = self._find_serial_number_from_name(config.serial_number_or_name)
+            self.serial_number = self._find_serial_number_from_name(serial_str)
 
         self.fps = config.fps
         self.color_mode = config.color_mode
@@ -134,6 +137,10 @@ class RealSenseCamera(Camera):
         self.frame_lock: Lock = Lock()
         self.latest_frame: np.ndarray | None = None
         self.new_frame_event: Event = Event()
+
+        # Depth frame management for async reading
+        self.latest_depth_frame: np.ndarray | None = None
+        self.new_depth_frame_event: Event = Event()
 
         self.rotation: int | None = get_cv2_rotation(config.rotation)
 
@@ -175,16 +182,58 @@ class RealSenseCamera(Camera):
         except RuntimeError as e:
             self.rs_profile = None
             self.rs_pipeline = None
-            raise ConnectionError(
-                f"Failed to open {self}.Run `lerobot-find-cameras realsense` to find available cameras."
-            ) from e
+            
+            # Try to get available stream profiles to suggest alternatives
+            suggested_resolutions = []
+            try:
+                context = rs.context()
+                devices = context.query_devices()
+                for device in devices:
+                    if device.get_info(rs.camera_info.serial_number) == self.serial_number:
+                        sensors = device.query_sensors()
+                        for sensor in sensors:
+                            profiles = sensor.get_stream_profiles()
+                            for profile in profiles:
+                                if profile.is_video_stream_profile():
+                                    vprofile = profile.as_video_stream_profile()
+                                    stream_type = vprofile.stream_type()
+                                    if stream_type == rs.stream.color or (self.use_depth and stream_type == rs.stream.depth):
+                                        suggested_resolutions.append(
+                                            f"{vprofile.width()}x{vprofile.height()}@{vprofile.fps()}fps"
+                                        )
+                        break
+            except Exception:
+                pass  # If we can't query profiles, just skip the suggestion
+            
+            config_str = f"serial={self.serial_number}"
+            if self.width and self.height and self.fps:
+                config_str += f", resolution={self.capture_width}x{self.capture_height}@{self.fps}fps"
+                if self.use_depth:
+                    config_str += " (with depth)"
+            
+            error_msg = (
+                f"Failed to open {self} with configuration: {config_str}. "
+                f"Error: {str(e)}."
+            )
+            
+            if suggested_resolutions:
+                # Remove duplicates and sort
+                unique_resolutions = sorted(set(suggested_resolutions))
+                error_msg += f"\nSupported resolutions for this camera include: {', '.join(unique_resolutions[:10])}"
+            
+            error_msg += (
+                f"\nRun `lerobot-find-cameras realsense` to find all available cameras and supported resolutions."
+            )
+            
+            raise ConnectionError(error_msg) from e
 
         self._configure_capture_settings()
 
         if warmup:
             time.sleep(
-                1
-            )  # NOTE(Steven): RS cameras need a bit of time to warm up before the first read. If we don't wait, the first read from the warmup will raise.
+                10
+                # NOTE(Steven): RS cameras need a bit of time to warm up before the first read. If we don't wait, the first read from the warmup will raise.
+            )
             start_time = time.time()
             while time.time() - start_time < self.warmup_s:
                 self.read()
@@ -246,7 +295,8 @@ class RealSenseCamera(Camera):
     def _find_serial_number_from_name(self, name: str) -> str:
         """Finds the serial number for a given unique camera name."""
         camera_infos = self.find_cameras()
-        found_devices = [cam for cam in camera_infos if str(cam["name"]) == name]
+        found_devices = [
+            cam for cam in camera_infos if str(cam["name"]) == name]
 
         if not found_devices:
             available_names = [cam["name"] for cam in camera_infos]
@@ -264,22 +314,155 @@ class RealSenseCamera(Camera):
         serial_number = str(found_devices[0]["serial_number"])
         return serial_number
 
+    def _find_compatible_stream_profiles(self, requested_width: int, requested_height: int, requested_fps: int):
+        """Find compatible stream profiles for color and depth streams.
+        
+        RealSense cameras may have constraints on which stream profiles can be enabled
+        simultaneously. This method queries the device to find compatible profiles that
+        match the requested resolution and FPS.
+        
+        Returns:
+            tuple: (color_profile, depth_profile) or (color_profile, None) if depth not needed.
+                   Returns (None, None) if device not found or profiles can't be queried.
+        """
+        try:
+            context = rs.context()
+            devices = context.query_devices()
+            
+            device = None
+            for d in devices:
+                if d.get_info(rs.camera_info.serial_number) == self.serial_number:
+                    device = d
+                    break
+            
+            if device is None:
+                logger.warning(f"Device with serial {self.serial_number} not found when querying stream profiles")
+                return None, None
+            
+            sensors = device.query_sensors()
+            color_sensor = None
+            depth_sensor = None
+            
+            # Find the sensors
+            for sensor in sensors:
+                profiles = sensor.get_stream_profiles()
+                for profile in profiles:
+                    if profile.is_video_stream_profile():
+                        vprofile = profile.as_video_stream_profile()
+                        if vprofile.stream_type() == rs.stream.color and color_sensor is None:
+                            color_sensor = sensor
+                        elif vprofile.stream_type() == rs.stream.depth and depth_sensor is None:
+                            depth_sensor = sensor
+            
+            color_profile = None
+            depth_profile = None
+            
+            # Find matching color profile - REQUIRED: RGB8 format only
+            if color_sensor:
+                profiles = color_sensor.get_stream_profiles()
+                for profile in profiles:
+                    if profile.is_video_stream_profile():
+                        vprofile = profile.as_video_stream_profile()
+                        if (vprofile.stream_type() == rs.stream.color and
+                            vprofile.width() == requested_width and
+                            vprofile.height() == requested_height and
+                            vprofile.fps() == requested_fps and
+                            vprofile.format() == rs.format.rgb8):
+                            color_profile = profile
+                            break
+            
+            # Find matching depth profile (if needed) - REQUIRED: Z16 format only
+            if self.use_depth and depth_sensor:
+                profiles = depth_sensor.get_stream_profiles()
+                for profile in profiles:
+                    if profile.is_video_stream_profile():
+                        vprofile = profile.as_video_stream_profile()
+                        if (vprofile.stream_type() == rs.stream.depth and
+                            vprofile.width() == requested_width and
+                            vprofile.height() == requested_height and
+                            vprofile.fps() == requested_fps and
+                            vprofile.format() == rs.format.z16):
+                            depth_profile = profile
+                            break
+            
+            # print both profiles verbosely
+            # Log selected color profile details
+            if color_profile is not None:
+                logger.info(
+                    f"Color profile: {color_profile} | "
+                    f"Format: {color_profile.format()} | "
+                    f"Resolution: {color_profile.width()}x{color_profile.height()} | "
+                    f"FPS: {color_profile.fps()}"
+                )
+
+            # Log selected depth profile details
+            if depth_profile is not None:
+                logger.info(
+                    f"Depth profile: {depth_profile} | "
+                    f"Format: {depth_profile.format()} | "
+                    f"Resolution: {depth_profile.width()}x{depth_profile.height()} | "
+                    f"FPS: {depth_profile.fps()}"
+                )
+            return color_profile, depth_profile
+        except Exception as e:
+            logger.debug(f"Error querying stream profiles: {e}")
+            return None, None
+
     def _configure_rs_pipeline_config(self, rs_config):
         """Creates and configures the RealSense pipeline configuration object."""
         rs.config.enable_device(rs_config, self.serial_number)
 
         if self.width and self.height and self.fps:
-            rs_config.enable_stream(
-                rs.stream.color, self.capture_width, self.capture_height, rs.format.rgb8, self.fps
-            )
-            if self.use_depth:
+            # REQUIRED: RGB8 format for color - try to enable directly like minimal example
+            try:
                 rs_config.enable_stream(
-                    rs.stream.depth, self.capture_width, self.capture_height, rs.format.z16, self.fps
+                    rs.stream.color,
+                    self.capture_width,
+                    self.capture_height,
+                    rs.format.rgb8,
+                    self.fps
                 )
-        else:
-            rs_config.enable_stream(rs.stream.color)
+            except RuntimeError as e:
+                raise ValueError(
+                    f"{self} does not support RGB8 format at {self.capture_width}x{self.capture_height}@{self.fps}fps. "
+                    f"RGB8 format is required for color stream. Error: {e}. "
+                    f"Run `lerobot-find-cameras realsense` to see available formats."
+                )
+            
+            # REQUIRED: Z16 format for depth (if depth is enabled)
             if self.use_depth:
-                rs_config.enable_stream(rs.stream.depth)
+                try:
+                    rs_config.enable_stream(
+                        rs.stream.depth,
+                        self.capture_width,
+                        self.capture_height,
+                        rs.format.z16,
+                        self.fps
+                    )
+                except RuntimeError as e:
+                    raise ValueError(
+                        f"{self} does not support Z16 format at {self.capture_width}x{self.capture_height}@{self.fps}fps. "
+                        f"Z16 format is required for depth stream. Error: {e}. "
+                        f"Run `lerobot-find-cameras realsense` to see available formats."
+                    )
+        else:
+            # When width/height/fps not specified, use default but still require RGB8/Z16
+            # Try to enable with explicit formats - this will fail if formats not supported
+            try:
+                rs_config.enable_stream(rs.stream.color, rs.format.rgb8)
+            except RuntimeError as e:
+                raise ValueError(
+                    f"{self} does not support RGB8 format for color stream. "
+                    f"RGB8 format is required. Error: {e}"
+                )
+            if self.use_depth:
+                try:
+                    rs_config.enable_stream(rs.stream.depth, rs.format.z16)
+                except RuntimeError as e:
+                    raise ValueError(
+                        f"{self} does not support Z16 format for depth stream. "
+                        f"Z16 format is required. Error: {e}"
+                    )
 
     def _configure_capture_settings(self) -> None:
         """Sets fps, width, and height from device stream if not already configured.
@@ -291,9 +474,11 @@ class RealSenseCamera(Camera):
             DeviceNotConnectedError: If device is not connected.
         """
         if not self.is_connected:
-            raise DeviceNotConnectedError(f"Cannot validate settings for {self} as it is not connected.")
+            raise DeviceNotConnectedError(
+                f"Cannot validate settings for {self} as it is not connected.")
 
-        stream = self.rs_profile.get_stream(rs.stream.color).as_video_stream_profile()
+        stream = self.rs_profile.get_stream(
+            rs.stream.color).as_video_stream_profile()
 
         if self.fps is None:
             self.fps = stream.fps()
@@ -308,7 +493,45 @@ class RealSenseCamera(Camera):
                 self.width, self.height = actual_width, actual_height
                 self.capture_width, self.capture_height = actual_width, actual_height
 
-    def read_depth(self, timeout_ms: int = 200) -> np.ndarray:
+    def _process_depth_frame(self, depth_frame: Any) -> np.ndarray:
+        """Process RealSense depth frame to convert get_data() units to distance values.
+        
+        Similar to Orbbec's _process_depth_frame, converts depth data from get_data()
+        to distance values in millimeters using get_units() scaling factor.
+        get_units() provides the scaling factor to convert from get_data() units to meters.
+        
+        Args:
+            depth_frame: RealSense depth frame
+            
+        Returns:
+            np.ndarray: Depth map as uint16 array with distance values in millimeters
+        """
+        width = depth_frame.get_width()
+        height = depth_frame.get_height()
+        
+        # Get depth units: scaling factor to convert from get_data() units to meters
+        # get_units() provides the scaling factor to use when converting from get_data() units to meters
+        depth_units = depth_frame.get_units()
+        
+        # Extract raw depth data from get_data() (units depend on camera format)
+        raw_depth_data = np.asanyarray(depth_frame.get_data())
+        raw_depth_image = np.resize(raw_depth_data, (height, width))
+        
+        # Convert get_data() units to distance matrix (in meters)
+        # Similar to Orbbec: depth_data * depth_scale = distance in millimeters
+        # For RealSense: get_data() * depth_units = distance in meters
+        distance_matrix_m = raw_depth_image.astype(np.float32) * depth_units
+        
+        # Convert to millimeters for storage (like Orbbec output format)
+        distance_matrix_mm = distance_matrix_m * 1000.0
+        
+        # Convert back to uint16 for storage (preserve precision, values in millimeters)
+        depth_data = distance_matrix_mm.astype(np.uint16)
+        
+        depth_data = self._postprocess_image(depth_data, depth_frame=True)
+        return depth_data
+
+    def read_depth(self, timeout_ms: int = 600) -> np.ndarray:
         """
         Reads a single frame (depth) synchronously from the camera.
 
@@ -320,7 +543,7 @@ class RealSenseCamera(Camera):
 
         Returns:
             np.ndarray: The depth map as a NumPy array (height, width)
-                  of type `np.uint16` (raw depth values in millimeters) and rotation.
+                  of type `np.uint16` (distance values in millimeters) and rotation.
 
         Raises:
             DeviceNotConnectedError: If the camera is not connected.
@@ -336,22 +559,28 @@ class RealSenseCamera(Camera):
 
         start_time = time.perf_counter()
 
-        ret, frame = self.rs_pipeline.try_wait_for_frames(timeout_ms=timeout_ms)
+        # Use wait_for_frames() like the minimal example - blocking call that returns frameset
+        try:
+            frameset = self.rs_pipeline.wait_for_frames(timeout_ms)
+        except RuntimeError as e:
+            raise RuntimeError(f"{self} read_depth failed: {e}")
 
-        if not ret or frame is None:
-            raise RuntimeError(f"{self} read_depth failed (status={ret}).")
+        if frameset is None:
+            raise RuntimeError(f"{self} read_depth failed (no frameset).")
 
-        depth_frame = frame.get_depth_frame()
-        depth_map = np.asanyarray(depth_frame.get_data())
-
-        depth_map_processed = self._postprocess_image(depth_map, depth_frame=True)
+        depth_frame = frameset.get_depth_frame()
+        if not depth_frame:
+            raise RuntimeError(f"{self} read_depth failed: depth frame is None.")
+        
+        # Process depth frame to convert raw pixels to distance values (millimeters)
+        depth_map_processed = self._process_depth_frame(depth_frame)
 
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
-        logger.debug(f"{self} read took: {read_duration_ms:.1f}ms")
+        logger.debug(f"{self} read_depth took: {read_duration_ms:.1f}ms")
 
         return depth_map_processed
 
-    def read(self, color_mode: ColorMode | None = None, timeout_ms: int = 200) -> np.ndarray:
+    def read(self, color_mode: ColorMode | None = None, timeout_ms: int = 600) -> np.ndarray:
         """
         Reads a single frame (color) synchronously from the camera.
 
@@ -376,15 +605,29 @@ class RealSenseCamera(Camera):
 
         start_time = time.perf_counter()
 
-        ret, frame = self.rs_pipeline.try_wait_for_frames(timeout_ms=timeout_ms)
+        # Use wait_for_frames() like the minimal example - blocking call that returns frameset
+        try:
+            frameset = self.rs_pipeline.wait_for_frames(timeout_ms)
+        except RuntimeError as e:
+            raise RuntimeError(f"{self} read failed: {e}")
 
-        if not ret or frame is None:
-            raise RuntimeError(f"{self} read failed (status={ret}).")
+        if frameset is None:
+            raise RuntimeError(f"{self} read failed (no frameset).")
 
-        color_frame = frame.get_color_frame()
-        color_image_raw = np.asanyarray(color_frame.get_data())
+        color_frame = frameset.get_color_frame()
+        if not color_frame:
+            raise RuntimeError(f"{self} read failed: color frame is None.")
+        
+        # RGB8 format: 3 bytes per pixel (24 bits)
+        # get_data() returns uint8 array: shape (height * width * 3,)
+        # Reshape to (height, width, 3) - already RGB format
+        height = color_frame.get_height()
+        width = color_frame.get_width()
+        frame_data = np.asanyarray(color_frame.get_data())
+        color_image_raw = np.resize(frame_data, (height, width, 3))
 
-        color_image_processed = self._postprocess_image(color_image_raw, color_mode)
+        color_image_processed = self._postprocess_image(
+            color_image_raw, color_mode)
 
         read_duration_ms = (time.perf_counter() - start_time) * 1e3
         logger.debug(f"{self} read took: {read_duration_ms:.1f}ms")
@@ -422,7 +665,8 @@ class RealSenseCamera(Camera):
             h, w, c = image.shape
 
             if c != 3:
-                raise RuntimeError(f"{self} frame channels={c} do not match expected 3 channels (RGB/BGR).")
+                raise RuntimeError(
+                    f"{self} frame channels={c} do not match expected 3 channels (RGB/BGR).")
 
         if h != self.capture_height or w != self.capture_width:
             raise RuntimeError(
@@ -430,7 +674,8 @@ class RealSenseCamera(Camera):
             )
 
         processed_image = image
-        if self.color_mode == ColorMode.BGR:
+        # Only apply color conversion for color frames, not depth frames
+        if not depth_frame and self.color_mode == ColorMode.BGR:
             processed_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
         if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180]:
@@ -443,24 +688,75 @@ class RealSenseCamera(Camera):
         Internal loop run by the background thread for asynchronous reading.
 
         On each iteration:
-        1. Reads a color frame with 500ms timeout
-        2. Stores result in latest_frame (thread-safe)
-        3. Sets new_frame_event to notify listeners
+        1. Reads frameset from pipeline with 500ms timeout
+        2. Extracts color frame and optionally depth frame from the SAME frameset
+        3. Stores results in latest_frame and latest_depth_frame (thread-safe)
+        4. Sets new_frame_event and new_depth_frame_event to notify listeners
+
+        This ensures color and depth are synchronized from the same capture instant.
 
         Stops on DeviceNotConnectedError, logs other errors and continues.
         """
         while not self.stop_event.is_set():
             try:
-                color_image = self.read(timeout_ms=500)
+                # Use wait_for_frames() like the minimal example - blocking call that returns frameset
+                try:
+                    frameset = self.rs_pipeline.wait_for_frames(500)
+                except RuntimeError:
+                    logger.debug(
+                        f"{self} failed to get frameset in background thread (timeout or error)")
+                    continue
 
+                if frameset is None:
+                    logger.debug(
+                        f"{self} failed to get frameset in background thread")
+                    continue
+
+                # Extract and process color and depth frames (same frameset)
+                color_image = None
+                depth_image = None
+
+                color_frame = frameset.get_color_frame()
+                if color_frame:
+                    # RGB8 format: 3 bytes per pixel (24 bits)
+                    height = color_frame.get_height()
+                    width = color_frame.get_width()
+                    frame_data = np.asanyarray(color_frame.get_data())
+                    color_image_raw = np.resize(frame_data, (height, width, 3))
+                    
+                    color_image = self._postprocess_image(color_image_raw)
+
+                if self.use_depth:
+                    depth_frame = frameset.get_depth_frame()
+                    if depth_frame:
+                        # Process depth frame to convert raw pixels to distance values (millimeters)
+                        depth_image = self._process_depth_frame(depth_frame)
+                        # Log center pixel depth in mm
+                        # h, w = depth_image.shape
+                        # center_depth_mm = depth_image[h // 2, w // 2]
+                        # logger.info(f"{self} center depth: {center_depth_mm} mm")
+
+                # Atomically publish both results under the same lock
+                set_color_event = False
+                set_depth_event = False
                 with self.frame_lock:
-                    self.latest_frame = color_image
-                self.new_frame_event.set()
+                    if color_image is not None:
+                        self.latest_frame = color_image
+                        set_color_event = True
+                    if depth_image is not None:
+                        self.latest_depth_frame = depth_image
+                        set_depth_event = True
+
+                if set_color_event:
+                    self.new_frame_event.set()
+                if set_depth_event:
+                    self.new_depth_frame_event.set()
 
             except DeviceNotConnectedError:
                 break
             except Exception as e:
-                logger.warning(f"Error reading frame in background thread for {self}: {e}")
+                logger.warning(
+                    f"Error reading frame in background thread for {self}: {e}")
 
     def _start_read_thread(self) -> None:
         """Starts or restarts the background read thread if it's not running."""
@@ -470,7 +766,8 @@ class RealSenseCamera(Camera):
             self.stop_event.set()
 
         self.stop_event = Event()
-        self.thread = Thread(target=self._read_loop, args=(), name=f"{self}_read_loop")
+        self.thread = Thread(target=self._read_loop,
+                             args=(), name=f"{self}_read_loop")
         self.thread.daemon = True
         self.thread.start()
 
@@ -485,8 +782,7 @@ class RealSenseCamera(Camera):
         self.thread = None
         self.stop_event = None
 
-    # NOTE(Steven): Missing implementation for depth for now
-    def async_read(self, timeout_ms: float = 200) -> np.ndarray:
+    def async_read(self, timeout_ms: float = 600) -> np.ndarray:
         """
         Reads the latest available frame data (color) asynchronously.
 
@@ -525,9 +821,71 @@ class RealSenseCamera(Camera):
             self.new_frame_event.clear()
 
         if frame is None:
-            raise RuntimeError(f"Internal error: Event set but no frame available for {self}.")
+            raise RuntimeError(
+                f"Internal error: Event set but no frame available for {self}.")
 
         return frame
+
+    def async_read_depth(self, timeout_ms: float = 600) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Reads the latest available depth frame asynchronously.
+
+        This method retrieves the most recent depth frame captured by the background
+        read thread. It does not block waiting for the camera hardware directly,
+        but may wait up to timeout_ms for the background thread to provide a frame.
+
+        Args:
+            timeout_ms (float): Maximum time in milliseconds to wait for a depth frame
+                to become available. Defaults to 200ms (0.2 seconds).
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: A tuple containing:
+                - The latest captured color frame (height, width, channels)
+                - The latest captured depth frame as a NumPy array (height, width)
+                  of type `np.uint16` (raw depth values in millimeters), processed according
+                  to configuration (rotation applied).
+
+        Raises:
+            DeviceNotConnectedError: If the camera is not connected.
+            RuntimeError: If depth stream is not enabled or if the background thread 
+                died unexpectedly.
+            TimeoutError: If no depth frame becomes available within the specified timeout.
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        if not self.use_depth:
+            raise RuntimeError(
+                f"Failed to capture depth frame with 'async_read_depth()'. "
+                f"Depth stream is not enabled for {self}."
+            )
+
+        if self.thread is None or not self.thread.is_alive():
+            self._start_read_thread()
+
+        if not self.new_depth_frame_event.wait(timeout=timeout_ms / 1000.0):
+            thread_alive = self.thread is not None and self.thread.is_alive()
+            raise TimeoutError(
+                f"Timed out waiting for depth frame from camera {self} after {timeout_ms} ms. "
+                f"Read thread alive: {thread_alive}."
+            )
+
+        with self.frame_lock:
+            frame = self.latest_frame
+            self.new_frame_event.clear()
+
+            depth_frame = self.latest_depth_frame
+            self.new_depth_frame_event.clear()
+
+        if depth_frame is None:
+            raise RuntimeError(
+                f"Internal error: Event set but no depth frame available for {self}.")
+
+        if frame is None:
+            raise RuntimeError(
+                f"Internal error: Event set but no frame available for {self}.")
+
+        return frame, depth_frame
 
     def disconnect(self):
         """
