@@ -13,6 +13,7 @@
 # limitations under the License.
 import abc
 import builtins
+import dataclasses
 import json
 import os
 import tempfile
@@ -205,10 +206,20 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
             config = json.load(f)
 
         config.pop("type")
+
+        resolved_cls = orig_config.__class__
+        valid_fields = {f.name for f in dataclasses.fields(resolved_cls)}
+        unknown = {k for k in config if k not in valid_fields}
+        if unknown:
+            logger.warning(
+                f"Ignoring unknown fields in config.json for {resolved_cls.__name__}: {sorted(unknown)}"
+            )
+            config = {k: v for k, v in config.items() if k in valid_fields}
+
         with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
             json.dump(config, f)
             config_file = f.name
 
         cli_overrides = policy_kwargs.pop("cli_overrides", [])
         with draccus.config_type("json"):
-            return draccus.parse(orig_config.__class__, config_file, args=cli_overrides)
+            return draccus.parse(resolved_cls, config_file, args=cli_overrides)
