@@ -997,16 +997,28 @@ class PI05Policy(PreTrainedPolicy):
             if remap_count > 0:
                 logging.info(f"Remapped {remap_count} state dict keys (added 'model.' prefix)")
 
-            # Load the remapped state dict into the model
+            # Load the remapped state dict into the model.
+            # Use strict=False because tied weights (e.g. embed_tokens.weight shared
+            # with lm_head.weight in PaliGemma) may be absent from the checkpoint.
             logging.info("Loading remapped state dict into model...")
-            missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
+            missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=False)
 
-            if missing_keys:
-                logging.warning(f"Missing keys when loading state dict: {len(missing_keys)} keys")
-                for key in missing_keys[:5]:
-                    logging.warning(f"  - {key}")
-                if len(missing_keys) > 5:
-                    logging.warning(f"  ... and {len(missing_keys) - 5} more")
+            EXPECTED_TIED_KEYS = {
+                "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight",
+            }
+
+            unexpected_missing = [k for k in missing_keys if k not in EXPECTED_TIED_KEYS]
+            tied_missing = [k for k in missing_keys if k in EXPECTED_TIED_KEYS]
+
+            if tied_missing:
+                logging.info(f"Skipped {len(tied_missing)} tied weight(s) (expected): {tied_missing}")
+
+            if unexpected_missing:
+                logging.error(f"Unexpectedly missing {len(unexpected_missing)} keys in state dict:")
+                for key in unexpected_missing[:10]:
+                    logging.error(f"  - {key}")
+                if len(unexpected_missing) > 10:
+                    logging.error(f"  ... and {len(unexpected_missing) - 10} more")
 
             if unexpected_keys:
                 logging.warning(f"Unexpected keys when loading state dict: {len(unexpected_keys)} keys")
@@ -1015,11 +1027,13 @@ class PI05Policy(PreTrainedPolicy):
                 if len(unexpected_keys) > 5:
                     logging.warning(f"  ... and {len(unexpected_keys) - 5} more")
 
-            if not missing_keys and not unexpected_keys:
-                logging.info("All state dict keys loaded successfully")
+            if not unexpected_missing and not unexpected_keys:
+                logging.info(f"All state dict keys loaded successfully ({len(remapped_state_dict)} keys)")
 
         except Exception as e:
             logging.error(f"Could not remap state dict keys: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
 
         return model
 
