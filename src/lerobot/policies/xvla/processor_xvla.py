@@ -271,9 +271,12 @@ class XVLAImageNetNormalizeProcessorStep(ProcessorStep):
                     )
                 mean = torch.tensor(IMAGENET_STATS["mean"], device=tensor.device, dtype=tensor.dtype)
                 std = torch.tensor(IMAGENET_STATS["std"], device=tensor.device, dtype=tensor.dtype)
-                while mean.dim() < tensor.dim():
-                    mean = mean.unsqueeze(0)
-                    std = std.unsqueeze(0)
+                # Shape mean/std as (3, 1, 1, ...) to broadcast over spatial dims
+                # Channel dim is at index -3 for (..., C, H, W) tensors
+                shape = [1] * tensor.dim()
+                shape[-3] = 3
+                mean = mean.view(shape)
+                std = std.view(shape)
                 obs[key] = (tensor - mean) / std
 
         new_transition[TransitionKey.OBSERVATION] = obs
