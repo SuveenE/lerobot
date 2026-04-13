@@ -88,6 +88,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy_type = None
         self.lerobot_features = None
         self.actions_per_chunk = None
+        self.rename_map: dict[str, str] = {}
         self.policy = None
         self.pretrained_name_or_path = None  # Track currently loaded model
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
@@ -185,6 +186,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.policy_type = policy_specs.policy_type
             self.lerobot_features = policy_specs.lerobot_features
             self.actions_per_chunk = policy_specs.actions_per_chunk
+            self.rename_map = policy_specs.rename_map or {}
             return services_pb2.Empty()
 
         # Different model requested - clear the old one first
@@ -198,6 +200,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy_type = policy_specs.policy_type  # act, pi0, etc.
         self.lerobot_features = policy_specs.lerobot_features
         self.actions_per_chunk = policy_specs.actions_per_chunk
+        self.rename_map = policy_specs.rename_map or {}
 
         policy_class = get_policy_class(self.policy_type)
 
@@ -440,6 +443,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             observation_t.get_observation(),
             self.lerobot_features,
             self.policy_image_features,
+            rename_map=self.rename_map,
         )
         prepare_time = time.perf_counter() - start_prepare
 
