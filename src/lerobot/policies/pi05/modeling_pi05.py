@@ -1011,7 +1011,16 @@ class PI05Policy(PreTrainedPolicy):
             tied_missing = [k for k in missing_keys if k in EXPECTED_TIED_KEYS]
 
             if tied_missing:
-                logging.info(f"Skipped {len(tied_missing)} tied weight(s) (expected): {tied_missing}")
+                logging.info(f"Tied weight(s) missing from checkpoint (expected): {tied_missing}")
+                # Verify weight tying is intact; if not, manually copy from lm_head
+                embed = model.model.paligemma_with_expert.paligemma.model.language_model.embed_tokens
+                lm_head = model.model.paligemma_with_expert.paligemma.lm_head
+                if embed is not None and lm_head is not None:
+                    if embed.weight.data_ptr() == lm_head.weight.data_ptr():
+                        logging.info("Weight tying verified: embed_tokens and lm_head share the same tensor")
+                    else:
+                        logging.warning("Weight tying BROKEN — manually copying lm_head.weight to embed_tokens.weight")
+                        embed.weight.data.copy_(lm_head.weight.data)
 
             if unexpected_missing:
                 logging.error(f"Unexpectedly missing {len(unexpected_missing)} keys in state dict:")
