@@ -71,6 +71,34 @@ def is_image_key(k: str) -> bool:
     return k.startswith(OBS_IMAGES)
 
 
+def infer_rename_map(
+    lerobot_features: dict[str, dict],
+    policy_image_features: dict[str, PolicyFeature],
+) -> dict[str, str]:
+    """Auto-derive a rename_map when robot camera keys differ from policy image keys.
+
+    Pairs robot image keys with policy image keys in sorted order.
+    Returns an empty dict when the keys already match.
+    """
+    robot_image_keys = sorted(k for k in lerobot_features if k.startswith(OBS_IMAGES))
+    policy_image_keys = sorted(policy_image_features.keys())
+
+    if set(robot_image_keys) == set(policy_image_keys):
+        return {}
+
+    if len(robot_image_keys) != len(policy_image_keys):
+        logging.warning(
+            f"Cannot auto-derive rename_map: robot has {len(robot_image_keys)} cameras "
+            f"{robot_image_keys} but policy expects {len(policy_image_keys)} images "
+            f"{policy_image_keys}. Returning empty map."
+        )
+        return {}
+
+    rename_map = dict(zip(robot_image_keys, policy_image_keys))
+    logging.info(f"Auto-derived rename_map: {rename_map}")
+    return rename_map
+
+
 def resize_robot_observation_image(image: torch.tensor, resize_dims: tuple[int, int, int]) -> torch.tensor:
     assert image.ndim == 3, f"Image must be (C, H, W)! Received {image.shape}"
     # (H, W, C) -> (C, H, W) for resizing from robot obsevation resolution to policy image resolution

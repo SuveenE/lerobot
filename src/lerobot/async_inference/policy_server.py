@@ -60,6 +60,7 @@ from .helpers import (
     TimedAction,
     TimedObservation,
     get_logger,
+    infer_rename_map,
     observations_similar,
     raw_observation_to_observation,
 )
@@ -186,7 +187,10 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.policy_type = policy_specs.policy_type
             self.lerobot_features = policy_specs.lerobot_features
             self.actions_per_chunk = policy_specs.actions_per_chunk
-            self.rename_map = policy_specs.rename_map or {}
+            self.rename_map = (
+                policy_specs.rename_map
+                or infer_rename_map(self.lerobot_features, self.policy_image_features)
+            )
             return services_pb2.Empty()
 
         # Different model requested - clear the old one first
@@ -200,7 +204,6 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy_type = policy_specs.policy_type  # act, pi0, etc.
         self.lerobot_features = policy_specs.lerobot_features
         self.actions_per_chunk = policy_specs.actions_per_chunk
-        self.rename_map = policy_specs.rename_map or {}
 
         policy_class = get_policy_class(self.policy_type)
 
@@ -209,6 +212,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy.to(self.device)
         self.pretrained_name_or_path = policy_specs.pretrained_name_or_path  # Track loaded model
 
+        # Auto-derive rename_map if the client didn't provide one
+        self.rename_map = (
+            policy_specs.rename_map
+            or infer_rename_map(self.lerobot_features, self.policy_image_features)
+        )
+
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
         self.preprocessor, self.postprocessor = make_pre_post_processors(
@@ -216,7 +225,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             pretrained_path=policy_specs.pretrained_name_or_path,
             preprocessor_overrides={
                 "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
+                "rename_observations_processor": {"rename_map": self.rename_map},
             },
             postprocessor_overrides={"device_processor": device_override},
         )
