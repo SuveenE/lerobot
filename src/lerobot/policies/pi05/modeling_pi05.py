@@ -915,9 +915,9 @@ class PI05Policy(PreTrainedPolicy):
         **kwargs,
     ) -> T:
         """Override the from_pretrained method to handle key remapping and display important disclaimer."""
-        print(
-            "The PI05 model is a direct port of the OpenPI implementation. \n"
-            "This implementation follows the original OpenPI structure for compatibility. \n"
+        logging.info(
+            "The PI05 model is a direct port of the OpenPI implementation. "
+            "This implementation follows the original OpenPI structure for compatibility. "
             "Original implementation: https://github.com/Physical-Intelligence/openpi"
         )
         if pretrained_name_or_path is None:
@@ -925,6 +925,7 @@ class PI05Policy(PreTrainedPolicy):
 
         # Use provided config if available, otherwise create default config
         if config is None:
+            logging.info(f"Loading config from: {pretrained_name_or_path}")
             config = PreTrainedConfig.from_pretrained(
                 pretrained_name_or_path=pretrained_name_or_path,
                 force_download=force_download,
@@ -936,19 +937,25 @@ class PI05Policy(PreTrainedPolicy):
                 revision=revision,
                 **kwargs,
             )
+            logging.info(f"Config loaded successfully")
+
+        # Override training-specific config fields that should not be active
+        # during inference. These may have been saved from a finetuning run.
+        config.gradient_checkpointing = False
+        config.device = None
 
         # Initialize model without loading weights
-        # Check if dataset_stats were provided in kwargs
+        logging.info("Initializing model architecture (this may take a minute for large models)...")
         model = cls(config, **kwargs)
+        logging.info("Model architecture initialized")
 
         # Now manually load and remap the state dict
         try:
-            # Try to load the pytorch_model.bin or model.safetensors file
-            print(f"Loading model from: {pretrained_name_or_path}")
+            logging.info(f"Loading weights from: {pretrained_name_or_path}")
             try:
                 from transformers.utils import cached_file
 
-                # Try safetensors first
+                logging.info("Resolving model.safetensors file...")
                 resolved_file = cached_file(
                     pretrained_name_or_path,
                     "model.safetensors",
@@ -960,13 +967,16 @@ class PI05Policy(PreTrainedPolicy):
                     revision=kwargs.get("revision"),
                     local_files_only=kwargs.get("local_files_only", False),
                 )
+                logging.info(f"Resolved safetensors file: {resolved_file}")
+
                 from safetensors.torch import load_file
 
+                logging.info("Loading state dict from safetensors...")
                 original_state_dict = load_file(resolved_file)
-                print("✓ Loaded state dict from model.safetensors")
+                logging.info(f"Loaded state dict with {len(original_state_dict)} keys")
             except Exception as e:
-                print(f"Could not load state dict from remote files: {e}")
-                print("Returning model without loading pretrained weights")
+                logging.error(f"Could not load state dict from remote files: {e}")
+                logging.warning("Returning model without loading pretrained weights")
                 return model
 
             # First, fix any key differences # see openpi `model.py, _fix_pytorch_state_dict_keys`
@@ -981,42 +991,35 @@ class PI05Policy(PreTrainedPolicy):
                     new_key = f"model.{key}"
                     remapped_state_dict[new_key] = value
                     remap_count += 1
-                    if remap_count <= 10:  # Only print first 10 to avoid spam
-                        print(f"Remapped: {key} -> {new_key}")
                 else:
                     remapped_state_dict[key] = value
 
             if remap_count > 0:
-                print(f"Remapped {remap_count} state dict keys")
+                logging.info(f"Remapped {remap_count} state dict keys (added 'model.' prefix)")
 
             # Load the remapped state dict into the model
+            logging.info("Loading remapped state dict into model...")
             missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
 
             if missing_keys:
-                print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
-                if len(missing_keys) <= 5:
-                    for key in missing_keys:
-                        print(f"  - {key}")
-                else:
-                    for key in missing_keys[:5]:
-                        print(f"  - {key}")
-                    print(f"  ... and {len(missing_keys) - 5} more")
+                logging.warning(f"Missing keys when loading state dict: {len(missing_keys)} keys")
+                for key in missing_keys[:5]:
+                    logging.warning(f"  - {key}")
+                if len(missing_keys) > 5:
+                    logging.warning(f"  ... and {len(missing_keys) - 5} more")
 
             if unexpected_keys:
-                print(f"Unexpected keys when loading state dict: {len(unexpected_keys)} keys")
-                if len(unexpected_keys) <= 5:
-                    for key in unexpected_keys:
-                        print(f"  - {key}")
-                else:
-                    for key in unexpected_keys[:5]:
-                        print(f"  - {key}")
-                    print(f"  ... and {len(unexpected_keys) - 5} more")
+                logging.warning(f"Unexpected keys when loading state dict: {len(unexpected_keys)} keys")
+                for key in unexpected_keys[:5]:
+                    logging.warning(f"  - {key}")
+                if len(unexpected_keys) > 5:
+                    logging.warning(f"  ... and {len(unexpected_keys) - 5} more")
 
             if not missing_keys and not unexpected_keys:
-                print("All keys loaded successfully!")
+                logging.info("All state dict keys loaded successfully")
 
         except Exception as e:
-            print(f"Warning: Could not remap state dict keys: {e}")
+            logging.error(f"Could not remap state dict keys: {e}")
 
         return model
 
