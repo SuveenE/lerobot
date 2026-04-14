@@ -79,6 +79,9 @@ class OpenVLAOFTConfig(PreTrainedConfig):
         if self.chunk_size <= 0:
             raise ValueError("`chunk_size` must be strictly positive.")
 
+    def validate_features(self) -> None:
+        pass
+
     @property
     def observation_delta_indices(self) -> list[int] | None:
         return None
