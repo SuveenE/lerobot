@@ -261,16 +261,16 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
     def _populate_features(self, config: OpenVLAOFTConfig) -> None:
         """Populate input/output features on the config for server-side processing.
 
-        The policy server uses config.image_features to infer rename maps and
-        resize images. We declare generic image features matching the expected
-        number of camera inputs.
+        Uses the actual camera names (primary_image_key + wrist_image_keys) so
+        that robot camera keys match policy keys directly, avoiding any rename.
         """
         img_shape = (3, config.image_size, config.image_size)
 
         if not config.input_features:
             input_features = {}
-            for i in range(config.num_images_in_input):
-                input_features[f"{OBS_IMAGES}.image_{i}"] = PolicyFeature(
+            camera_keys = [config.primary_image_key] + list(config.wrist_image_keys)
+            for cam_key in camera_keys:
+                input_features[f"{OBS_IMAGES}.{cam_key}"] = PolicyFeature(
                     type=FeatureType.VISUAL, shape=img_shape,
                 )
             input_features[OBS_STATE] = PolicyFeature(
@@ -598,30 +598,22 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         if not isinstance(task_label, str):
             task_label = str(task_label)
 
-        # Collect image tensors from batch, sorted to get consistent ordering
-        image_keys = sorted(k for k in batch if k.startswith(OBS_IMAGES))
+        # Look up images by the configured camera names to guarantee correct ordering.
+        primary_key = f"{OBS_IMAGES}.{self.config.primary_image_key}"
+        wrist_keys = [f"{OBS_IMAGES}.{k}" for k in self.config.wrist_image_keys]
 
-        # Separate primary image and wrist/auxiliary images
-        primary_key = None
-        wrist_keys = []
-        for k in image_keys:
-            camera_name = k.split(".")[-1]
-            if camera_name == self.config.primary_image_key:
-                primary_key = k
-            else:
-                wrist_keys.append(k)
+        if primary_key not in batch:
+            available = [k for k in batch if k.startswith(OBS_IMAGES)]
+            raise ValueError(
+                f"Primary image key '{primary_key}' not in batch. "
+                f"Available image keys: {available}"
+            )
 
-        if primary_key is None and image_keys:
-            primary_key = image_keys[0]
-            wrist_keys = image_keys[1:]
-
-        if primary_key is None:
-            raise ValueError(f"No image keys found in batch. Keys: {list(batch.keys())}")
-
-        # Convert tensors to numpy images
+        # Convert tensors to numpy images: primary first, then wrist in config order
         all_np_images = [self._tensor_to_numpy_image(batch[primary_key])]
         for wk in wrist_keys:
-            all_np_images.append(self._tensor_to_numpy_image(batch[wk]))
+            if wk in batch:
+                all_np_images.append(self._tensor_to_numpy_image(batch[wk]))
 
         # Limit to configured number of images
         all_np_images = all_np_images[: self.config.num_images_in_input]

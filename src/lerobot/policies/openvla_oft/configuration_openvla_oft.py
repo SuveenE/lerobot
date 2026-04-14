@@ -48,8 +48,11 @@ class OpenVLAOFTConfig(PreTrainedConfig):
     proprio_normalization_type: str = "bounds"
 
     # Which robot camera to use as the primary (third-person) view.
-    # Remaining cameras are treated as wrist/auxiliary views.
     primary_image_key: str = "top"
+
+    # Wrist / auxiliary camera keys in the order they should be concatenated
+    # after the primary image. Order must match training.
+    wrist_image_keys: list[str] = field(default_factory=lambda: ["left", "right"])
 
     # Key in dataset_statistics.json for action unnormalization.
     # If empty, auto-detected from the checkpoint.
