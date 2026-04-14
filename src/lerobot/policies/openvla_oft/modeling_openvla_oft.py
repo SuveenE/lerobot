@@ -565,12 +565,19 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         """
         self.eval()
 
-        # Extract task description
+        # Extract task description (may be a string, list of strings, or tensor)
         task_label = ""
         if "task" in batch:
             task_label = batch["task"]
         elif OBS_LANGUAGE_TOKENS in batch:
             task_label = batch[OBS_LANGUAGE_TOKENS]
+
+        if isinstance(task_label, list):
+            task_label = task_label[0] if task_label else ""
+        if isinstance(task_label, Tensor):
+            task_label = ""
+        if not isinstance(task_label, str):
+            task_label = str(task_label)
 
         # Collect image tensors from batch, sorted to get consistent ordering
         image_keys = sorted(k for k in batch if k.startswith(OBS_IMAGES))
