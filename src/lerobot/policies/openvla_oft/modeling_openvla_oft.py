@@ -150,7 +150,6 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         than a single model.safetensors file.
         """
         from huggingface_hub import hf_hub_download
-        from transformers import AutoModelForVision2Seq, AutoProcessor
 
         model_path = str(pretrained_name_or_path)
 
@@ -158,10 +157,24 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
             config = OpenVLAOFTConfig()
 
         instance = cls(config)
+        is_local = os.path.isdir(model_path)
 
         logger.info(f"Loading OpenVLA-OFT from {model_path}...")
 
-        # 1. Load the base VLA model
+        # 1. Load dataset statistics FIRST so we can determine action/proprio dims.
+        instance._load_dataset_stats(model_path, is_local)
+
+        # 2. Patch prismatic constants BEFORE any prismatic or VLA model imports.
+        #    The VLA backbone reads NUM_ACTIONS_CHUNK and ACTION_DIM from
+        #    prismatic.vla.constants to determine how many action tokens to
+        #    generate. If these are wrong (LIBERO defaults: ACTION_DIM=7,
+        #    NUM_ACTIONS_CHUNK=8), the hidden states will have the wrong size
+        #    and the action head reshape will fail.
+        instance._configure_prismatic_constants(config)
+
+        # 3. Load the base VLA model (now with correct constants)
+        from transformers import AutoModelForVision2Seq, AutoProcessor
+
         vla = AutoModelForVision2Seq.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -171,8 +184,11 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
             trust_remote_code=True,
         )
 
-        # 2. Apply LoRA adapter if present
-        is_local = os.path.isdir(model_path)
+        # 3b. Re-patch constants in any modules that were freshly imported
+        #     during from_pretrained (modeling_prismatic, action_heads, etc.)
+        instance._configure_prismatic_constants(config)
+
+        # 4. Apply LoRA adapter if present
         has_lora = False
         if is_local:
             has_lora = os.path.isdir(os.path.join(model_path, "lora_adapter"))
@@ -203,12 +219,12 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
             vla = vla.merge_and_unload()
             logger.info("LoRA adapter merged.")
 
-        # 3. Apply FiLM if configured
+        # 5. Apply FiLM if configured
         if config.use_film:
             logger.info("Applying FiLM conditioning to vision backbone...")
             instance._apply_film(vla, model_path, is_local, config)
 
-        # 4. Set number of images and move to device
+        # 6. Set number of images and move to device
         vla.vision_backbone.set_num_images_in_input(config.num_images_in_input)
         vla.eval()
 
@@ -219,30 +235,22 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         instance.vla = vla
         instance._device = device
 
-        # 5. Load processor
+        # 7. Attach dataset stats to VLA (needed for predict_action unnormalization)
+        instance._attach_norm_stats_to_vla()
+
+        # 8. Load processor
         instance.vla_processor = AutoProcessor.from_pretrained(
             model_path, trust_remote_code=True
         )
 
-        # 6. Load dataset statistics and determine unnorm_key
-        instance._load_dataset_stats(model_path, is_local)
-
-        # 7. Patch prismatic constants BEFORE importing action head / projector classes.
-        #    The prismatic module auto-detects platform from sys.argv, which won't
-        #    contain "aloha"/"libero" when running via lerobot. Without this patch,
-        #    it defaults to LIBERO (ACTION_DIM=7, NUM_ACTIONS_CHUNK=8), causing
-        #    dimension mismatches with bimanual checkpoints.
-        instance._configure_prismatic_constants(config)
-
-        # 8. Load action head
+        # 9. Load action head
         instance._load_action_head(model_path, is_local, config)
 
-        # 9. Load proprio projector
+        # 10. Load proprio projector
         if config.use_proprio:
             instance._load_proprio_projector(model_path, is_local, config)
 
-        # 10. Populate input/output features so the server can do image resizing
-        #     and rename_map inference.
+        # 11. Populate input/output features for server-side processing
         instance._populate_features(config)
 
         logger.info(f"OpenVLA-OFT loaded successfully. unnorm_key={instance._unnorm_key}")
@@ -278,15 +286,17 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
             }
 
     def _get_action_dim(self) -> int:
-        if hasattr(self.vla, "norm_stats") and self._unnorm_key in self.vla.norm_stats:
-            stats = self.vla.norm_stats[self._unnorm_key]
+        norm_stats = getattr(self, "_norm_stats", None)
+        if norm_stats and self._unnorm_key in norm_stats:
+            stats = norm_stats[self._unnorm_key]
             if "action" in stats and "mean" in stats["action"]:
                 return len(stats["action"]["mean"])
         return 14
 
     def _get_proprio_dim(self) -> int:
-        if hasattr(self.vla, "norm_stats") and self._unnorm_key in self.vla.norm_stats:
-            stats = self.vla.norm_stats[self._unnorm_key]
+        norm_stats = getattr(self, "_norm_stats", None)
+        if norm_stats and self._unnorm_key in norm_stats:
+            stats = norm_stats[self._unnorm_key]
             if "proprio" in stats and "mean" in stats["proprio"]:
                 return len(stats["proprio"]["mean"])
         return 14
@@ -325,6 +335,21 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
                 "Must be 'bounds' or 'bounds_q99'."
             )
 
+        # Also patch any already-imported modules that used `from` imports,
+        # since `from X import Y` creates a local copy that our module-level
+        # patch won't reach.
+        import sys
+        for mod_name, mod in sys.modules.items():
+            if mod is None:
+                continue
+            if "action_head" in mod_name or "modeling_prismatic" in mod_name:
+                if hasattr(mod, "NUM_ACTIONS_CHUNK"):
+                    mod.NUM_ACTIONS_CHUNK = config.num_actions_chunk
+                if hasattr(mod, "ACTION_DIM"):
+                    mod.ACTION_DIM = action_dim
+                if hasattr(mod, "PROPRIO_DIM"):
+                    mod.PROPRIO_DIM = proprio_dim
+
         logger.info(
             f"Configured prismatic constants: ACTION_DIM={action_dim}, "
             f"PROPRIO_DIM={proprio_dim}, NUM_ACTIONS_CHUNK={config.num_actions_chunk}, "
@@ -332,7 +357,7 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         )
 
     def _load_dataset_stats(self, model_path: str, is_local: bool) -> None:
-        """Load dataset_statistics.json into vla.norm_stats."""
+        """Load dataset_statistics.json (stored on self until VLA is ready)."""
         from huggingface_hub import hf_hub_download
 
         if is_local:
@@ -344,33 +369,33 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
                 )
             except Exception:
                 logger.warning("No dataset_statistics.json found. Action unnormalization may fail.")
+                self._norm_stats = {}
                 return
 
         if os.path.isfile(stats_path):
             with open(stats_path) as f:
-                norm_stats = json.load(f)
-            self.vla.norm_stats = norm_stats
+                self._norm_stats = json.load(f)
 
             if self.config.unnorm_key:
                 self._unnorm_key = self.config.unnorm_key
             else:
-                self._unnorm_key = _detect_unnorm_key(norm_stats)
+                self._unnorm_key = _detect_unnorm_key(self._norm_stats)
                 logger.info(f"Auto-detected unnorm_key: {self._unnorm_key}")
         else:
             logger.warning(f"dataset_statistics.json not found at {stats_path}")
+            self._norm_stats = {}
+
+    def _attach_norm_stats_to_vla(self) -> None:
+        """Attach loaded norm_stats to the VLA model for predict_action unnormalization."""
+        if hasattr(self, "_norm_stats") and self._norm_stats:
+            self.vla.norm_stats = self._norm_stats
 
     def _load_action_head(self, model_path: str, is_local: bool, config: OpenVLAOFTConfig) -> None:
         """Load the action head (L1 regression or diffusion)."""
         from huggingface_hub import HfApi, hf_hub_download
 
         llm_dim = self.vla.llm_dim
-
-        # Determine action dim from dataset stats
-        action_dim = 7  # default
-        if hasattr(self.vla, "norm_stats") and self._unnorm_key in self.vla.norm_stats:
-            stats = self.vla.norm_stats[self._unnorm_key]
-            if "action" in stats and "mean" in stats["action"]:
-                action_dim = len(stats["action"]["mean"])
+        action_dim = self._get_action_dim()
 
         if config.use_l1_regression:
             from prismatic.models.action_heads import L1RegressionActionHead
@@ -408,13 +433,7 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
     def _load_proprio_projector(self, model_path: str, is_local: bool, config: OpenVLAOFTConfig) -> None:
         """Load the proprioception projector."""
         llm_dim = self.vla.llm_dim
-
-        # Determine proprio dim from dataset stats
-        proprio_dim = 14  # default for bi-manual
-        if hasattr(self.vla, "norm_stats") and self._unnorm_key in self.vla.norm_stats:
-            stats = self.vla.norm_stats[self._unnorm_key]
-            if "proprio" in stats and "mean" in stats["proprio"]:
-                proprio_dim = len(stats["proprio"]["mean"])
+        proprio_dim = self._get_proprio_dim()
 
         from prismatic.models.projectors import ProprioProjector
 
