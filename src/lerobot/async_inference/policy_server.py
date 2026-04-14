@@ -281,7 +281,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """Returns actions to the robot client. Actions are sent as a single
         chunk, containing multiple actions."""
         client_id = context.peer()
-        print(f"[DIAG] GetActions called by {client_id}, queue size: {self.observation_queue.qsize()}", flush=True)
+        print(f"[DIAG] GetActions called by {client_id}, queue_id={id(self.observation_queue)}, qsize={self.observation_queue.qsize()}", flush=True)
 
         # Generate action based on the most recent observation and its timestep
         try:
@@ -355,24 +355,21 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """Enqueue an observation if it must go through processing, otherwise skip it.
         Observations not in queue are never run through the policy network"""
 
-        if (
+        should_enqueue = (
             obs.must_go
             or self.last_processed_obs is None
             or self._obs_sanity_checks(obs, self.last_processed_obs)
-        ):
-            last_obs = self.last_processed_obs.get_timestep() if self.last_processed_obs else "None"
-            self.logger.debug(
-                f"Enqueuing observation. Must go: {obs.must_go} | Last processed obs: {last_obs}"
-            )
+        )
+        print(f"[DIAG] _enqueue: should={should_enqueue}, must_go={obs.must_go}, last_obs={self.last_processed_obs is None}, queue_id={id(self.observation_queue)}, qsize={self.observation_queue.qsize()}", flush=True)
 
+        if should_enqueue:
             # If queue is full, get the old observation to make room
             if self.observation_queue.full():
-                # pops from queue
                 _ = self.observation_queue.get_nowait()
-                self.logger.debug("Observation queue was full, removed oldest observation")
+                print("[DIAG] _enqueue: removed old obs from full queue", flush=True)
 
-            # Now put the new observation (never blocks as queue is non-full here)
             self.observation_queue.put(obs)
+            print(f"[DIAG] _enqueue: PUT done, qsize now={self.observation_queue.qsize()}", flush=True)
             return True
 
         return False
