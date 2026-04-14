@@ -28,6 +28,8 @@ from .configuration_openvla_oft import OpenVLAOFTConfig
 def make_openvla_oft_pre_post_processors(
     config: OpenVLAOFTConfig,
     dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
+    preprocessor_overrides: dict[str, Any] | None = None,
+    postprocessor_overrides: dict[str, Any] | None = None,
 ) -> tuple[
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[PolicyAction, PolicyAction],
@@ -37,14 +39,26 @@ def make_openvla_oft_pre_post_processors(
     No normalization or unnormalization is applied since OpenVLA-OFT
     handles these internally.
     """
+    preprocessor_overrides = preprocessor_overrides or {}
+    postprocessor_overrides = postprocessor_overrides or {}
+
+    rename_cfg = preprocessor_overrides.get("rename_observations_processor", {})
+    rename_map = rename_cfg.get("rename_map", {})
+
+    pre_device_cfg = preprocessor_overrides.get("device_processor", {})
+    pre_device = pre_device_cfg.get("device", config.device)
+
+    post_device_cfg = postprocessor_overrides.get("device_processor", {})
+    post_device = post_device_cfg.get("device", "cpu")
+
     input_steps = [
-        RenameObservationsProcessorStep(rename_map={}),
+        RenameObservationsProcessorStep(rename_map=rename_map),
         AddBatchDimensionProcessorStep(),
-        DeviceProcessorStep(device=config.device),
+        DeviceProcessorStep(device=pre_device),
     ]
 
     output_steps = [
-        DeviceProcessorStep(device="cpu"),
+        DeviceProcessorStep(device=post_device),
     ]
 
     return (

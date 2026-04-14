@@ -230,6 +230,8 @@ def make_pre_post_processors(
         return make_openvla_oft_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
+            preprocessor_overrides=kwargs.get("preprocessor_overrides"),
+            postprocessor_overrides=kwargs.get("postprocessor_overrides"),
         )
 
     if pretrained_path:
