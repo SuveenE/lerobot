@@ -239,7 +239,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     def SendObservations(self, request_iterator, context):  # noqa: N802
         """Receive observations from the robot client"""
         client_id = context.peer()
-        self.logger.info(f"SendObservations called from {client_id}")
+        print(f"[DIAG] SendObservations called from {client_id}", flush=True)
 
         receive_time = time.time()  # comparing timestamps so need time.time()
         start_deserialize = time.perf_counter()
@@ -249,7 +249,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         timed_observation = pickle.loads(received_bytes)  # nosec
         deserialize_time = time.perf_counter() - start_deserialize
 
-        self.logger.info(f"Received observation #{timed_observation.get_timestep()}, enqueuing...")
+        print(f"[DIAG] Received observation #{timed_observation.get_timestep()}, enqueuing...", flush=True)
 
         obs_timestep = timed_observation.get_timestep()
         obs_timestamp = timed_observation.get_timestamp()
@@ -281,7 +281,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """Returns actions to the robot client. Actions are sent as a single
         chunk, containing multiple actions."""
         client_id = context.peer()
-        self.logger.info(f"GetActions called by {client_id}, queue size: {self.observation_queue.qsize()}")
+        print(f"[DIAG] GetActions called by {client_id}, queue size: {self.observation_queue.qsize()}", flush=True)
 
         # Generate action based on the most recent observation and its timestep
         try:
@@ -324,7 +324,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             return actions
 
         except Empty:  # no observation added to queue in obs_queue_timeout
-            self.logger.info("GetActions: queue empty after timeout, returning empty")
+            print("[DIAG] GetActions: queue empty after timeout, returning empty", flush=True)
             return services_pb2.Empty()
 
         except Exception as e:
