@@ -299,16 +299,16 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         norm_stats = getattr(self, "_norm_stats", None)
         if norm_stats and self._unnorm_key in norm_stats:
             stats = norm_stats[self._unnorm_key]
-            if "action" in stats and "mean" in stats["action"]:
-                return len(stats["action"]["mean"])
+            if "action" in stats and "min" in stats["action"]:
+                return len(stats["action"]["min"])
         return 14
 
     def _get_proprio_dim(self) -> int:
         norm_stats = getattr(self, "_norm_stats", None)
         if norm_stats and self._unnorm_key in norm_stats:
             stats = norm_stats[self._unnorm_key]
-            if "proprio" in stats and "mean" in stats["proprio"]:
-                return len(stats["proprio"]["mean"])
+            if "proprio" in stats and "min" in stats["proprio"]:
+                return len(stats["proprio"]["min"])
         return 14
 
     def _configure_prismatic_constants(self, config: OpenVLAOFTConfig) -> None:
@@ -352,7 +352,7 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         for mod_name, mod in sys.modules.items():
             if mod is None:
                 continue
-            if "action_head" in mod_name or "modeling_prismatic" in mod_name:
+            if "action_head" in mod_name or "modeling_prismatic" in mod_name or "train_utils" in mod_name:
                 if hasattr(mod, "NUM_ACTIONS_CHUNK"):
                     mod.NUM_ACTIONS_CHUNK = config.num_actions_chunk
                 if hasattr(mod, "ACTION_DIM"):
@@ -402,8 +402,6 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
 
     def _load_action_head(self, model_path: str, is_local: bool, config: OpenVLAOFTConfig) -> None:
         """Load the action head (L1 regression or diffusion)."""
-        from huggingface_hub import HfApi, hf_hub_download
-
         llm_dim = self.vla.llm_dim
         action_dim = self._get_action_dim()
 
