@@ -239,7 +239,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     def SendObservations(self, request_iterator, context):  # noqa: N802
         """Receive observations from the robot client"""
         client_id = context.peer()
-        self.logger.debug(f"Receiving observations from {client_id}")
+        print(f"[DIAG] SendObservations called from {client_id}", flush=True)
 
         receive_time = time.time()  # comparing timestamps so need time.time()
         start_deserialize = time.perf_counter()
@@ -249,7 +249,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         timed_observation = pickle.loads(received_bytes)  # nosec
         deserialize_time = time.perf_counter() - start_deserialize
 
-        self.logger.debug(f"Received observation #{timed_observation.get_timestep()}")
+        print(f"[DIAG] Received observation #{timed_observation.get_timestep()}, enqueuing...", flush=True)
 
         obs_timestep = timed_observation.get_timestep()
         obs_timestamp = timed_observation.get_timestamp()
@@ -281,7 +281,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """Returns actions to the robot client. Actions are sent as a single
         chunk, containing multiple actions."""
         client_id = context.peer()
-        self.logger.debug(f"Client {client_id} connected for action streaming")
+        print(f"[DIAG] GetActions called by {client_id}, queue_id={id(self.observation_queue)}, qsize={self.observation_queue.qsize()}", flush=True)
 
         # Generate action based on the most recent observation and its timestep
         try:
@@ -324,12 +324,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             return actions
 
         except Empty:  # no observation added to queue in obs_queue_timeout
+            print("[DIAG] GetActions: queue empty after timeout, returning empty", flush=True)
             return services_pb2.Empty()
 
         except Exception as e:
             import traceback
-            self.logger.error(f"Error in StreamActions: {e}")
-            self.logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            print(f"[DIAG] ERROR in GetActions: {e}", flush=True)
+            print(f"[DIAG] Full traceback:\n{traceback.format_exc()}", flush=True)
             return services_pb2.Empty()
 
     def _obs_sanity_checks(self, obs: TimedObservation, previous_obs: TimedObservation) -> bool:
@@ -354,24 +355,21 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """Enqueue an observation if it must go through processing, otherwise skip it.
         Observations not in queue are never run through the policy network"""
 
-        if (
+        should_enqueue = (
             obs.must_go
             or self.last_processed_obs is None
             or self._obs_sanity_checks(obs, self.last_processed_obs)
-        ):
-            last_obs = self.last_processed_obs.get_timestep() if self.last_processed_obs else "None"
-            self.logger.debug(
-                f"Enqueuing observation. Must go: {obs.must_go} | Last processed obs: {last_obs}"
-            )
+        )
+        print(f"[DIAG] _enqueue: should={should_enqueue}, must_go={obs.must_go}, last_obs={self.last_processed_obs is None}, queue_id={id(self.observation_queue)}, qsize={self.observation_queue.qsize()}", flush=True)
 
+        if should_enqueue:
             # If queue is full, get the old observation to make room
             if self.observation_queue.full():
-                # pops from queue
                 _ = self.observation_queue.get_nowait()
-                self.logger.debug("Observation queue was full, removed oldest observation")
+                print("[DIAG] _enqueue: removed old obs from full queue", flush=True)
 
-            # Now put the new observation (never blocks as queue is non-full here)
             self.observation_queue.put(obs)
+            print(f"[DIAG] _enqueue: PUT done, qsize now={self.observation_queue.qsize()}", flush=True)
             return True
 
         return False
