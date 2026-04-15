@@ -253,7 +253,12 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         # 11. Populate input/output features for server-side processing
         instance._populate_features(config)
 
-        logger.info(f"OpenVLA-OFT loaded successfully. unnorm_key={instance._unnorm_key}")
+        camera_order = [config.primary_image_key] + list(config.wrist_image_keys)
+        logger.info(
+            f"OpenVLA-OFT loaded successfully. unnorm_key={instance._unnorm_key}, "
+            f"num_images={config.num_images_in_input}, "
+            f"camera_order={camera_order} (slot 0=primary)"
+        )
 
         instance.eval()
         return instance
