@@ -10,7 +10,9 @@ This is an inference-only wrapper. Training through lerobot is not supported.
 from __future__ import annotations
 
 import builtins
+import contextlib
 import glob
+import io as _io
 import json
 import logging
 import os
@@ -160,7 +162,14 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         instance = cls(config)
         is_local = os.path.isdir(model_path)
 
-        logger.info(f"Loading OpenVLA-OFT from {model_path}...")
+        camera_order = [config.primary_image_key] + list(config.wrist_image_keys)
+        logger.info(
+            f"Loading OpenVLA-OFT from {model_path} | "
+            f"cameras={camera_order}, chunk={config.num_actions_chunk}, "
+            f"norm={config.proprio_normalization_type}, "
+            f"l1={config.use_l1_regression}, diffusion={config.use_diffusion}, "
+            f"proprio={config.use_proprio}, film={config.use_film}"
+        )
 
         # 1. Load dataset statistics FIRST so we can determine action/proprio dims.
         instance._load_dataset_stats(model_path, is_local)
@@ -321,7 +330,10 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         directly so that subsequent imports of action heads and projectors
         get the correct values.
         """
-        import prismatic.vla.constants as prismatic_constants
+        # Suppress the noisy print() from prismatic.vla.constants which runs
+        # detect_robot_platform() at import time and defaults to LIBERO.
+        with contextlib.redirect_stdout(_io.StringIO()):
+            import prismatic.vla.constants as prismatic_constants
 
         action_dim = self._get_action_dim()
         proprio_dim = self._get_proprio_dim()
