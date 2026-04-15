@@ -48,13 +48,12 @@ class OpenVLAOFTConfig(PreTrainedConfig):
     proprio_normalization_type: str = "bounds"
 
     # Which robot camera to use as the primary (first) image slot.
-    # Order must match training. For the cubestack checkpoint the training
-    # order was: right, left, top.
+    # Order must match training.
     primary_image_key: str = "left"
 
     # Auxiliary camera keys in the order they should be concatenated
     # after the primary image. Order must match training.
-    wrist_image_keys: list[str] = field(default_factory=lambda: ["right", "top"])
+    wrist_image_keys: list[str] = field(default_factory=lambda: ["right"])
 
     # Key in dataset_statistics.json for action unnormalization.
     # If empty, auto-detected from the checkpoint.

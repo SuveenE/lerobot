@@ -287,7 +287,9 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
 
         if not config.input_features:
             input_features = {}
-            camera_keys = [config.primary_image_key] + list(config.wrist_image_keys)
+            camera_keys = ([config.primary_image_key] + list(config.wrist_image_keys))[
+                : config.num_images_in_input
+            ]
             for cam_key in camera_keys:
                 input_features[f"{OBS_IMAGES}.{cam_key}"] = PolicyFeature(
                     type=FeatureType.VISUAL, shape=img_shape,
