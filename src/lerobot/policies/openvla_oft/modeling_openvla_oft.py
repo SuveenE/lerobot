@@ -132,6 +132,7 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         self.vla_processor = None
         self.action_head = None
         self.proprio_projector = None
+        self.noisy_action_projector = None
         self._unnorm_key: str = ""
         self._device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -222,7 +223,7 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         # 5. Apply FiLM if configured
         if config.use_film:
             logger.info("Applying FiLM conditioning to vision backbone...")
-            instance._apply_film(vla, model_path, is_local, config)
+            vla = instance._apply_film(vla, model_path, is_local, config)
 
         # 6. Set number of images and move to device
         vla.vision_backbone.set_num_images_in_input(config.num_images_in_input)
@@ -249,6 +250,10 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         # 10. Load proprio projector
         if config.use_proprio:
             instance._load_proprio_projector(model_path, is_local, config)
+
+        # 10b. Load noisy action projector (required for diffusion)
+        if config.use_diffusion:
+            instance._load_noisy_action_projector(model_path, is_local, config)
 
         # 11. Populate input/output features for server-side processing
         instance._populate_features(config)
@@ -460,8 +465,36 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
 
         self.proprio_projector = proprio_projector
 
-    def _apply_film(self, vla, model_path: str, is_local: bool, config: OpenVLAOFTConfig) -> None:
-        """Apply FiLM conditioning to the VLA vision backbone."""
+    def _load_noisy_action_projector(
+        self, model_path: str, is_local: bool, config: OpenVLAOFTConfig
+    ) -> None:
+        """Load the noisy action projector (required for diffusion-based prediction)."""
+        llm_dim = self.vla.llm_dim
+
+        from prismatic.models.projectors import NoisyActionProjector
+
+        noisy_action_projector = NoisyActionProjector(llm_dim=llm_dim)
+        noisy_action_projector = noisy_action_projector.to(torch.bfloat16).to(self._device)
+        noisy_action_projector.eval()
+
+        checkpoint_path = self._find_component_checkpoint(
+            model_path, is_local, "noisy_action_projector"
+        )
+        if checkpoint_path:
+            state_dict = _load_component_state_dict(checkpoint_path)
+            noisy_action_projector.load_state_dict(state_dict)
+            logger.info(f"Loaded noisy action projector from {checkpoint_path}")
+        else:
+            logger.warning("No noisy action projector checkpoint found.")
+
+        self.noisy_action_projector = noisy_action_projector
+
+    def _apply_film(self, vla, model_path: str, is_local: bool, config: OpenVLAOFTConfig):
+        """Apply FiLM conditioning to the VLA vision backbone.
+
+        Returns the unwrapped model (not the PeftModel wrapper) with FiLM applied,
+        matching the original openvla-oft `_apply_film_to_vla`.
+        """
         from peft import LoraConfig, get_peft_model
         from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 
@@ -488,6 +521,8 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
 
         vla = vla.model
         vla.vision_backbone = vla.vision_backbone.to(torch.bfloat16)
+
+        return vla
 
     def _find_component_checkpoint(
         self, model_path: str, is_local: bool, component: str
@@ -544,8 +579,57 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
             a_max=1.0,
         )
 
+    @staticmethod
+    def _resize_image_for_policy(img: np.ndarray, resize_size: int) -> np.ndarray:
+        """Resize image to match training pipeline, including JPEG encode/decode roundtrip.
+
+        Matches the original openvla-oft `resize_image_for_policy` which goes through
+        TF JPEG codec to reproduce the compression artifacts seen during RLDS training.
+        """
+        import tensorflow as tf
+
+        img = tf.image.encode_jpeg(img)
+        img = tf.io.decode_image(img, expand_animations=False, dtype=tf.uint8)
+        img = tf.image.resize(img, (resize_size, resize_size), method="lanczos3", antialias=True)
+        img = tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8)
+        return img.numpy()
+
+    @staticmethod
+    def _center_crop_image(image: np.ndarray) -> np.ndarray:
+        """Center crop with scale 0.9, matching the original TF-based crop_and_resize.
+
+        Matches the original openvla-oft `center_crop_image` / `crop_and_resize`.
+        """
+        import tensorflow as tf
+
+        crop_scale = 0.9
+        image_tf = tf.convert_to_tensor(image)
+        orig_dtype = image_tf.dtype
+        image_tf = tf.image.convert_image_dtype(image_tf, tf.float32)
+
+        if image_tf.shape.ndims == 3:
+            image_tf = tf.expand_dims(image_tf, axis=0)
+
+        new_edge = tf.clip_by_value(tf.sqrt(crop_scale), 0, 1)
+        offset = (1 - new_edge) / 2
+        bounding_boxes = tf.reshape(
+            tf.stack([offset, offset, offset + new_edge, offset + new_edge]),
+            shape=(1, 4),
+        )
+        image_tf = tf.image.crop_and_resize(
+            image_tf, bounding_boxes, [0], (OPENVLA_IMAGE_SIZE, OPENVLA_IMAGE_SIZE)
+        )
+        image_tf = image_tf[0]
+        image_tf = tf.clip_by_value(image_tf, 0, 1)
+        image_tf = tf.image.convert_image_dtype(image_tf, orig_dtype, saturate=True)
+        return image_tf.numpy()
+
     def _prepare_images(self, images: list[np.ndarray]) -> list:
-        """Prepare images for VLA input: resize, optionally center crop, convert to PIL."""
+        """Prepare images for VLA input: resize, optionally center crop, convert to PIL.
+
+        Uses the same TF-based pipeline as the original openvla-oft for exact
+        distribution matching (JPEG roundtrip, TF lanczos3 resize, TF crop_and_resize).
+        """
         from PIL import Image
 
         processed = []
@@ -553,32 +637,14 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
             assert img.dtype == np.uint8 and img.ndim == 3 and img.shape[-1] == 3
 
             if img.shape[:2] != (OPENVLA_IMAGE_SIZE, OPENVLA_IMAGE_SIZE):
-                pil_img = Image.fromarray(img).convert("RGB")
-                pil_img = pil_img.resize(
-                    (OPENVLA_IMAGE_SIZE, OPENVLA_IMAGE_SIZE), Image.LANCZOS
-                )
-            else:
-                pil_img = Image.fromarray(img).convert("RGB")
+                img = self._resize_image_for_policy(img, OPENVLA_IMAGE_SIZE)
 
             if self.config.center_crop:
-                pil_img = self._center_crop(pil_img)
+                img = self._center_crop_image(img)
 
+            pil_img = Image.fromarray(img).convert("RGB")
             processed.append(pil_img)
         return processed
-
-    def _center_crop(self, image) -> "Image.Image":
-        """Center crop an image with scale 0.9, matching OpenVLA-OFT training distribution."""
-        import numpy as np
-        from PIL import Image
-
-        img_array = np.array(image)
-        h, w = img_array.shape[:2]
-        scale = np.sqrt(0.9)
-        new_h, new_w = int(h * scale), int(w * scale)
-        top = (h - new_h) // 2
-        left = (w - new_w) // 2
-        cropped = img_array[top : top + new_h, left : left + new_w]
-        return Image.fromarray(cropped).resize((OPENVLA_IMAGE_SIZE, OPENVLA_IMAGE_SIZE), Image.LANCZOS)
 
     @torch.inference_mode()
     def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
@@ -665,7 +731,9 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
             do_sample=False,
             proprio=proprio,
             proprio_projector=self.proprio_projector,
+            noisy_action_projector=self.noisy_action_projector,
             action_head=self.action_head,
+            use_film=self.config.use_film,
         )
 
         # action is a numpy array of shape (chunk_size, action_dim) or list of arrays

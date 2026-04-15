@@ -61,8 +61,9 @@ class OpenVLAOFTConfig(PreTrainedConfig):
     unnorm_key: str = ""
 
     # Diffusion-specific (only when use_diffusion=True)
-    num_diffusion_steps_train: int = 100
-    num_diffusion_steps_inference: int = 10
+    # Defaults match the original openvla-oft deploy.py
+    num_diffusion_steps_train: int = 50
+    num_diffusion_steps_inference: int = 50
 
     # LoRA rank (used when use_film=True to apply LoRA before FiLM wrapping)
     lora_rank: int = 32
