@@ -113,11 +113,17 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
         Loads ``dataset_statistics.json`` (if available at the model path) to
         determine action/proprio dimensions for feature metadata.  No VLA
         model weights are loaded -- the external server handles that.
+
+        If a ``lerobot_config.json`` file exists in the pretrained path, its
+        keys are used to override ``OpenVLAOFTConfig`` defaults.  This lets
+        deployment-specific settings (``server_url``, ``server_image_key_map``,
+        camera keys, etc.) live alongside the checkpoint without requiring
+        extra CLI arguments.
         """
         model_path = str(pretrained_name_or_path)
 
         if config is None:
-            config = OpenVLAOFTConfig()
+            config = cls._load_config_with_overrides(model_path)
 
         instance = cls(config)
 
@@ -144,6 +150,39 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
 
         instance.eval()
         return instance
+
+    @classmethod
+    def _load_config_with_overrides(cls, model_path: str) -> OpenVLAOFTConfig:
+        """Create an OpenVLAOFTConfig, applying overrides from ``lerobot_config.json``.
+
+        If ``model_path`` is a local directory containing ``lerobot_config.json``,
+        its key-value pairs override the dataclass defaults.  Example file::
+
+            {
+                "server_url": "http://localhost:8777/act",
+                "server_image_key_map": {
+                    "top": "full_image",
+                    "left": "wrist_image_left",
+                    "right": "wrist_image_right"
+                },
+                "action_dim": 14,
+                "proprio_dim": 14,
+                "chunk_size": 25,
+                "n_action_steps": 25,
+                "num_images_in_input": 3,
+                "primary_image_key": "top",
+                "wrist_image_keys": ["left", "right"]
+            }
+        """
+        overrides: dict = {}
+        if os.path.isdir(model_path):
+            cfg_path = os.path.join(model_path, "lerobot_config.json")
+            if os.path.isfile(cfg_path):
+                with open(cfg_path) as f:
+                    overrides = json.load(f)
+                logger.info(f"Loaded config overrides from {cfg_path}: {list(overrides.keys())}")
+
+        return OpenVLAOFTConfig(**overrides)
 
     # ------------------------------------------------------------------
     # Feature metadata

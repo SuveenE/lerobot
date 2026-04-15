@@ -27,14 +27,14 @@ class OpenVLAOFTConfig(PreTrainedConfig):
     n_action_steps: int = 25
 
     # Number of camera images the model expects
-    num_images_in_input: int = 2
+    num_images_in_input: int = 3
     image_size: int = 224
 
     # Which robot camera to use as the primary (first) image slot.
-    primary_image_key: str = "left"
+    primary_image_key: str = "top"
 
     # Auxiliary camera keys (order must match training)
-    wrist_image_keys: list[str] = field(default_factory=lambda: ["right"])
+    wrist_image_keys: list[str] = field(default_factory=lambda: ["left", "right"])
 
     # Key in dataset_statistics.json for action dim detection.
     # If empty, auto-detected from the checkpoint's statistics file.
@@ -44,9 +44,13 @@ class OpenVLAOFTConfig(PreTrainedConfig):
     server_url: str = "http://0.0.0.0:8777/act"
 
     # Maps lerobot camera keys to the observation dict keys expected by
-    # deploy.py's get_vla_action (e.g. {"left": "full_image", "right": "wrist_image_left"}).
+    # deploy.py's get_vla_action.
     server_image_key_map: dict[str, str] = field(
-        default_factory=lambda: {"left": "full_image", "right": "wrist_image_left"}
+        default_factory=lambda: {
+            "top": "full_image",
+            "left": "wrist_image_left",
+            "right": "wrist_image_right",
+        }
     )
 
     # Fallback dimensions when dataset_statistics.json is unavailable.
