@@ -14,6 +14,7 @@
 
 from .act.configuration_act import ACTConfig as ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
+from .dreamzero.configuration_dreamzero import DreamZeroConfig as DreamZeroConfig
 from .groot.configuration_groot import GrootConfig as GrootConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .pi05.configuration_pi05 import PI05Config as PI05Config
@@ -27,6 +28,7 @@ from .xvla.configuration_xvla import XVLAConfig as XVLAConfig
 __all__ = [
     "ACTConfig",
     "DiffusionConfig",
+    "DreamZeroConfig",
     "PI0Config",
     "PI05Config",
     "SmolVLAConfig",
