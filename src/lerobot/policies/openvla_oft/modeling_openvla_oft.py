@@ -581,52 +581,61 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
     def _resize_image_for_policy(img: np.ndarray, resize_size: int) -> np.ndarray:
         """Resize image to match training pipeline, including JPEG encode/decode roundtrip.
 
-        Matches the original openvla-oft `resize_image_for_policy` which goes through
-        TF JPEG codec to reproduce the compression artifacts seen during RLDS training.
+        Matches the original openvla-oft ``resize_image_for_policy`` which goes through
+        a JPEG codec to reproduce the compression artifacts seen during RLDS training,
+        then resizes with Lanczos-3.  Uses PIL instead of TensorFlow.
         """
-        import tensorflow as tf
+        import io
 
-        img = tf.image.encode_jpeg(img)
-        img = tf.io.decode_image(img, expand_animations=False, dtype=tf.uint8)
-        img = tf.image.resize(img, (resize_size, resize_size), method="lanczos3", antialias=True)
-        img = tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8)
-        return img.numpy()
+        from PIL import Image as PILImage
+
+        # JPEG encode/decode roundtrip (quality=95 matches TF's default)
+        pil_img = PILImage.fromarray(img)
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=95)
+        buf.seek(0)
+        pil_img = PILImage.open(buf)
+        pil_img.load()
+
+        # Lanczos-3 resize (PIL LANCZOS == windowed sinc a=3, same kernel as TF lanczos3)
+        pil_img = pil_img.resize((resize_size, resize_size), PILImage.LANCZOS)
+        return np.array(pil_img)
 
     @staticmethod
     def _center_crop_image(image: np.ndarray) -> np.ndarray:
         """Center crop with scale 0.9, matching the original TF-based crop_and_resize.
 
-        Matches the original openvla-oft `center_crop_image` / `crop_and_resize`.
+        Uses ``torch.nn.functional.affine_grid`` + ``grid_sample`` with bilinear
+        interpolation and ``align_corners=True`` to replicate the behaviour of
+        ``tf.image.crop_and_resize`` (which also uses align-corners semantics).
         """
-        import tensorflow as tf
+        import math
 
         crop_scale = 0.9
-        image_tf = tf.convert_to_tensor(image)
-        orig_dtype = image_tf.dtype
-        image_tf = tf.image.convert_image_dtype(image_tf, tf.float32)
+        s = math.sqrt(crop_scale)
 
-        if image_tf.shape.ndims == 3:
-            image_tf = tf.expand_dims(image_tf, axis=0)
+        img_t = torch.from_numpy(image).float() / 255.0
+        img_t = img_t.permute(2, 0, 1).unsqueeze(0)  # (1, C, H, W)
 
-        new_edge = tf.clip_by_value(tf.sqrt(crop_scale), 0, 1)
-        offset = (1 - new_edge) / 2
-        bounding_boxes = tf.reshape(
-            tf.stack([offset, offset, offset + new_edge, offset + new_edge]),
-            shape=(1, 4),
+        # Affine grid: scale by sqrt(crop_scale) in both axes, no translation (center crop)
+        theta = torch.tensor([[s, 0, 0], [0, s, 0]], dtype=torch.float32).unsqueeze(0)
+        grid = torch.nn.functional.affine_grid(
+            theta,
+            (1, img_t.shape[1], OPENVLA_IMAGE_SIZE, OPENVLA_IMAGE_SIZE),
+            align_corners=True,
         )
-        image_tf = tf.image.crop_and_resize(
-            image_tf, bounding_boxes, [0], (OPENVLA_IMAGE_SIZE, OPENVLA_IMAGE_SIZE)
+        result = torch.nn.functional.grid_sample(
+            img_t, grid, mode="bilinear", align_corners=True, padding_mode="zeros",
         )
-        image_tf = image_tf[0]
-        image_tf = tf.clip_by_value(image_tf, 0, 1)
-        image_tf = tf.image.convert_image_dtype(image_tf, orig_dtype, saturate=True)
-        return image_tf.numpy()
+
+        result = result.squeeze(0).permute(1, 2, 0).clamp(0, 1)
+        return (result * 255).round().to(torch.uint8).numpy()
 
     def _prepare_images(self, images: list[np.ndarray]) -> list:
         """Prepare images for VLA input: resize, optionally center crop, convert to PIL.
 
-        Uses the same TF-based pipeline as the original openvla-oft for exact
-        distribution matching (JPEG roundtrip, TF lanczos3 resize, TF crop_and_resize).
+        Reproduces the original openvla-oft preprocessing for distribution matching
+        (JPEG roundtrip, Lanczos-3 resize, bilinear center crop) using PIL/PyTorch.
         """
         from PIL import Image
 
