@@ -47,12 +47,14 @@ class OpenVLAOFTConfig(PreTrainedConfig):
     # "bounds_q99" = normalize using q01/q99 percentiles (LIBERO default)
     proprio_normalization_type: str = "bounds"
 
-    # Which robot camera to use as the primary (third-person) view.
-    primary_image_key: str = "top"
+    # Which robot camera to use as the primary (first) image slot.
+    # Order must match training. For the cubestack checkpoint the training
+    # order was: right, left, top.
+    primary_image_key: str = "right"
 
-    # Wrist / auxiliary camera keys in the order they should be concatenated
+    # Auxiliary camera keys in the order they should be concatenated
     # after the primary image. Order must match training.
-    wrist_image_keys: list[str] = field(default_factory=lambda: ["left", "right"])
+    wrist_image_keys: list[str] = field(default_factory=lambda: ["left", "top"])
 
     # Key in dataset_statistics.json for action unnormalization.
     # If empty, auto-detected from the checkpoint.
