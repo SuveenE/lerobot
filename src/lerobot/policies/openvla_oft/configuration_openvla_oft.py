@@ -4,9 +4,9 @@ OpenVLA-OFT (https://github.com/moojink/openvla-oft) is a fine-tuned Vision-Lang
 model that uses an L1 regression or diffusion action head for continuous action prediction,
 with optional proprioception injection and FiLM conditioning.
 
-This config wraps the OpenVLA-OFT inference parameters so the model can be used through
-lerobot's async inference system. All preprocessing and unnormalization is handled
-internally by OpenVLA-OFT, so normalization mappings are set to IDENTITY.
+This config wraps the connection parameters needed to communicate with an external
+openvla-oft ``deploy.py`` FastAPI server through lerobot's async inference system.
+All model loading, preprocessing, and unnormalization is handled by the server.
 """
 
 from __future__ import annotations
@@ -20,68 +20,36 @@ from lerobot.configs.types import NormalizationMode
 @PreTrainedConfig.register_subclass("openvla_oft")
 @dataclass
 class OpenVLAOFTConfig(PreTrainedConfig):
-    """Configuration class for the OpenVLA-OFT policy wrapper."""
+    """Configuration class for the OpenVLA-OFT external-server policy wrapper."""
 
-    # Action chunking.
-    # num_actions_chunk must match the value used during training (see
-    # prismatic/vla/constants.py in the openvla-oft repo). ALOHA default is 25
-    # (at 25 Hz) or 50 (at 50 Hz). This is critical for correct action head
-    # reshaping.
-    num_actions_chunk: int = 25
+    # Action chunking
     chunk_size: int = 25
     n_action_steps: int = 25
 
-    # OpenVLA-OFT model parameters
-    use_l1_regression: bool = True
-    use_diffusion: bool = False
-    use_proprio: bool = True
-    use_film: bool = False
+    # Number of camera images the model expects
     num_images_in_input: int = 2
-    center_crop: bool = True
-    load_in_8bit: bool = False
-    load_in_4bit: bool = False
     image_size: int = 224
 
-    # Proprio/action normalization type. Must match training.
-    # "bounds" = normalize to [-1, 1] using min/max (ALOHA default)
-    # "bounds_q99" = normalize using q01/q99 percentiles (LIBERO default)
-    proprio_normalization_type: str = "bounds"
-
     # Which robot camera to use as the primary (first) image slot.
-    # Order must match training.
     primary_image_key: str = "left"
 
-    # Auxiliary camera keys in the order they should be concatenated
-    # after the primary image. Order must match training.
+    # Auxiliary camera keys (order must match training)
     wrist_image_keys: list[str] = field(default_factory=lambda: ["right"])
 
-    # Key in dataset_statistics.json for action unnormalization.
-    # If empty, auto-detected from the checkpoint.
+    # Key in dataset_statistics.json for action dim detection.
+    # If empty, auto-detected from the checkpoint's statistics file.
     unnorm_key: str = ""
 
-    # Diffusion-specific (only when use_diffusion=True)
-    # Defaults match the original openvla-oft deploy.py
-    num_diffusion_steps_train: int = 50
-    num_diffusion_steps_inference: int = 50
-
-    # LoRA rank (used when use_film=True to apply LoRA before FiLM wrapping)
-    lora_rank: int = 32
-
-    # --- External server mode ---
-    # When True, inference is delegated to an external openvla-oft deploy.py
-    # FastAPI server instead of loading the model in-process.
-    use_external_server: bool = False
+    # --- External server settings ---
     server_url: str = "http://0.0.0.0:8777/act"
 
     # Maps lerobot camera keys to the observation dict keys expected by
     # deploy.py's get_vla_action (e.g. {"left": "full_image", "right": "wrist_image_left"}).
-    # The first entry should map to the primary image key.
     server_image_key_map: dict[str, str] = field(
         default_factory=lambda: {"left": "full_image", "right": "wrist_image_left"}
     )
 
-    # Action and proprio dimensions (used in external server mode to populate
-    # features when dataset_statistics.json is not available).
+    # Fallback dimensions when dataset_statistics.json is unavailable.
     action_dim: int = 14
     proprio_dim: int = 14
 
@@ -95,11 +63,6 @@ class OpenVLAOFTConfig(PreTrainedConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not self.use_external_server:
-            if self.use_l1_regression and self.use_diffusion:
-                raise ValueError("Cannot use both L1 regression and diffusion action head.")
-            if not self.use_l1_regression and not self.use_diffusion:
-                raise ValueError("Either use_l1_regression or use_diffusion must be True.")
         if self.chunk_size <= 0:
             raise ValueError("`chunk_size` must be strictly positive.")
 
