@@ -17,6 +17,7 @@ Expected CAN interfaces:
 
 Usage:
     python -m lerobot.scripts.setup_bi_yam_servers
+    python -m lerobot.scripts.setup_bi_yam_servers --eval  # follower arms only (no leader/teaching handles)
 
 Requirements:
     - LeRobot installed with yam support: pip install -e ".[yam]"
@@ -25,6 +26,7 @@ Requirements:
     - Proper permissions to access CAN devices
 """
 
+import argparse
 import os
 import signal
 import subprocess
@@ -52,9 +54,11 @@ def check_can_interface(interface):
         return False
 
 
-def check_all_can_interfaces():
+def check_all_can_interfaces(eval_mode=False):
     """Check if all required CAN interfaces exist."""
-    required_interfaces = ["can_follower_r", "can_leader_r", "can_follower_l", "can_leader_l"]
+    required_interfaces = ["can_follower_r", "can_follower_l"]
+    if not eval_mode:
+        required_interfaces += ["can_leader_r", "can_leader_l"]
 
     missing_interfaces = []
 
@@ -135,12 +139,24 @@ def launch_server_process(can_channel, gripper, mode, server_port, use_encoder_s
 
 def main():
     """Main function to launch all server processes."""
+    parser = argparse.ArgumentParser(description="Launch bimanual Yam arm servers for LeRobot.")
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Eval mode: only start follower arm servers (skip leader/teaching handle arms).",
+    )
+    args = parser.parse_args()
+
+    eval_mode = args.eval
+    if eval_mode:
+        print("Running in EVAL mode (follower arms only, no leader arms)\n")
+
     processes = []
 
     try:
         # Check CAN interfaces
         print("Checking CAN interfaces...")
-        check_all_can_interfaces()
+        check_all_can_interfaces(eval_mode=eval_mode)
 
         # Define the server processes to launch
         server_configs = [
@@ -160,23 +176,27 @@ def main():
                 "server_port": 1235,
                 "use_encoder_server": False,
             },
-            # Right leader arm (enhanced server with encoder support)
-            {
-                "can_channel": "can_leader_r",
-                "gripper": "yam_teaching_handle",
-                "mode": "follower",
-                "server_port": 5001,
-                "use_encoder_server": True,  # Use enhanced server for encoder data
-            },
-            # Left leader arm (enhanced server with encoder support)
-            {
-                "can_channel": "can_leader_l",
-                "gripper": "yam_teaching_handle",
-                "mode": "follower",
-                "server_port": 5002,
-                "use_encoder_server": True,  # Use enhanced server for encoder data
-            },
         ]
+
+        if not eval_mode:
+            server_configs += [
+                # Right leader arm (enhanced server with encoder support)
+                {
+                    "can_channel": "can_leader_r",
+                    "gripper": "yam_teaching_handle",
+                    "mode": "follower",
+                    "server_port": 5001,
+                    "use_encoder_server": True,
+                },
+                # Left leader arm (enhanced server with encoder support)
+                {
+                    "can_channel": "can_leader_l",
+                    "gripper": "yam_teaching_handle",
+                    "mode": "follower",
+                    "server_port": 5002,
+                    "use_encoder_server": True,
+                },
+            ]
 
         # Launch all processes
         print("\nLaunching server processes...")
@@ -192,11 +212,14 @@ def main():
         print("\nServer setup:")
         print("  - Right follower arm: localhost:1234")
         print("  - Left follower arm:  localhost:1235")
-        print("  - Right leader arm:   localhost:5001")
-        print("  - Left leader arm:    localhost:5002")
-        print("\nYou can now use lerobot-record with:")
-        print("  --robot.type=bi_yam_follower")
-        print("  --teleop.type=bi_yam_leader")
+        if not eval_mode:
+            print("  - Right leader arm:   localhost:5001")
+            print("  - Left leader arm:    localhost:5002")
+            print("\nYou can now use lerobot-record with:")
+            print("  --robot.type=bi_yam_follower")
+            print("  --teleop.type=bi_yam_leader")
+        else:
+            print("\nFollower arms ready for eval (no leader arms started)")
         print("\nPress Ctrl+C to stop all server processes")
 
         # Wait for processes and handle termination
