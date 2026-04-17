@@ -181,6 +181,18 @@ class OpenVLAOFTPolicy(PreTrainedPolicy):
                 with open(cfg_path) as f:
                     overrides = json.load(f)
                 logger.info(f"Loaded config overrides from {cfg_path}: {list(overrides.keys())}")
+        else:
+            try:
+                from huggingface_hub import hf_hub_download
+
+                cfg_path = hf_hub_download(
+                    repo_id=model_path, filename="lerobot_config.json"
+                )
+                with open(cfg_path) as f:
+                    overrides = json.load(f)
+                logger.info(f"Loaded config overrides from HF Hub: {list(overrides.keys())}")
+            except Exception:
+                pass
 
         return OpenVLAOFTConfig(**overrides)
 
