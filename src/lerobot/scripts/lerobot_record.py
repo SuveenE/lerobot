@@ -494,7 +494,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 dataset.clear_episode_buffer()
                 continue
 
-            if recorded_episodes + 1 == cfg.dataset.num_episodes:
+            if recorded_episodes + 1 == cfg.dataset.num_episodes or events["stop_recording"]:
                 log_say("Stop recording", cfg.play_sounds, blocking=True)
 
                 robot.disconnect()
