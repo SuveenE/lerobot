@@ -29,6 +29,7 @@ from lerobot.datasets.utils import dataset_to_policy_features
 from lerobot.envs.configs import EnvConfig
 from lerobot.envs.utils import env_to_policy_features
 from lerobot.policies.act.configuration_act import ACTConfig
+from lerobot.policies.cosmos.configuration_cosmos import CosmosConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
@@ -117,6 +118,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.openvla_oft.modeling_openvla_oft import OpenVLAOFTPolicy
 
         return OpenVLAOFTPolicy
+    elif name == "cosmos":
+        from lerobot.policies.cosmos.modeling_cosmos import CosmosPolicy
+
+        return CosmosPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -164,6 +169,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return XVLAConfig(**kwargs)
     elif policy_type == "openvla_oft":
         return OpenVLAOFTConfig(**kwargs)
+    elif policy_type == "cosmos":
+        return CosmosConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 
@@ -228,6 +235,20 @@ def make_pre_post_processors(
         )
 
         return make_openvla_oft_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+            preprocessor_overrides=kwargs.get("preprocessor_overrides"),
+            postprocessor_overrides=kwargs.get("postprocessor_overrides"),
+        )
+
+    # Cosmos Policy also delegates preprocessing / unnormalization to its
+    # external deploy.py server, so it needs the same pass-through path.
+    if isinstance(policy_cfg, CosmosConfig):
+        from lerobot.policies.cosmos.processor_cosmos import (
+            make_cosmos_pre_post_processors,
+        )
+
+        return make_cosmos_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
             preprocessor_overrides=kwargs.get("preprocessor_overrides"),
