@@ -1135,7 +1135,7 @@ class RobotClient:
                         with contextlib.suppress(Exception):
                             self.teleop.disable_torque()
                     self.logger.info("=== HIL: resumed policy ===")
-                    log_say("Resuming policy", self.config.play_sounds)
+                    log_say("Resumed.", self.config.play_sounds)
 
                 # (b) SPACE just pressed — start a background pre-sync that
                 # drives the leader to the follower's current pose. We keep
@@ -1159,10 +1159,7 @@ class RobotClient:
                             for k, v in robot_obs_snapshot.items()
                             if k.endswith(".pos") and k in self.robot.observation_features
                         }
-                        log_say(
-                            "Policy paused. Wait for leader arms to move into position.",
-                            self.config.play_sounds,
-                        )
+                        log_say("Paused. Wait.", self.config.play_sounds)
 
                         def _sync_worker(tp=target_pos):
                             try:
@@ -1171,16 +1168,10 @@ class RobotClient:
                                     "[HIL] LEADER STATIONED -- safe to grab the handles. "
                                     "Press 'c' + Enter to take control, or 'p' + Enter to resume policy."
                                 )
-                                log_say(
-                                    "Leader stationed. Safe to take control.",
-                                    self.config.play_sounds,
-                                )
+                                log_say("Ready.", self.config.play_sounds)
                             except Exception as e:
                                 self.logger.warning(f"[HIL] pre-sync failed: {e}")
-                                log_say(
-                                    "Leader pre-sync failed. Do not grab the handles.",
-                                    self.config.play_sounds,
-                                )
+                                log_say("Sync failed.", self.config.play_sounds)
 
                         self._hil_sync_thread = threading.Thread(target=_sync_worker, daemon=True)
                         self._hil_sync_thread.start()
@@ -1195,7 +1186,7 @@ class RobotClient:
                         with contextlib.suppress(Exception):
                             self.teleop.disable_torque()
                     self.logger.info("=== HIL: human correction active ===")
-                    log_say("Taking control.", self.config.play_sounds)
+                    log_say("Control.", self.config.play_sounds)
 
                 paused = self.keyboard_events.get("policy_paused", False)
                 correcting = self.keyboard_events.get("correction_active", False)
