@@ -1135,7 +1135,7 @@ class RobotClient:
                         with contextlib.suppress(Exception):
                             self.teleop.disable_torque()
                     self.logger.info("=== HIL: resumed policy ===")
-                    log_say("Resumed.", self.config.play_sounds)
+                    log_say("Policy resumed.", self.config.play_sounds)
 
                 # (b) SPACE just pressed — start a background pre-sync that
                 # drives the leader to the follower's current pose. We keep
@@ -1186,7 +1186,7 @@ class RobotClient:
                         with contextlib.suppress(Exception):
                             self.teleop.disable_torque()
                     self.logger.info("=== HIL: human correction active ===")
-                    log_say("Control.", self.config.play_sounds)
+                    log_say("Taking control.", self.config.play_sounds)
 
                 paused = self.keyboard_events.get("policy_paused", False)
                 correcting = self.keyboard_events.get("correction_active", False)
