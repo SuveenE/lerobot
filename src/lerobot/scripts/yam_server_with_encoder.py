@@ -116,6 +116,7 @@ class ServerRobot:
         self._server.bind("get_joint_pos", self._robot.get_joint_pos)
         self._server.bind("command_joint_pos", self._robot.command_joint_pos)
         self._server.bind("command_joint_state", self._robot.command_joint_state)
+        self._server.bind("update_kp_kd", self._robot.update_kp_kd)
         self._server.bind("get_observations", self._robot.get_observations)
 
     def serve(self) -> None:

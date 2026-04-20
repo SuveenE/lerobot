@@ -32,3 +32,10 @@ class BiYamLeaderConfig(TeleoperatorConfig):
     # Server host (usually localhost for local setup)
     server_host: str = "localhost"
 
+    # Active-tracking gains used by enable_torque() for pre-takeover sync moves.
+    # At ~0.0 the leader is gravity-compensated free-drive (teleop mode); raising
+    # kp makes the leader actively track write_goal_positions(). These defaults
+    # are starting points; tune on hardware if the leader lags or jolts.
+    active_kp: float = 30.0
+    active_kd: float = 1.0
+
