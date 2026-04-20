@@ -222,6 +222,69 @@ right: {"type":"intelrealsense","serial_number_or_name":"323622271967","width":6
 
 The cameras can capture at 30 Hz; `RobotClient` subsamples to match `--fps 25`.
 
+## Recording evaluation rollouts while the policy drives
+
+`RobotClient` can save every episode as a LeRobotDataset v3 while Cosmos is executing, which is how you capture eval data for A/B comparisons or bootstrap follow-up training sets. Enable it with `--dataset.enabled true`:
+
+```bash
+  --dataset.enabled true \
+  --dataset.num_episodes 5 \
+  --dataset.repo_id your-org/eval_cosmos_cube_stack \
+  --dataset.push_to_hub true \
+  --dataset.max_episode_seconds 120 \
+  --dataset.reset_time_s 10 \
+  --dataset.video_encoding_batch_size 2
+```
+
+Common flags (full list in [`async_inference/configs.py`](../../async_inference/configs.py)):
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--dataset.enabled` | `false` | Turn recording on. |
+| `--dataset.repo_id` | — | Required if enabled. Format `user/eval_dataset`. |
+| `--dataset.root` | cache dir | Local directory for the dataset. |
+| `--dataset.push_to_hub` | `false` | Upload to the Hub when the session ends. |
+| `--dataset.private` | `true` | Keep the Hub repo private. |
+| `--dataset.use_videos` | `true` | Encode cameras as video (vs PNG frames). |
+| `--dataset.num_episodes` | `None` | Stop after N episodes (`None` = keyboard stop). |
+| `--dataset.max_episode_seconds` | `None` | Per-episode time cap. `None` = keyboard-only. |
+| `--dataset.reset_time_s` | `60` | Seconds given to reset the scene between episodes. |
+| `--dataset.resume` | `false` | Append to an existing local dataset. |
+| `--dataset.video_encoding_batch_size` | `1` | Batch multiple episodes before ffmpeg runs (speeds up short episodes). |
+
+### Keyboard controls (only when `--dataset.enabled true`)
+
+| Key (then Enter) | Effect |
+| --- | --- |
+| `n` | Save the current episode and start a new one. |
+| `s` | Save the current episode and stop recording. |
+| `b` | Discard the current episode and re-record it. |
+
+During the reset window, the robot smoothly moves to an `initial_position` hardcoded in [`async_inference/robot_client.py`](../../async_inference/robot_client.py); edit that constant if your YAM home pose is different.
+
+## Aggregate functions
+
+When a new action chunk arrives while the previous one is still executing, overlapping timesteps are blended by the aggregate function. The registry lives in [`async_inference/configs.py`](../../async_inference/configs.py):
+
+| `--aggregate_fn_name` | Formula |
+| --- | --- |
+| `weighted_average` (default) | `0.3 · old + 0.7 · new` |
+| `latest_only` | `new` |
+| `average` | `0.5 · old + 0.5 · new` |
+| `conservative` | `0.7 · old + 0.3 · new` |
+
+For Cosmos on YAM, `weighted_average` gives the smoothest motion. Switch to `latest_only` temporarily when debugging — it makes the effect of each new chunk visible in the joint traces.
+
+## Async-inference tuning cheat-sheet
+
+| Symptom | Try |
+| --- | --- |
+| Client logs "queue empty, waiting for server" | Increase `--actions_per_chunk` (toward 50); lower `--chunk_size_threshold` toward 0; confirm the GPU isn't thrashing. |
+| Jittery motion | Stick with `--aggregate_fn_name weighted_average` or try `conservative`; verify client + server `--fps` are both 25; verify `deploy.py` actually loaded the YAM stats file (not a stale default). |
+| Policy seems to ignore the scene | Confirm `--task` is non-empty and an exact T5 key; verify all three images appear in `deploy.py` logs. |
+| High network usage | Observations already go compressed; lower `--actions_per_chunk` to 15–25. |
+| Server errors on first request | Policy initialisation is lazy — the traceback lands in the `PolicyServer` log, not the `RobotClient` log. |
+
 ## YAM-specific gotchas
 
 - **Control rate must be 25 Hz.** NVIDIA's ALOHA reference model card explicitly states the policy was trained for 25 Hz control and performs poorly at other rates. Set `--fps 25` on both server and client.
