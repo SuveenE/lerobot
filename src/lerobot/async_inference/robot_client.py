@@ -59,18 +59,21 @@ top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width"
 #
 #   --teleop.type=bi_yam_leader
 #
-# With --teleop set, three extra single-key controls become active:
-#   SPACE : pause policy. Follower holds its last commanded pose; leader
-#           ramps (kp rises to BiYamLeaderConfig.active_kp) over ~2 s to
-#           mirror the follower so the operator can grab the handles.
-#           Observations stop being sent to the policy server.
-#   c     : take control. Leader torque drops back to free-drive; your
-#           teleop actions drive the follower and are recorded as frames.
-#   p     : hand control back to the policy. Action queue is flushed,
-#           must_go is set so the next tick sends a fresh observation.
+# With --teleop set, three extra controls become active (type + Enter in the
+# same terminal as n/b/s):
+#   space + Enter : pause policy. Follower holds its last commanded pose;
+#                   leader ramps (kp rises to BiYamLeaderConfig.active_kp)
+#                   over ~10 s to mirror the follower so the operator can
+#                   grab the handles. Observations stop going to the server.
+#   c + Enter     : take control. Leader torque drops back to free-drive;
+#                   your teleop actions drive the follower and are recorded.
+#   p + Enter     : hand control back to the policy. Action queue is flushed,
+#                   must_go is set so the next tick sends a fresh observation.
 #
-# SPACE / c / p are single-key (no Enter) via pynput and coexist with the
-# stdin n/b/s+Enter listener above. Episode-boundary controls are unchanged.
+# A single-keypress pynput listener is also started opportunistically (SPACE /
+# c / p without Enter), but it requires input focus + OS permissions and may
+# fail silently on headless/Wayland setups — the stdin path always works.
+# Episode-boundary controls (n/b/s + Enter) are unchanged.
 ```
 """
 
@@ -148,7 +151,7 @@ from .helpers import (
 def _teleop_has_motor_control(teleop: Teleoperator | None) -> bool:
     """True if the teleop can actively drive its joints.
 
-    Required for the 2 s pre-takeover sync where the leader mirrors the
+    Required for the pre-takeover sync where the leader mirrors the
     follower's pose before the human grabs the handles.
     """
     if teleop is None:
@@ -388,9 +391,35 @@ class RobotClient:
 
             self.logger.info(f"Dataset created at {self.dataset.root} with features: {list(self.dataset_features.keys())}")
 
+        # HIL extends the event dict with four extra keys; they're wired into the
+        # stdin listener below via extra_commands. `policy_paused` /
+        # `correction_active` are persistent state, `take_control` / `resume_policy`
+        # are transient signals consumed by control_loop().
+        extra_commands: dict | None = None
+        if self.hil_enabled:
+            extra_commands = {
+                "space": {
+                    "description": "HIL pause (follower holds, leader ramps to follower)",
+                    "message": "[HIL] PAUSED -- 'c' + Enter to take control, 'p' + Enter to resume policy",
+                    "events": {"policy_paused": True},
+                },
+                "c": {
+                    "description": "HIL take control (drop leader torque, record corrections)",
+                    "message": "[HIL] Taking control -- leader torque off",
+                    "events": {"take_control": True},
+                },
+                "p": {
+                    "description": "HIL resume policy (clear queue, fresh observation)",
+                    "message": "[HIL] Resuming policy",
+                    "events": {"resume_policy": True},
+                },
+            }
+
         # Initialize keyboard listener for episode control
         if not is_headless():
-            self.keyboard_listener, self.keyboard_events = init_keyboard_listener()
+            self.keyboard_listener, self.keyboard_events = init_keyboard_listener(
+                extra_commands=extra_commands
+            )
             self.logger.info("Keyboard controls enabled: 'n' = save episode, 's' = stop recording, 'b' = re-record episode")
         else:
             self.keyboard_events = {
@@ -398,26 +427,27 @@ class RobotClient:
                 "rerecord_episode": False,
                 "stop_recording": False,
             }
+            if self.hil_enabled:
+                self.keyboard_events.update(
+                    {
+                        "policy_paused": False,
+                        "correction_active": False,
+                        "take_control": False,
+                        "resume_policy": False,
+                    }
+                )
             self.logger.warning("Headless mode: keyboard controls not available. Use time-based episodes only.")
 
-        # HIL extends the event dict with four extra keys; the pynput listener owns them.
-        # `policy_paused` / `correction_active` are persistent state, `take_control` /
-        # `resume_policy` are transient signals consumed by control_loop().
-        if self.hil_enabled:
-            self.keyboard_events.update(
-                {
-                    "policy_paused": False,
-                    "correction_active": False,
-                    "take_control": False,
-                    "resume_policy": False,
-                }
+        if self.hil_enabled and not is_headless():
+            self.logger.info(
+                "HIL controls enabled (stdin + Enter): 'space' = pause, 'c' = take control, 'p' = resume policy"
             )
-            if not is_headless():
+            # Optional pynput listener gives single-keypress UX (no Enter) on machines
+            # where input focus + permissions allow it. Safe to fail silently; the
+            # stdin path above is the guaranteed channel.
+            with contextlib.suppress(Exception):
                 self.hil_keyboard_listener = _start_hil_keyboard_listener(
                     self.keyboard_events, self.logger
-                )
-                self.logger.info(
-                    "HIL controls enabled: SPACE = pause, 'c' = take control, 'p' = resume policy"
                 )
 
     @property
@@ -1126,7 +1156,7 @@ class RobotClient:
 
                         def _sync_worker(tp=target_pos):
                             try:
-                                _teleop_smooth_move_to(self.teleop, tp, duration_s=2.0, fps=50)
+                                _teleop_smooth_move_to(self.teleop, tp, duration_s=10.0, fps=50)
                             except Exception as e:
                                 self.logger.warning(f"[HIL] pre-sync failed: {e}")
 
