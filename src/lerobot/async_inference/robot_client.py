@@ -49,6 +49,28 @@ top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width"
 #
 # During reset, robot smoothly moves to the hardcoded initial_position
 # (defined in RobotClient.__init__). Update self.initial_position to your desired home position.
+
+# -----------------------------------------------------------------------------
+# Optional Human-in-the-Loop (HIL) correction during async inference
+# -----------------------------------------------------------------------------
+# Add a teleoperator (must implement enable_torque / disable_torque /
+# write_goal_positions — bi_yam_leader qualifies once yam_server_with_encoder.py
+# has been restarted to bind the update_kp_kd RPC):
+#
+#   --teleop.type=bi_yam_leader
+#
+# With --teleop set, three extra single-key controls become active:
+#   SPACE : pause policy. Follower holds its last commanded pose; leader
+#           ramps (kp rises to BiYamLeaderConfig.active_kp) over ~2 s to
+#           mirror the follower so the operator can grab the handles.
+#           Observations stop being sent to the policy server.
+#   c     : take control. Leader torque drops back to free-drive; your
+#           teleop actions drive the follower and are recorded as frames.
+#   p     : hand control back to the policy. Action queue is flushed,
+#           must_go is set so the next tick sends a fresh observation.
+#
+# SPACE / c / p are single-key (no Enter) via pynput and coexist with the
+# stdin n/b/s+Enter listener above. Episode-boundary controls are unchanged.
 ```
 """
 
@@ -83,6 +105,11 @@ from lerobot.robots import (  # noqa: F401
     so100_follower,
     so101_follower,
 )
+from lerobot.teleoperators import (  # noqa: F401
+    Teleoperator,
+    TeleoperatorConfig,
+    make_teleoperator_from_config,
+)
 from lerobot.transport import (
     services_pb2,  # type: ignore
     services_pb2_grpc,  # type: ignore
@@ -108,6 +135,95 @@ from .helpers import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Human-in-the-Loop (HIL) helpers
+#
+# Kept local to the async_inference module so the client stays self-contained.
+# They mirror the semantics of examples/hil/hil_utils.py but are decoupled
+# from any in-process policy inference (which async_inference does not do —
+# the policy runs on the remote policy_server).
+# ---------------------------------------------------------------------------
+
+
+def _teleop_has_motor_control(teleop: Teleoperator | None) -> bool:
+    """True if the teleop can actively drive its joints.
+
+    Required for the 2 s pre-takeover sync where the leader mirrors the
+    follower's pose before the human grabs the handles.
+    """
+    if teleop is None:
+        return False
+    return all(hasattr(teleop, a) for a in ("enable_torque", "disable_torque", "write_goal_positions"))
+
+
+def _teleop_smooth_move_to(
+    teleop: Teleoperator,
+    target_pos: dict[str, float],
+    duration_s: float = 2.0,
+    fps: int = 50,
+) -> None:
+    """Ramp the leader from its current pose to `target_pos` over `duration_s`.
+
+    No-op if the teleop lacks active-motor control. Runs in the caller's
+    thread; for the HIL pause flow this is dispatched on a short-lived
+    background thread so the main control loop can keep holding the
+    follower's pose in parallel.
+    """
+    if not _teleop_has_motor_control(teleop):
+        return
+
+    teleop.enable_torque()
+    current = teleop.get_action()
+    steps = max(int(duration_s * fps), 1)
+    for step in range(steps + 1):
+        t = step / steps
+        interp = {
+            k: (current[k] * (1 - t) + target_pos[k] * t) if k in target_pos else current[k]
+            for k in current
+        }
+        teleop.write_goal_positions(interp)
+        time.sleep(1.0 / fps)
+
+
+def _start_hil_keyboard_listener(events: dict, logger: logging.Logger):
+    """Pynput listener that mutates HIL state keys in `events`.
+
+    Stacks on top of the stdin-based `n/b/s + Enter` listener (which owns
+    episode boundaries). Only mutates keys this listener owns:
+        - policy_paused, correction_active (state)
+        - take_control, resume_policy (transient signals, consumed by control_loop)
+    """
+    try:
+        from pynput import keyboard
+    except ImportError:
+        logger.warning("[HIL] pynput not installed — SPACE / c / p controls disabled")
+        return None
+
+    def on_press(key):
+        try:
+            if key == keyboard.Key.space:
+                if not events.get("policy_paused") and not events.get("correction_active"):
+                    logger.info("[HIL] PAUSED — 'c' to take control, 'p' to resume policy")
+                    events["policy_paused"] = True
+                return
+            char = getattr(key, "char", None)
+            if char == "c":
+                if events.get("policy_paused") and not events.get("correction_active"):
+                    logger.info("[HIL] Taking control — leader torque off")
+                    events["take_control"] = True
+            elif char == "p":
+                if events.get("policy_paused") or events.get("correction_active"):
+                    logger.info("[HIL] Resuming policy")
+                    events["resume_policy"] = True
+        except Exception as e:
+            logger.debug(f"[HIL] key handler error: {e}")
+
+    listener = keyboard.Listener(on_press=on_press)
+    listener.daemon = True
+    listener.start()
+    return listener
+
+
 class RobotClient:
     prefix = "robot_client"
     logger = get_logger(prefix)
@@ -122,6 +238,17 @@ class RobotClient:
         self.config = config
         self.robot = make_robot_from_config(config.robot)
         self.robot.connect()
+
+        # Optional HIL teleoperator — only instantiated when --teleop.* is supplied.
+        # Connection happens in start() so draccus validation errors surface before
+        # we touch any hardware.
+        self.teleop: Teleoperator | None = (
+            make_teleoperator_from_config(config.teleop) if config.teleop is not None else None
+        )
+        self.hil_enabled: bool = self.teleop is not None
+        self.hil_keyboard_listener = None
+        # In-flight pre-sync thread (SPACE handler drives leader to follower pose)
+        self._hil_sync_thread: threading.Thread | None = None
 
         lerobot_features = map_robot_keys_to_lerobot_features(self.robot)
 
@@ -273,6 +400,26 @@ class RobotClient:
             }
             self.logger.warning("Headless mode: keyboard controls not available. Use time-based episodes only.")
 
+        # HIL extends the event dict with four extra keys; the pynput listener owns them.
+        # `policy_paused` / `correction_active` are persistent state, `take_control` /
+        # `resume_policy` are transient signals consumed by control_loop().
+        if self.hil_enabled:
+            self.keyboard_events.update(
+                {
+                    "policy_paused": False,
+                    "correction_active": False,
+                    "take_control": False,
+                    "resume_policy": False,
+                }
+            )
+            if not is_headless():
+                self.hil_keyboard_listener = _start_hil_keyboard_listener(
+                    self.keyboard_events, self.logger
+                )
+                self.logger.info(
+                    "HIL controls enabled: SPACE = pause, 'c' = take control, 'p' = resume policy"
+                )
+
     @property
     def running(self):
         return not self.shutdown_event.is_set()
@@ -289,6 +436,22 @@ class RobotClient:
     def start(self):
         """Start the robot client and connect to the policy server"""
         try:
+            # Connect HIL teleop before the gRPC handshake — connection failures
+            # are surfaced early, and the leader is immediately ready to receive
+            # write_goal_positions() commands when the first SPACE is pressed.
+            if self.teleop is not None:
+                try:
+                    self.teleop.connect()
+                    if not _teleop_has_motor_control(self.teleop):
+                        self.logger.warning(
+                            "[HIL] teleop %s lacks enable_torque/disable_torque/write_goal_positions — "
+                            "pre-takeover sync will be skipped; human must manually line up the leader",
+                            type(self.teleop).__name__,
+                        )
+                except Exception as e:
+                    self.logger.error(f"[HIL] Failed to connect teleop: {e}")
+                    raise
+
             # client-server handshake
             start_time = time.perf_counter()
             self.stub.Ready(services_pb2.Empty())
@@ -329,10 +492,21 @@ class RobotClient:
         self._clear_action_queue()
         self.logger.info("Action queue cleared")
 
-        # Stop keyboard listener if active
+        # Stop keyboard listeners if active (stdin + optional pynput HIL listener)
         if self.keyboard_listener is not None:
             with contextlib.suppress(Exception):
                 self.keyboard_listener.stop()
+        if self.hil_keyboard_listener is not None:
+            with contextlib.suppress(Exception):
+                self.hil_keyboard_listener.stop()
+
+        # Disconnect teleop before the robot so the leader releases torque cleanly.
+        if self.teleop is not None:
+            with contextlib.suppress(Exception):
+                self.teleop.disable_torque()
+            with contextlib.suppress(Exception):
+                if getattr(self.teleop, "is_connected", False):
+                    self.teleop.disconnect()
 
         # Disconnect robot and policy server (if not already done in control_loop)
         if not self._robot_disconnected:
@@ -768,6 +942,20 @@ class RobotClient:
                     break
         self.logger.debug("Action queue cleared")
 
+    def _reset_hil_state(self) -> None:
+        """Reset HIL state at episode boundaries.
+
+        Idempotent no-op when HIL is disabled. Also drops leader torque so the
+        next episode starts in the usual gravity-compensated free-drive state.
+        """
+        if not self.hil_enabled or self.keyboard_events is None:
+            return
+        for k in ("policy_paused", "correction_active", "take_control", "resume_policy"):
+            self.keyboard_events[k] = False
+        if self.teleop is not None:
+            with contextlib.suppress(Exception):
+                self.teleop.disable_torque()
+
     def _slow_move_to_position(self, target_position: dict[str, float], num_steps: int = 100, step_sleep: float = 0.03) -> None:
         """Slowly move robot from current position to target position.
 
@@ -891,13 +1079,110 @@ class RobotClient:
         while self.running:
             control_loop_start = time.perf_counter()
 
+            # --- HIL state transitions ---------------------------------------
+            # Resolved BEFORE the three control sub-steps so the rest of the
+            # loop sees a consistent mode for this tick.
+            paused = False
+            correcting = False
+            if self.hil_enabled and self.keyboard_events is not None:
+                # (a) Resume policy — clears both pause and correction, flushes
+                # stale policy actions, re-arms must_go so the next tick sends a
+                # fresh observation to the remote policy server.
+                if self.keyboard_events.get("resume_policy"):
+                    self.keyboard_events["resume_policy"] = False
+                    self.keyboard_events["policy_paused"] = False
+                    self.keyboard_events["correction_active"] = False
+                    self.keyboard_events["take_control"] = False
+                    self._clear_action_queue()
+                    self.must_go.set()
+                    if self.teleop is not None:
+                        with contextlib.suppress(Exception):
+                            self.teleop.disable_torque()
+                    self.logger.info("=== HIL: resumed policy ===")
+                    log_say("Resuming policy", self.config.play_sounds)
+
+                # (b) SPACE just pressed — start a background pre-sync that
+                # drives the leader to the follower's current pose. We keep
+                # ticking the loop so `_last_action` keeps holding the follower
+                # pose while the sync thread runs; blocking the loop here would
+                # stop the motor command stream.
+                if self.keyboard_events.get("policy_paused") and (
+                    self._hil_sync_thread is None or not self._hil_sync_thread.is_alive()
+                ) and not self.keyboard_events.get("correction_active") and not self.keyboard_events.get(
+                    "take_control"
+                ):
+                    # Drop any pre-pause policy actions the moment we pause so
+                    # no stale chunk can slip through while we're transitioning
+                    # to correction or during the pre-sync ramp. Also drains
+                    # actions that arrive from receive_actions() after pause.
+                    self._clear_action_queue()
+                    if self.teleop is not None and _teleop_has_motor_control(self.teleop):
+                        robot_obs_snapshot = self.robot.get_observation()
+                        target_pos = {
+                            k: v
+                            for k, v in robot_obs_snapshot.items()
+                            if k.endswith(".pos") and k in self.robot.observation_features
+                        }
+
+                        def _sync_worker(tp=target_pos):
+                            try:
+                                _teleop_smooth_move_to(self.teleop, tp, duration_s=2.0, fps=50)
+                            except Exception as e:
+                                self.logger.warning(f"[HIL] pre-sync failed: {e}")
+
+                        self._hil_sync_thread = threading.Thread(target=_sync_worker, daemon=True)
+                        self._hil_sync_thread.start()
+
+                # (c) `c` pressed — transition pause -> correction. Drop leader
+                # torque so the operator's hand controls the joints again.
+                if self.keyboard_events.get("take_control"):
+                    self.keyboard_events["take_control"] = False
+                    self.keyboard_events["correction_active"] = True
+                    self.keyboard_events["policy_paused"] = False
+                    if self.teleop is not None:
+                        with contextlib.suppress(Exception):
+                            self.teleop.disable_torque()
+                    self.logger.info("=== HIL: human correction active ===")
+
+                paused = self.keyboard_events.get("policy_paused", False)
+                correcting = self.keyboard_events.get("correction_active", False)
+
+                # Defense-in-depth: while paused or correcting, keep draining any
+                # late-arriving chunks that receive_actions() may push into the
+                # queue (server was mid-inference when SPACE was pressed). This
+                # guarantees that on `p` the queue is empty and must_go forces a
+                # fresh observation -> fresh chunk planned from the current pose.
+                if paused or correcting:
+                    self._clear_action_queue()
+
             """Control loop: (1) Performing actions, when available"""
-            if self.actions_available():
+            if correcting and self.teleop is not None:
+                # Human drives the follower via the leader. Action is recorded
+                # below exactly like an autonomous action, which is the whole
+                # point of HIL data collection.
+                try:
+                    tele_action = self.teleop.get_action()
+                    self.robot.send_action(tele_action)
+                    _performed_action = tele_action
+                    _last_action = tele_action
+                except Exception as e:
+                    self.logger.warning(f"[HIL] teleop get_action failed: {e}")
+            elif paused:
+                # Hold the follower pose via the last commanded action while
+                # the leader is ramping (or waiting for 'c').
+                if _last_action is not None:
+                    self.robot.send_action(_last_action)
+            elif self.actions_available():
                 _performed_action = self.control_loop_action(verbose)
                 _last_action = _performed_action  # Track for recording
 
-            """Control loop: (2) Streaming observations to the remote policy server"""
-            if self._ready_to_send_observation():
+            """Control loop: (2) Streaming observations to the remote policy server
+
+            HIL gates this: we stop publishing while paused or correcting so the
+            policy_server doesn't burn cycles on stale / off-distribution frames.
+            On resume, the must_go flag set above forces a fresh send next tick.
+            """
+            if not paused and not correcting and self._ready_to_send_observation():
                 _captured_observation = self.control_loop_observation(task, verbose)
 
             """Control loop: (3) Recording frame to dataset (if enabled)
@@ -906,8 +1191,13 @@ class RobotClient:
             - Always capture fresh observation for recording (not just when sending to server)
             - Use the most recently executed action
             - Record every loop iteration once we have valid data
+
+            HIL: skip recording during pause (robot is just holding pose and the
+            leader is being dragged by the pre-sync — neither frame is useful).
+            Correction frames ARE recorded — that's the RaC recovery+correction
+            data the operator is trying to collect.
             """
-            if recording_active and _last_action is not None:
+            if recording_active and _last_action is not None and not paused:
                 # Get fresh observation for recording (independent of server send rate)
                 recording_observation = self.robot.get_observation()
                 self._record_frame(
@@ -922,6 +1212,7 @@ class RobotClient:
                 if self.keyboard_events is not None and self.keyboard_events.get("rerecord_episode", False):
                     self.keyboard_events["rerecord_episode"] = False
                     self.keyboard_events["exit_early"] = False  # Clear to prevent reset period from exiting immediately
+                    self._reset_hil_state()
                     self.logger.info("Re-recording episode - discarding current episode...")
                     log_say("Re-record episode", self.config.play_sounds)
 
@@ -946,6 +1237,7 @@ class RobotClient:
                 if should_save:
                     self._save_current_episode()
                     recorded_episodes += 1
+                    self._reset_hil_state()
 
                     # Check if we've reached the target number of episodes for this session
                     num_episodes_target = self.config.dataset.num_episodes
