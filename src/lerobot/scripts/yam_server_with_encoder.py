@@ -73,6 +73,15 @@ class EnhancedYamRobot(Robot):
         """Command the robot to a given state."""
         self._robot.command_joint_state(joint_state)
 
+    def update_kp_kd(self, kp: np.ndarray, kd: np.ndarray) -> None:
+        """Forward gain updates to the underlying MotorChainRobot.
+
+        Used by HIL teleop (bi_yam_leader) to stiffen the leader during pause
+        and drop gains for human takeover. Raises AttributeError at import time
+        only if the installed i2rt version is too old to expose this.
+        """
+        self._robot.update_kp_kd(kp, kd)
+
     def get_observations(self) -> Dict[str, np.ndarray]:
         """
         Get the current observations of the robot.
@@ -116,8 +125,14 @@ class ServerRobot:
         self._server.bind("get_joint_pos", self._robot.get_joint_pos)
         self._server.bind("command_joint_pos", self._robot.command_joint_pos)
         self._server.bind("command_joint_state", self._robot.command_joint_state)
-        self._server.bind("update_kp_kd", self._robot.update_kp_kd)
         self._server.bind("get_observations", self._robot.get_observations)
+        # update_kp_kd is optional: only present on i2rt versions that support
+        # runtime gain updates. Without it the server still works for autonomous
+        # use; HIL pause/takeover is what needs it on the leader.
+        if hasattr(self._robot, "update_kp_kd"):
+            self._server.bind("update_kp_kd", self._robot.update_kp_kd)
+        else:
+            print(f"[Server:{port}] WARNING: robot has no update_kp_kd; HIL pause/takeover will be unavailable")
 
     def serve(self) -> None:
         """Serve the robot."""
