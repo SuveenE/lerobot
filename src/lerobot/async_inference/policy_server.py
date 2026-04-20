@@ -60,6 +60,7 @@ from .helpers import (
     TimedAction,
     TimedObservation,
     get_logger,
+    infer_rename_map,
     observations_similar,
     raw_observation_to_observation,
 )
@@ -88,6 +89,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy_type = None
         self.lerobot_features = None
         self.actions_per_chunk = None
+        self.rename_map: dict[str, str] = {}
         self.policy = None
         self.pretrained_name_or_path = None  # Track currently loaded model
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
@@ -185,6 +187,10 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.policy_type = policy_specs.policy_type
             self.lerobot_features = policy_specs.lerobot_features
             self.actions_per_chunk = policy_specs.actions_per_chunk
+            self.rename_map = (
+                policy_specs.rename_map
+                or infer_rename_map(self.lerobot_features, self.policy_image_features)
+            )
             return services_pb2.Empty()
 
         # Different model requested - clear the old one first
@@ -206,6 +212,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy.to(self.device)
         self.pretrained_name_or_path = policy_specs.pretrained_name_or_path  # Track loaded model
 
+        # Auto-derive rename_map if the client didn't provide one
+        self.rename_map = (
+            policy_specs.rename_map
+            or infer_rename_map(self.lerobot_features, self.policy_image_features)
+        )
+
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
         self.preprocessor, self.postprocessor = make_pre_post_processors(
@@ -213,7 +225,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             pretrained_path=policy_specs.pretrained_name_or_path,
             preprocessor_overrides={
                 "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
+                "rename_observations_processor": {"rename_map": self.rename_map},
             },
             postprocessor_overrides={"device_processor": device_override},
         )
@@ -376,48 +388,34 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
     def _get_action_chunk(self, observation: dict[str, torch.Tensor]) -> torch.Tensor:
         """Get an action chunk from the policy."""
-        
-        self.logger.info(f"Observation keys before processing: {list(observation.keys())}")
-        
-        # For policies that use internal queues (diffusion, vqbet, tdmpc),
-        # we need to populate their queues before calling predict_action_chunk
-        if hasattr(self.policy, '_queues') and self.policy._queues is not None:
-            self.logger.info(f"Policy has queues with keys: {list(self.policy._queues.keys())}")
-            self.logger.info(f"Queue sizes before populate: {[(k, len(v)) for k, v in self.policy._queues.items()]}")
-            
-            # Stack images into OBS_IMAGES if the policy expects it
+
+        # Policies that use observation queues for temporal stacking (diffusion, vqbet, tdmpc, act)
+        # need server-side queue population. VLA policies (pi0, pi05, smolvla, xvla) handle
+        # observations directly in predict_action_chunk — skip this block for them.
+        has_obs_queues = (
+            hasattr(self.policy, '_queues')
+            and self.policy._queues is not None
+            and any(k != ACTION for k in self.policy._queues)
+        )
+
+        if has_obs_queues:
             if self.policy.config.image_features:
-                self.logger.info(f"Policy image_features: {list(self.policy.config.image_features.keys())}")
-                observation = dict(observation)  # shallow copy
-                try:
-                    observation[OBS_IMAGES] = torch.stack(
-                        [observation[key] for key in self.policy.config.image_features],
-                        dim=-4
-                    )
-                    self.logger.info(f"Stacked images shape: {observation[OBS_IMAGES].shape}")
-                except KeyError as e:
-                    self.logger.error(f"Missing key when stacking images: {e}")
-                    self.logger.error(f"Available keys: {list(observation.keys())}")
-                    raise
+                observation = dict(observation)
+                observation[OBS_IMAGES] = torch.stack(
+                    [observation[key] for key in self.policy.config.image_features],
+                    dim=-4
+                )
 
-            # Populate the policy's internal queues (exclude ACTION to avoid None values)
             self.policy._queues = populate_queues(self.policy._queues, observation, exclude_keys=[ACTION])
-            self.logger.info(f"Queue sizes after populate: {[(k, len(v)) for k, v in self.policy._queues.items()]}")
 
-            # Filter observation to only include keys the policy queues expect
-            # This prevents predict_action_chunk from trying to stack empty queues
-            # But preserve image and language keys which are processed separately by VLA policies
             observation = {
                 k: v for k, v in observation.items()
                 if (k in self.policy._queues and k != ACTION)
                 or k.startswith(OBS_IMAGES)
                 or k.startswith(OBS_LANGUAGE)
             }
-            self.logger.info(f"Filtered observation keys: {list(observation.keys())}")
 
-        self.logger.info(f"Observation keys passed to predict_action_chunk: {list(observation.keys())}")
         chunk = self.policy.predict_action_chunk(observation)
-        self.logger.info(f"Action chunk shape from policy: {chunk.shape}")
         
         if chunk.ndim != 3:
             chunk = chunk.unsqueeze(0)
@@ -440,6 +438,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             observation_t.get_observation(),
             self.lerobot_features,
             self.policy_image_features,
+            rename_map=self.rename_map,
         )
         prepare_time = time.perf_counter() - start_prepare
 
