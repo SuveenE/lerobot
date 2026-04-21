@@ -34,6 +34,7 @@ SUPPORTED_POLICIES = [
     "xvla",
     "openvla_oft",
     "cosmos",
+    "m",
 ]
 
 # TODO: Add all other robots
