@@ -281,7 +281,12 @@ class MPolicy(PreTrainedPolicy):
             ) from e
 
         # -- Parse response --
-        raw_response = resp.json()
+        # ``json_numpy.loads`` is a strict superset of ``json.loads``: it
+        # transparently decodes ndarray-encoded dicts of the form
+        # ``{"__ndarray__": ..., "dtype": ..., "shape": ...}`` while still
+        # handling plain JSON (lists/dicts) unchanged. Using it avoids the
+        # need for a global ``json_numpy.patch()`` side effect.
+        raw_response = json_numpy.loads(resp.text)
         if isinstance(raw_response, str):
             raw_response = json_numpy.loads(raw_response)
 
