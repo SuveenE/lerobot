@@ -67,12 +67,13 @@ top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width"
 #               handles. Observations stop going to the server.
 #   c + Enter : take control. Leader torque drops back to free-drive; your
 #               teleop actions drive the follower and are recorded.
-#   p + Enter : hand control back to the policy. Action queue is flushed,
-#               must_go is set so the next tick sends a fresh observation.
+#   r + Enter : resume — hand control back to the policy. Action queue is
+#               flushed, must_go is set so the next tick sends a fresh
+#               observation.
 #
-# A single-keypress pynput listener is also started opportunistically (SPACE /
-# c / p without Enter), but it requires input focus + OS permissions and may
-# fail silently on headless/Wayland setups — the stdin path always works.
+# A single-keypress pynput listener is also started opportunistically
+# (SPACE/h/c/r without Enter), but it requires input focus + OS permissions and
+# may fail silently on headless/Wayland setups — the stdin path always works.
 # Episode-boundary controls (n/b/s + Enter) are unchanged.
 ```
 """
@@ -199,7 +200,7 @@ def _start_hil_keyboard_listener(events: dict, logger: logging.Logger):
     try:
         from pynput import keyboard
     except ImportError:
-        logger.warning("[HIL] pynput not installed — SPACE / c / p controls disabled")
+        logger.warning("[HIL] pynput not installed — single-keypress SPACE/h/c/r controls disabled")
         return None
 
     def on_press(key):
@@ -209,14 +210,14 @@ def _start_hil_keyboard_listener(events: dict, logger: logging.Logger):
             # pynput works, 'h' matches the stdin path used everywhere else.
             if key == keyboard.Key.space or char == "h":
                 if not events.get("policy_paused") and not events.get("correction_active"):
-                    logger.info("[HIL] PAUSED — 'c' to take control, 'p' to resume policy")
+                    logger.info("[HIL] PAUSED — 'c' to take control, 'r' to resume policy")
                     events["policy_paused"] = True
                 return
             if char == "c":
                 if events.get("policy_paused") and not events.get("correction_active"):
                     logger.info("[HIL] Taking control — leader torque off")
                     events["take_control"] = True
-            elif char == "p":
+            elif char == "r":
                 if events.get("policy_paused") or events.get("correction_active"):
                     logger.info("[HIL] Resuming policy")
                     events["resume_policy"] = True
@@ -414,7 +415,7 @@ class RobotClient:
                     "message": "[HIL] Taking control -- leader torque off",
                     "events": {"take_control": True},
                 },
-                "p": {
+                "r": {
                     "description": "HIL resume policy (clear queue, fresh observation)",
                     "message": "[HIL] Resuming policy",
                     "events": {"resume_policy": True},
@@ -446,7 +447,7 @@ class RobotClient:
 
         if self.hil_enabled and not is_headless():
             self.logger.info(
-                "HIL controls enabled (stdin + Enter): 'h' = pause, 'c' = take control, 'p' = resume policy"
+                "HIL controls enabled (stdin + Enter): 'h' = pause, 'c' = take control, 'r' = resume policy"
             )
             # Optional pynput listener gives single-keypress UX (no Enter) on machines
             # where input focus + permissions allow it. Safe to fail silently; the
@@ -1166,7 +1167,7 @@ class RobotClient:
                                 _teleop_smooth_move_to(self.teleop, tp, duration_s=10.0, fps=50)
                                 self.logger.info(
                                     "[HIL] LEADER STATIONED -- safe to grab the handles. "
-                                    "Press 'c' + Enter to take control, or 'p' + Enter to resume policy."
+                                    "Press 'c' + Enter to take control, or 'r' + Enter to resume policy."
                                 )
                                 log_say("Safe to take control.", self.config.play_sounds)
                             except Exception as e:
