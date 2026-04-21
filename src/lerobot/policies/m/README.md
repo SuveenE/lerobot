@@ -1,6 +1,6 @@
 # M Policy (External Server Mode)
 
-This policy integrates an external inference server into lerobot's async inference system by delegating inference to a FastAPI-style HTTPS server over a simple `POST /act` JSON contract.
+This policy integrates an external inference server into lerobot's async inference system by delegating inference to a FastAPI-style HTTPS server over a simple `POST <server_url>` JSON contract. The route name (e.g. `/act`, `/predict`, `/v1/infer`) is entirely up to the server — the wrapper POSTs to the exact URL configured in `MConfig.server_url` without appending or rewriting any path.
 
 The model runs on a remote GPU host (e.g. a tunneled endpoint or a dedicated inference service). Lerobot's `PolicyServer` acts as a thin proxy — it receives observations from the `RobotClient`, forwards them to the external server over HTTPS, and returns the predicted actions. No heavy dependencies (transformers, peft, etc.) are needed on the lerobot side.
 
@@ -26,7 +26,7 @@ The `PolicyServer` and the external inference server run on **different hosts**.
 
 ## HTTP contract
 
-The M policy wrapper sends a single `POST {server_url}` request per inference. The body is a raw `json_numpy`-serialized dict with `Content-Type: application/json`:
+The M policy wrapper sends a single `POST {server_url}` request per inference. The path is whatever you put in `server_url` (commonly `/act`, but arbitrary). The body is a raw `json_numpy`-serialized dict with `Content-Type: application/json`:
 
 | Key | Type | Notes |
 |---|---|---|
@@ -113,12 +113,17 @@ The wrapper never loads or downloads model weights — only an optional `lerobot
 
 ## Step 3: Start lerobot PolicyServer
 
+Launch the policy server as a detached background process with `nohup` so it survives the shell session and writes its output to a log file:
+
 ```bash
-python -m lerobot.async_inference.policy_server \
+nohup python -m lerobot.async_inference.policy_server \
   --host=0.0.0.0 \
   --port=8000 \
-  --fps=30
+  --fps=30 \
+  > policy_server.log 2>&1 &
 ```
+
+The command prints the background PID and returns immediately. Tail the log with `tail -f policy_server.log` to confirm it started, and stop it later with `pkill -f 'lerobot.async_inference.policy_server'` (or `kill <PID>`).
 
 ### Overriding `server_url` per process (multi-server setups)
 
@@ -130,32 +135,47 @@ Precedence (highest wins):
 2. `server_url` in `lerobot_config.json`
 3. `MConfig` dataclass default
 
-Example — three lerobot policy servers, each proxying to a different external endpoint:
+Example — three lerobot policy servers launched as detached background processes with `nohup`, each proxying to a different external endpoint and writing logs to its own file:
 
 ```bash
-# Terminal 1 — proxies to external endpoint A
+# Server A -> proxies to external endpoint A (port 8000)
 LEROBOT_M_SERVER_URL=https://m-server-a.example.com/act \
-python -m lerobot.async_inference.policy_server \
-  --host=0.0.0.0 --port=8000 --fps=30
+nohup python -m lerobot.async_inference.policy_server \
+  --host=0.0.0.0 --port=8000 --fps=30 \
+  > policy_server_a.log 2>&1 &
 
-# Terminal 2 — proxies to external endpoint B
+# Server B -> proxies to external endpoint B (port 8001)
 LEROBOT_M_SERVER_URL=https://m-server-b.example.com/act \
-python -m lerobot.async_inference.policy_server \
-  --host=0.0.0.0 --port=8001 --fps=30
+nohup python -m lerobot.async_inference.policy_server \
+  --host=0.0.0.0 --port=8001 --fps=30 \
+  > policy_server_b.log 2>&1 &
 
-# Terminal 3 — proxies to external endpoint C
+# Server C -> proxies to external endpoint C (port 8002)
 LEROBOT_M_SERVER_URL=https://m-server-c.example.com/act \
-python -m lerobot.async_inference.policy_server \
-  --host=0.0.0.0 --port=8002 --fps=30
+nohup python -m lerobot.async_inference.policy_server \
+  --host=0.0.0.0 --port=8002 --fps=30 \
+  > policy_server_c.log 2>&1 &
 ```
 
-When the override is applied, you'll see a log line like:
+Each command prints the background PID and returns immediately. Useful follow-up commands:
 
-```
-Overriding server_url from LEROBOT_M_SERVER_URL: 'https://localhost:8777/act' -> 'https://m-server-a.example.com/act'
+```bash
+# Tail any server's output
+tail -f policy_server_a.log
+
+# Confirm the env-var override was applied
+grep 'Overriding server_url' policy_server_a.log
+# -> Overriding server_url from LEROBOT_M_SERVER_URL: 'https://localhost:8777/act' -> 'https://m-server-a.example.com/act'
+
+# List all running policy servers (and capture their PIDs)
+pgrep -af 'lerobot.async_inference.policy_server'
+
+# Stop a specific server (by port, by log name, or by PID)
+pkill -f 'policy_server.*--port=8000'
+# or: kill <PID>
 ```
 
-The same env var works for `docker run -e LEROBOT_M_SERVER_URL=...`, systemd unit files, tmux windows, etc.
+The same `LEROBOT_M_SERVER_URL` env var also works with `docker run -e LEROBOT_M_SERVER_URL=...`, systemd unit files, tmux windows, etc.
 
 ## Step 4: Start RobotClient (robot machine)
 

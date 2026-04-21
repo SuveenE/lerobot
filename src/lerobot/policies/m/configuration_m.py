@@ -51,9 +51,11 @@ class MConfig(PreTrainedConfig):
     wrist_image_keys: list[str] = field(default_factory=lambda: ["right"])
 
     # --- External server settings ---
-    # The external inference server is typically reached over HTTPS (e.g. a
-    # tunneled/public endpoint). Override via lerobot_config.json for your
-    # deployment.
+    # Full URL (including path) of the external inference endpoint. The
+    # wrapper POSTs the observation JSON to this URL verbatim -- no path is
+    # appended. The ``/act`` suffix in the default is a common convention
+    # (inherited from OpenVLA/PI-style servers) but is not required; any
+    # route the server exposes will work.
     server_url: str = "https://localhost:8777/act"
 
     # Maps lerobot camera keys to the observation dict keys expected by the

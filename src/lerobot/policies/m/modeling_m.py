@@ -87,10 +87,13 @@ class MPolicy(PreTrainedPolicy):
 
         instance._populate_features(config)
 
-        # Best-effort reachability check (don't fail if server isn't up yet)
+        # Best-effort reachability check (don't fail if server isn't up yet).
+        # We simply GET the configured ``server_url``; any HTTP response --
+        # including 404 or 405 for a POST-only route -- is sufficient proof
+        # the server is reachable. We don't assume any particular route name
+        # (e.g. ``/act``), so this works for arbitrary endpoints.
         try:
-            base_url = config.server_url.rsplit("/act", 1)[0] if config.server_url.endswith("/act") else config.server_url
-            resp = requests.get(base_url, timeout=3)
+            resp = requests.get(config.server_url, timeout=3)
             logger.info(f"External server reachable (HTTP {resp.status_code})")
         except Exception:
             logger.warning(
