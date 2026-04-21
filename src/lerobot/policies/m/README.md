@@ -120,6 +120,43 @@ python -m lerobot.async_inference.policy_server \
   --fps=30
 ```
 
+### Overriding `server_url` per process (multi-server setups)
+
+You can override `MConfig.server_url` at launch time by setting the `LEROBOT_M_SERVER_URL` environment variable. This is the cleanest way to run **multiple lerobot `PolicyServer` processes that each point at a different external inference endpoint** without having to maintain a separate `lerobot_config.json` per process.
+
+Precedence (highest wins):
+
+1. `LEROBOT_M_SERVER_URL` env var
+2. `server_url` in `lerobot_config.json`
+3. `MConfig` dataclass default
+
+Example — three lerobot policy servers, each proxying to a different external endpoint:
+
+```bash
+# Terminal 1 — proxies to external endpoint A
+LEROBOT_M_SERVER_URL=https://m-server-a.example.com/act \
+python -m lerobot.async_inference.policy_server \
+  --host=0.0.0.0 --port=8000 --fps=30
+
+# Terminal 2 — proxies to external endpoint B
+LEROBOT_M_SERVER_URL=https://m-server-b.example.com/act \
+python -m lerobot.async_inference.policy_server \
+  --host=0.0.0.0 --port=8001 --fps=30
+
+# Terminal 3 — proxies to external endpoint C
+LEROBOT_M_SERVER_URL=https://m-server-c.example.com/act \
+python -m lerobot.async_inference.policy_server \
+  --host=0.0.0.0 --port=8002 --fps=30
+```
+
+When the override is applied, you'll see a log line like:
+
+```
+Overriding server_url from LEROBOT_M_SERVER_URL: 'https://localhost:8777/act' -> 'https://m-server-a.example.com/act'
+```
+
+The same env var works for `docker run -e LEROBOT_M_SERVER_URL=...`, systemd unit files, tmux windows, etc.
+
 ## Step 4: Start RobotClient (robot machine)
 
 ```bash
@@ -170,7 +207,7 @@ To use the left wrist camera instead, set `server_image_key_map` in `lerobot_con
 ## Troubleshooting
 
 ### "Could not reach external server"
-The external inference server isn't running yet, the HTTPS URL is wrong, or the TLS certificate is untrusted. Check your server logs and make sure `server_url` in `lerobot_config.json` matches the public HTTPS endpoint.
+The external inference server isn't running yet, the HTTPS URL is wrong, or the TLS certificate is untrusted. Check your server logs and make sure `server_url` in `lerobot_config.json` matches the public HTTPS endpoint. If you're using the `LEROBOT_M_SERVER_URL` env var, confirm it's set correctly in the environment where `PolicyServer` was launched (`echo $LEROBOT_M_SERVER_URL`) — it takes precedence over `lerobot_config.json`.
 
 ### "External M server response missing 'actions' key"
 The external server responded with a JSON object that doesn't contain an `actions` field. Verify your server implementation returns `{"actions": <np.ndarray>}`.
