@@ -61,7 +61,7 @@ top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width"
 #
 # With --teleop set, three extra controls become active (type + Enter in the
 # same terminal as n/b/s):
-#   h + Enter : halt/pause policy. Follower holds its last commanded pose;
+#   p + Enter : pause policy. Follower holds its last commanded pose;
 #               leader ramps (kp rises to BiYamLeaderConfig.active_kp) over
 #               ~10 s to mirror the follower so the operator can grab the
 #               handles. Observations stop going to the server.
@@ -72,7 +72,7 @@ top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width"
 #               observation.
 #
 # A single-keypress pynput listener is also started opportunistically
-# (SPACE/h/c/r without Enter), but it requires input focus + OS permissions and
+# (SPACE/p/c/r without Enter), but it requires input focus + OS permissions and
 # may fail silently on headless/Wayland setups — the stdin path always works.
 # Episode-boundary controls (n/b/s + Enter) are unchanged.
 ```
@@ -200,15 +200,15 @@ def _start_hil_keyboard_listener(events: dict, logger: logging.Logger):
     try:
         from pynput import keyboard
     except ImportError:
-        logger.warning("[HIL] pynput not installed — single-keypress SPACE/h/c/r controls disabled")
+        logger.warning("[HIL] pynput not installed — single-keypress SPACE/p/c/r controls disabled")
         return None
 
     def on_press(key):
         try:
             char = getattr(key, "char", None)
-            # Either SPACE or 'h' triggers pause — SPACE is the nicer UX when
-            # pynput works, 'h' matches the stdin path used everywhere else.
-            if key == keyboard.Key.space or char == "h":
+            # Either SPACE or 'p' triggers pause — SPACE is the nicer UX when
+            # pynput works, 'p' matches the stdin path used everywhere else.
+            if key == keyboard.Key.space or char == "p":
                 if not events.get("policy_paused") and not events.get("correction_active"):
                     logger.info("[HIL] PAUSED — 'c' to take control, 'r' to resume policy")
                     events["policy_paused"] = True
@@ -401,8 +401,8 @@ class RobotClient:
         extra_commands: dict | None = None
         if self.hil_enabled:
             extra_commands = {
-                "h": {
-                    "description": "HIL halt/pause (follower holds, leader ramps to follower)",
+                "p": {
+                    "description": "HIL pause (follower holds, leader ramps to follower)",
                     "message": (
                         "[HIL] PAUSED -- WAIT ~10 s for leader arms to move into position. "
                         "DO NOT grab the handles yet. You'll see '[HIL] LEADER STATIONED' when "
@@ -447,7 +447,7 @@ class RobotClient:
 
         if self.hil_enabled and not is_headless():
             self.logger.info(
-                "HIL controls enabled (stdin + Enter): 'h' = pause, 'c' = take control, 'r' = resume policy"
+                "HIL controls enabled (stdin + Enter): 'p' = pause, 'c' = take control, 'r' = resume policy"
             )
             # Optional pynput listener gives single-keypress UX (no Enter) on machines
             # where input focus + permissions allow it. Safe to fail silently; the
