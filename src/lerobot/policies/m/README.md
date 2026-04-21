@@ -4,6 +4,8 @@ This policy integrates an external inference server into lerobot's async inferen
 
 The model runs on a remote GPU host (e.g. a tunneled endpoint or a dedicated inference service). Lerobot's `PolicyServer` acts as a thin proxy — it receives observations from the `RobotClient`, forwards them to the external server over HTTPS, and returns the predicted actions. No heavy dependencies (transformers, peft, etc.) are needed on the lerobot side.
 
+> **In a hurry?** Jump to [Quick start (tl;dr)](#quick-start-tldr) for copy-paste commands covering install, config, multi-server launch, and client startup.
+
 ## Architecture
 
 ```
@@ -43,6 +45,60 @@ Response:
 ```
 
 The wrapper reshapes this into `(1, chunk_size, action_dim)` for the lerobot pipeline.
+
+## Quick start (tl;dr)
+
+For the common YAM / bi-arm case where the dataclass defaults already work (`server_input_size=[180, 320]`, `action_dim/proprio_dim=14`, camera map `top→external_cam`, `right→wrist_cam`). Only `server_url` is deployment-specific, and we override it via env var at launch.
+
+```bash
+# 0) One-time install
+pip install -e ".[all]" json-numpy
+
+# 1) Create an empty config dir (defaults for everything)
+mkdir -p ~/m-lerobot && echo '{}' > ~/m-lerobot/lerobot_config.json
+
+# 2) Launch the external inference server(s) on your GPU host.
+#    Note each URL, e.g. https://m-a.example.com/act, https://m-b.example.com/act
+
+# 3) Start one lerobot PolicyServer per external endpoint
+LEROBOT_M_SERVER_URL=https://m-a.example.com/act \
+nohup python -m lerobot.async_inference.policy_server \
+  --host=0.0.0.0 --port=8000 --fps=30 \
+  > policy_server_a.log 2>&1 &
+
+LEROBOT_M_SERVER_URL=https://m-b.example.com/act \
+nohup python -m lerobot.async_inference.policy_server \
+  --host=0.0.0.0 --port=8001 --fps=30 \
+  > policy_server_b.log 2>&1 &
+
+# Verify each is up and the env-var override was applied
+tail -f policy_server_a.log
+grep 'Overriding server_url' policy_server_a.log
+pgrep -af lerobot.async_inference.policy_server
+
+# 4) Start the RobotClient on the robot machine, pointing at one PolicyServer
+python -m lerobot.async_inference.robot_client \
+  --server_address <policy_server_host>:8000 \
+  --robot.type bi_yam_follower \
+  --robot.left_arm_port 1235 --robot.right_arm_port 1234 \
+  --robot.cameras '{
+right: {"type": "intelrealsense", "serial_number_or_name": "323622271967", "width": 640, "height": 360, "fps": 30},
+left:  {"type": "intelrealsense", "serial_number_or_name": "335122271899", "width": 640, "height": 360, "fps": 30},
+top:   {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width": 640, "height": 360, "fps": 30}
+}' \
+  --task "Fold the towel." \
+  --policy_type m \
+  --pretrained_name_or_path ~/m-lerobot \
+  --policy_device cpu \
+  --actions_per_chunk 30 --chunk_size_threshold 0.5
+
+# 5) Stop everything
+pkill -f lerobot.async_inference.policy_server
+```
+
+To route the client to a different external backend, just change `--server_address` to `:8001` (server B) — no other changes needed.
+
+For the full explanation of each step, non-default configs (swapping the wrist camera, custom `server_input_size`, etc.), and troubleshooting, continue below.
 
 ## Prerequisites
 
