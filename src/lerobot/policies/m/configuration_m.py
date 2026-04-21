@@ -21,8 +21,8 @@ class MConfig(PreTrainedConfig):
     """Configuration class for the M external-server policy wrapper."""
 
     # Action chunking
-    chunk_size: int = 50
-    n_action_steps: int = 50
+    chunk_size: int = 30
+    n_action_steps: int = 30
 
     # Number of camera images the model expects
     num_images_in_input: int = 2
@@ -35,7 +35,10 @@ class MConfig(PreTrainedConfig):
     wrist_image_keys: list[str] = field(default_factory=lambda: ["right"])
 
     # --- External server settings ---
-    server_url: str = "http://localhost:8777/act"
+    # The external inference server is typically reached over HTTPS (e.g. a
+    # tunneled/public endpoint). Override via lerobot_config.json for your
+    # deployment.
+    server_url: str = "https://localhost:8777/act"
 
     # Maps lerobot camera keys to the observation dict keys expected by the
     # external server.

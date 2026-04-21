@@ -1,8 +1,8 @@
 # M Policy (External Server Mode)
 
-This policy integrates an external inference server into lerobot's async inference system by delegating inference to a FastAPI-style HTTP server over a simple `POST /act` JSON contract.
+This policy integrates an external inference server into lerobot's async inference system by delegating inference to a FastAPI-style HTTPS server over a simple `POST /act` JSON contract.
 
-The model runs on a GPU VM. Lerobot's `PolicyServer` acts as a thin proxy — it receives observations from the `RobotClient`, forwards them to the external server, and returns the predicted actions. No heavy dependencies (transformers, peft, etc.) are needed on the lerobot side.
+The model runs on a remote GPU host (e.g. a tunneled endpoint or a dedicated inference service). Lerobot's `PolicyServer` acts as a thin proxy — it receives observations from the `RobotClient`, forwards them to the external server over HTTPS, and returns the predicted actions. No heavy dependencies (transformers, peft, etc.) are needed on the lerobot side.
 
 ## Architecture
 
@@ -11,18 +11,18 @@ Robot (cameras + arms)
   │
   │  gRPC
   ▼
-PolicyServer  (VM, lerobot — lightweight HTTP proxy)
+PolicyServer  (VM or robot-side — lightweight HTTP proxy)
   │
-  │  HTTP POST localhost:8777/act
+  │  HTTPS POST {server_url}/act
   ▼
-External server (VM — loads model, runs inference on GPU)
+External inference server (remote GPU host — loads model, runs inference)
   │
   │  JSON response (actions)
   ▼
 PolicyServer → gRPC → RobotClient → robot arms
 ```
 
-The `PolicyServer` and the external server run on the **same VM**. The `RobotClient` runs on the robot machine and connects to the VM over gRPC.
+The `PolicyServer` and the external inference server run on **different hosts**. `RobotClient` talks to `PolicyServer` over gRPC; `PolicyServer` talks to the inference server over HTTPS using the URL configured via `MConfig.server_url`.
 
 ## HTTP contract
 
@@ -46,9 +46,9 @@ The wrapper reshapes this into `(1, chunk_size, action_dim)` for the lerobot pip
 
 ## Prerequisites
 
-### VM (GPU machine)
+### External GPU host
 
-- The external inference server (listening on `0.0.0.0:8777/act` by default).
+- The external inference server exposing `POST /act` over HTTPS.
 - `json-numpy` on the lerobot side:
   ```bash
   pip install json-numpy
@@ -62,19 +62,19 @@ The wrapper reshapes this into `(1, chunk_size, action_dim)` for the lerobot pip
   pip install json-numpy
   ```
 
-## Step 1: Start the external inference server (VM, terminal 1)
+## Step 1: Start the external inference server
 
-Start the server so it listens at `http://localhost:8777/act`. The server is responsible for model loading, image preprocessing, and action (un)normalization. The exact launch command depends on your server implementation.
+Start the server on your GPU host so that `POST {server_url}/act` is reachable over HTTPS from the machine running the lerobot `PolicyServer`. The server is responsible for model loading, image preprocessing, and action (un)normalization. The exact launch command depends on your server implementation.
 
-## Step 2: (Optional) Create a lerobot config directory on the VM
+Note the public HTTPS URL (e.g. a reverse-proxy domain or tunneled endpoint) — you'll put it in `server_url` in the next step.
 
-> **You can skip this step entirely if the `MConfig` defaults work for you** (right wrist, `http://localhost:8777/act`, 14-dim state/action, chunk size 50). No model weights, no dataset statistics, nothing at all is loaded locally by the wrapper — the model lives behind the HTTP server.
->
-> The `--pretrained_name_or_path` CLI flag is still **required** by lerobot's argument parser (it must be a non-empty string), but the value is only used as an optional lookup path for a `lerobot_config.json` override file. If the path doesn't exist or doesn't contain that file, the defaults are used silently.
->
-> **If defaults work, just pass any placeholder string, e.g. `--pretrained_name_or_path m`.**
+## Step 2: Create a lerobot config directory (on the machine running `PolicyServer`)
 
-If you need to override any default (e.g. swap to the left wrist camera, change `server_url`, change dims or chunk size), create a small directory with a `lerobot_config.json`:
+Because the inference server is external, **you almost always need to set `server_url` to your actual public HTTPS endpoint**. The `MConfig` default (`https://localhost:8777/act`) is just a placeholder.
+
+> The `--pretrained_name_or_path` CLI flag is required by lerobot's argument parser (it must be a non-empty string), but the value is only used as a lookup path for an optional `lerobot_config.json` override file. No model weights are ever loaded by the wrapper — the model lives entirely behind the HTTPS server.
+
+Create a small directory with a `lerobot_config.json`:
 
 ```bash
 mkdir -p /home/<user>/m-lerobot
@@ -84,34 +84,34 @@ Then create `/home/<user>/m-lerobot/lerobot_config.json`:
 
 ```json
 {
-    "server_url": "http://localhost:8777/act",
+    "server_url": "https://your-m-server.example.com/act",
     "server_image_key_map": {
         "top": "external_cam",
-        "left": "wrist_cam"
+        "right": "wrist_cam"
     },
     "primary_image_key": "top",
-    "wrist_image_keys": ["left"],
+    "wrist_image_keys": ["right"],
     "num_images_in_input": 2,
     "action_dim": 14,
     "proprio_dim": 14,
-    "chunk_size": 50,
-    "n_action_steps": 50
+    "chunk_size": 30,
+    "n_action_steps": 30
 }
 ```
 
-The example above swaps the wrist camera from `right` (default) to `left`. The third robot camera is simply not included in `server_image_key_map` and is dropped on the wrapper side — it's never sent to the server.
+Swap `"right"` for `"left"` in `server_image_key_map` (and `wrist_image_keys`) if you want the left wrist camera instead. The third robot camera is simply not included in `server_image_key_map` and is dropped on the wrapper side — it's never sent to the server.
 
 ### What goes in `--pretrained_name_or_path`?
 
 | Situation | What to pass |
 |---|---|
-| Defaults work, no config file needed | Any non-empty placeholder, e.g. `m` |
-| Custom overrides in a local dir on the VM | Absolute path, e.g. `/home/<user>/m-lerobot` |
+| Local dir with `lerobot_config.json` (recommended, required to set `server_url`) | Absolute path, e.g. `/home/<user>/m-lerobot` |
 | `lerobot_config.json` published to an HF Hub repo | The repo ID, e.g. `<org>/m-config` |
+| All defaults are acceptable (only useful if you're testing locally) | Any non-empty placeholder, e.g. `m` |
 
 The wrapper never loads or downloads model weights — only an optional `lerobot_config.json`.
 
-## Step 3: Start lerobot PolicyServer (VM, terminal 2)
+## Step 3: Start lerobot PolicyServer
 
 ```bash
 python -m lerobot.async_inference.policy_server \
@@ -135,9 +135,9 @@ top:   {"type": "intelrealsense", "serial_number_or_name": "406122071208", "widt
 }' \
   --task "Fold the towel and place it on the side." \
   --policy_type m \
-  --pretrained_name_or_path m \
+  --pretrained_name_or_path /home/<user>/m-lerobot \
   --policy_device cpu \
-  --actions_per_chunk 50 \
+  --actions_per_chunk 30 \
   --chunk_size_threshold 0.5 \
   --aggregate_fn_name weighted_average \
   --debug_visualize_queue_size True \
@@ -151,9 +151,10 @@ top:   {"type": "intelrealsense", "serial_number_or_name": "406122071208", "widt
 ```
 
 Notes:
-- `--policy_device cpu` — no GPU needed on the policy server side, it's just an HTTP proxy.
-- `--pretrained_name_or_path` can be any non-empty placeholder (the example uses `m`) when defaults are fine. Pass an absolute path on the VM only if you need to override defaults via `lerobot_config.json` (see Step 2).
+- `--policy_device cpu` — no GPU needed on the policy server side, it's just an HTTPS proxy.
+- `--pretrained_name_or_path` should point to the directory containing `lerobot_config.json` on the machine running `PolicyServer`. You can pass a placeholder string only if the defaults truly match your deployment.
 - Camera keys (`top`, `left`, `right`) in `--robot.cameras` must include the keys referenced by `server_image_key_map`.
+- `--actions_per_chunk 30` matches the default `chunk_size` in `MConfig`. Change both together if you adjust this.
 
 ## Camera key mapping
 
@@ -169,7 +170,7 @@ To use the left wrist camera instead, set `server_image_key_map` in `lerobot_con
 ## Troubleshooting
 
 ### "Could not reach external server"
-The external inference server isn't running yet or is on a different port. Check your server logs and make sure `server_url` in `lerobot_config.json` matches.
+The external inference server isn't running yet, the HTTPS URL is wrong, or the TLS certificate is untrusted. Check your server logs and make sure `server_url` in `lerobot_config.json` matches the public HTTPS endpoint.
 
 ### "External M server response missing 'actions' key"
 The external server responded with a JSON object that doesn't contain an `actions` field. Verify your server implementation returns `{"actions": <np.ndarray>}`.
