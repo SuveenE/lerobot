@@ -79,6 +79,19 @@ class ActionQueue:
             self.last_index += 1
             return action.clone()
 
+    def clear(self) -> None:
+        """Clear queued actions and reset consumption index.
+
+        Used by HIL data collection when the operator takes over: any
+        policy-proposed actions left in the queue are dropped so that when
+        control returns to the policy the next chunk is freshly generated from
+        the current (possibly human-moved) observation.
+        """
+        with self.lock:
+            self.queue = None
+            self.original_queue = None
+            self.last_index = 0
+
     def qsize(self) -> int:
         """Get the number of remaining actions in the queue.
 
@@ -123,7 +136,24 @@ class ActionQueue:
         with self.lock:
             if self.original_queue is None:
                 return None
-            return self.original_queue[self.last_index :]
+            return self.original_queue[self.last_index :].clone()
+
+    def get_processed_left_over(self) -> Tensor | None:
+        """Get leftover processed (post-processed) actions.
+
+        Used by RTC prefix re-anchoring with relative-action policies: the
+        processed queue holds the absolute (post-processor) action values, so
+        when a new inference round starts the absolute prefix from the previous
+        chunk can be re-anchored against the current observation.
+
+        Returns:
+            Tensor | None: Remaining processed actions (remaining_steps, action_dim),
+                          or None if no processed queue exists.
+        """
+        with self.lock:
+            if self.queue is None:
+                return None
+            return self.queue[self.last_index :].clone()
 
     def merge(
         self,

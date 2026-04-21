@@ -19,6 +19,7 @@ from pathlib import Path
 import torch
 
 from lerobot.robots.config import RobotConfig
+from lerobot.teleoperators.config import TeleoperatorConfig
 
 from .constants import (
     DEFAULT_FPS,
@@ -243,6 +244,17 @@ class RobotClientConfig:
     dataset: DatasetRecordingConfig = field(
         default_factory=DatasetRecordingConfig,
         metadata={"help": "Configuration for dataset recording during evaluation"},
+    )
+
+    # Optional teleoperator for Human-in-the-Loop pause/takeover during async inference.
+    # When set, SPACE / c / p controls become available (see RobotClient for semantics).
+    # Requires a teleop that implements enable_torque / disable_torque / write_goal_positions
+    # (e.g. bi_yam_leader). Leave as None for pure autonomous async inference.
+    teleop: TeleoperatorConfig | None = field(
+        default=None,
+        metadata={
+            "help": "Teleoperator for HIL pause/takeover (e.g. bi_yam_leader). Omit for autonomous-only."
+        },
     )
 
     @property

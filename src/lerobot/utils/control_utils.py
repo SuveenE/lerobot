@@ -116,13 +116,20 @@ def predict_action(
     return action
 
 
-def init_keyboard_listener():
+def init_keyboard_listener(extra_commands: dict | None = None):
     """
     Initializes a non-blocking keyboard listener for real-time user interaction.
 
     This function sets up a listener for specific keys (right arrow, left arrow, escape) to control
     the program flow during execution, such as stopping recording or exiting loops. It gracefully
     handles headless environments where keyboard listening is not possible.
+
+    Args:
+        extra_commands: Optional mapping from input string (typed + Enter) to an entry describing
+            how to react. Each entry is a dict with keys:
+              - "events" (dict[str, bool]): event flags to set, e.g. {"policy_paused": True}.
+              - "message" (str, optional): message to print when triggered.
+            Input strings are matched case-insensitively after .strip().
 
     Returns:
         A tuple containing:
@@ -139,6 +146,11 @@ def init_keyboard_listener():
     events["rerecord_episode"] = False
     events["stop_recording"] = False
 
+    if extra_commands:
+        for cmd in extra_commands.values():
+            for k in cmd.get("events", {}):
+                events.setdefault(k, False)
+
     if is_headless():
         logging.warning(
             "Headless environment detected. On-screen cameras display and keyboard inputs will not be available."
@@ -150,6 +162,10 @@ def init_keyboard_listener():
     print("  'n' + Enter: Next/forward command (simulate right arrow) - Exit current loop")
     print("  'b' + Enter: Back command (simulate left arrow) - Re-record episode")
     print("  's' + Enter: Stop recording completely")
+    if extra_commands:
+        for key, cmd in extra_commands.items():
+            desc = cmd.get("description", cmd.get("message", ""))
+            print(f"  '{key}' + Enter: {desc}")
 
     def input_listener():
         try:
@@ -167,6 +183,13 @@ def init_keyboard_listener():
                         print("Stop command received. Stopping data recording...")
                         events["stop_recording"] = True
                         events["exit_early"] = True
+                    elif extra_commands and user_input in extra_commands:
+                        cmd = extra_commands[user_input]
+                        msg = cmd.get("message")
+                        if msg:
+                            print(msg)
+                        for k, v in cmd.get("events", {}).items():
+                            events[k] = v
                 except EOFError:
                     # Handle case where input is not available (e.g., piped input)
                     break

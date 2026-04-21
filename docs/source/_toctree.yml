@@ -7,6 +7,8 @@
 - sections:
   - local: il_robots
     title: Imitation Learning for Robots
+  - local: hil_data_collection
+    title: Human-in-the-Loop Data Collection
   - local: cameras
     title: Cameras
   - local: integrate_hardware

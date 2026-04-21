@@ -76,6 +76,27 @@ class YamLeaderClient:
             raise RuntimeError("Client not connected")
         return self._client.get_observations().result()
 
+    def command_joint_pos(self, joint_pos: np.ndarray) -> None:
+        """Command the leader arm to a target joint position vector (active tracking).
+
+        Effective only when kp has been raised via update_kp_kd; at kp≈0 the
+        command is still accepted but the arm stays compliant.
+        """
+        if self._client is None:
+            raise RuntimeError("Client not connected")
+        self._client.command_joint_pos(joint_pos).result()
+
+    def update_kp_kd(self, kp: np.ndarray, kd: np.ndarray) -> None:
+        """Update position/velocity gains on the leader motor chain.
+
+        kp ≈ 0 → gravity-compensated free-drive (human teleops the handle).
+        kp > 0 → active position tracking (used briefly by smooth_move pre-sync).
+        Requires the server to bind update_kp_kd (see yam_server_with_encoder.py).
+        """
+        if self._client is None:
+            raise RuntimeError("Client not connected")
+        self._client.update_kp_kd(kp, kd).result()
+
     def get_gripper_from_encoder(self) -> float:
         """
         Try to get gripper state from teaching handle encoder button.
@@ -102,23 +123,28 @@ class BiYamLeader(Teleoperator):
     """
     Bimanual Yam Arms leader (teleoperator) using the i2rt library.
 
-    This teleoperator reads joint positions from two Yam leader arms (with teaching handles)
-    and provides them as actions for the follower robot.
+    Each leader is a full `MotorChainRobot` (DM4310 motors, 6 active arm joints)
+    plus a passive teaching-handle gripper (encoder + button). In normal teleop
+    the arms are gravity-compensated free-drive (kp≈0) and get_action() reads
+    their pose; during HIL pre-takeover sync the arms can be switched to
+    active-tracking (raise kp via enable_torque()) and driven to target
+    positions via write_goal_positions() — see examples/hil/hil_utils.py.
 
     Expected setup:
     - Two Yam leader arms connected via CAN interfaces with teaching handles
-    - Server processes running for each leader arm in read-only mode
+    - Server processes running for each leader arm (ports 5001 / 5002 by default,
+      launched by src/lerobot/scripts/setup_bi_yam_servers.py, which uses the
+      enhanced yam_server_with_encoder.py binding command_joint_pos,
+      command_joint_state, and update_kp_kd)
     - Left leader arm server on port 5002 (default)
     - Right leader arm server on port 5001 (default)
-
-    Note: You'll need to run separate server processes for the leader arms.
-    You can modify the i2rt minimum_gello.py script to create read-only
-    servers that just expose the leader arm state without trying to control
-    a follower.
     """
 
     config_class = BiYamLeaderConfig
     name = "bi_yam_leader"
+
+    # Number of commandable DoFs per arm (excludes the passive teaching-handle gripper).
+    _ARM_DOFS = 6
 
     def __init__(self, config: BiYamLeaderConfig):
         super().__init__(config)
@@ -267,14 +293,80 @@ class BiYamLeader(Teleoperator):
 
         return action_dict
 
-    def send_feedback(self, feedback: dict[str, float]) -> None:
-        """
-        Send feedback to leader arms (not supported for Yam teaching handles).
+    def enable_torque(self) -> None:
+        """Raise kp/kd so the leader actively tracks write_goal_positions().
 
-        Args:
-            feedback: Dictionary with feedback values (ignored)
+        Used during the pre-takeover sync (see examples/hil/hil_utils.teleop_smooth_move_to):
+        leader briefly becomes position-controlled so it can be driven to mirror
+        the follower's pose before the human takes over.
         """
-        # Yam teaching handles are passive devices and don't support feedback
+        kp = np.full(self._ARM_DOFS, self.config.active_kp, dtype=np.float32)
+        kd = np.full(self._ARM_DOFS, self.config.active_kd, dtype=np.float32)
+        self.left_arm.update_kp_kd(kp, kd)
+        self.right_arm.update_kp_kd(kp, kd)
+
+    def disable_torque(self) -> None:
+        """Drop kp/kd to zero so the leader is gravity-compensated free-drive.
+
+        This is the normal teleoperation state — the human moves the handle and
+        its joint positions are read via get_action() and mirrored to the follower.
+        """
+        zeros = np.zeros(self._ARM_DOFS, dtype=np.float32)
+        self.left_arm.update_kp_kd(zeros, zeros)
+        self.right_arm.update_kp_kd(zeros, zeros)
+
+    def write_goal_positions(self, positions: dict[str, float]) -> None:
+        """Command goal positions to the leader motors, by joint-feature name.
+
+        Expected keys are the ones returned by get_action() minus the passive
+        gripper: e.g. left_joint_0.pos .. left_joint_5.pos and right_joint_*.pos.
+        Gripper keys are accepted and silently ignored because the teaching
+        handle is a passive encoder + button and cannot be commanded.
+
+        Takes effect only if enable_torque() has been called to raise kp.
+        """
+        left = np.zeros(self._ARM_DOFS, dtype=np.float32)
+        right = np.zeros(self._ARM_DOFS, dtype=np.float32)
+
+        # Seed from the current leader pose so any joint not present in `positions`
+        # stays where it is rather than snapping to zero.
+        try:
+            left_current = self.left_arm.get_joint_pos()
+            right_current = self.right_arm.get_joint_pos()
+            left[: len(left_current[: self._ARM_DOFS])] = left_current[: self._ARM_DOFS]
+            right[: len(right_current[: self._ARM_DOFS])] = right_current[: self._ARM_DOFS]
+        except Exception as e:
+            logger.warning(f"[BiYamLeader] Could not read current joint_pos when seeding goal: {e}")
+
+        for name, value in positions.items():
+            if "gripper" in name:
+                # Teaching-handle gripper is passive; cannot command.
+                continue
+            # Expected formats: "left_joint_<i>.pos" or "right_joint_<i>.pos"
+            if not (name.startswith("left_joint_") or name.startswith("right_joint_")):
+                continue
+            side, rest = name.split("_", 1)  # "left" / "right", "joint_<i>.pos"
+            try:
+                idx = int(rest.split("_")[1].split(".")[0])
+            except (IndexError, ValueError):
+                continue
+            if idx >= self._ARM_DOFS:
+                continue
+            target = left if side == "left" else right
+            target[idx] = float(value)
+
+        self.left_arm.command_joint_pos(left)
+        self.right_arm.command_joint_pos(right)
+
+    def send_feedback(self, feedback: dict[str, float]) -> None:
+        """Force/torque feedback is not wired through this wrapper.
+
+        Note: the 6 leader arm joints are fully active motors and CAN be
+        commanded via enable_torque() + write_goal_positions(); this method is
+        only a no-op because haptic force feedback has not been plumbed through.
+        """
+        # Force/torque feedback not currently wired through. Use
+        # enable_torque() + write_goal_positions() for position-based actuation.
         pass
 
     def disconnect(self) -> None:
