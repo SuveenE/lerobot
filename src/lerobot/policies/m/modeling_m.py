@@ -120,7 +120,8 @@ class MPolicy(PreTrainedPolicy):
                 "action_dim": 14,
                 "proprio_dim": 14,
                 "chunk_size": 50,
-                "n_action_steps": 50
+                "n_action_steps": 50,
+                "server_input_size": [180, 320]
             }
         """
         overrides: dict = {}
@@ -151,7 +152,8 @@ class MPolicy(PreTrainedPolicy):
 
     def _populate_features(self, config: MConfig) -> None:
         """Populate input/output features on the config for server-side processing."""
-        img_shape = (3, config.image_size, config.image_size)
+        img_h, img_w = int(config.server_input_size[0]), int(config.server_input_size[1])
+        img_shape = (3, img_h, img_w)
 
         if not config.input_features:
             input_features = {}
@@ -179,11 +181,30 @@ class MPolicy(PreTrainedPolicy):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _tensor_to_numpy_image(tensor: Tensor) -> np.ndarray:
-        """Convert a CHW float [0,1] tensor to HWC uint8 numpy array."""
-        if tensor.ndim == 4:
-            tensor = tensor.squeeze(0)
+    def _tensor_to_numpy_image(
+        tensor: Tensor,
+        resize_hw: tuple[int, int],
+    ) -> np.ndarray:
+        """Convert a CHW float [0,1] tensor to HWC uint8 numpy array.
+
+        The image is resized to ``resize_hw`` (height, width) with
+        bilinear-antialiased interpolation before the uint8 conversion.
+        """
         img = tensor.detach().cpu()
+        if img.ndim == 3:
+            img = img.unsqueeze(0)
+
+        target_h, target_w = int(resize_hw[0]), int(resize_hw[1])
+        if img.shape[-2:] != (target_h, target_w):
+            img = torch.nn.functional.interpolate(
+                img.float(),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
+            )
+
+        img = img.squeeze(0)
         img = (img * 255).clamp(0, 255).to(torch.uint8)
         img = img.permute(1, 2, 0).numpy()
         return img
@@ -229,10 +250,13 @@ class MPolicy(PreTrainedPolicy):
             "timestamp": time.time(),
         }
 
+        resize_hw = self.config.server_input_size
         for lerobot_cam_key, server_obs_key in self.config.server_image_key_map.items():
             batch_key = f"{OBS_IMAGES}.{lerobot_cam_key}"
             if batch_key in batch:
-                observation[server_obs_key] = self._tensor_to_numpy_image(batch[batch_key])
+                observation[server_obs_key] = self._tensor_to_numpy_image(
+                    batch[batch_key], resize_hw=resize_hw
+                )
 
         if OBS_STATE in batch:
             state_tensor = batch[OBS_STATE]

@@ -26,7 +26,12 @@ class MConfig(PreTrainedConfig):
 
     # Number of camera images the model expects
     num_images_in_input: int = 2
-    image_size: int = 224
+
+    # Client-side resize applied before sending images to the server.
+    # Format: (height, width). Images are always resized to this shape prior
+    # to the HTTP POST; the server therefore always receives frames at a
+    # known, consistent resolution.
+    server_input_size: tuple[int, int] = (180, 320)
 
     # Which robot camera to use as the primary (first) image slot.
     primary_image_key: str = "top"
@@ -65,6 +70,19 @@ class MConfig(PreTrainedConfig):
         super().__post_init__()
         if self.chunk_size <= 0:
             raise ValueError("`chunk_size` must be strictly positive.")
+
+        # JSON / dict-based overrides deserialize tuples as lists; normalize.
+        if isinstance(self.server_input_size, list):
+            self.server_input_size = tuple(self.server_input_size)
+        if (
+            not isinstance(self.server_input_size, tuple)
+            or len(self.server_input_size) != 2
+            or not all(isinstance(v, int) and v > 0 for v in self.server_input_size)
+        ):
+            raise ValueError(
+                "`server_input_size` must be a (height, width) tuple of two "
+                f"positive ints, got {self.server_input_size!r}"
+            )
 
     def validate_features(self) -> None:
         pass
