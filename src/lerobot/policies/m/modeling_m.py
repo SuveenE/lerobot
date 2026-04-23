@@ -276,12 +276,32 @@ class MPolicy(PreTrainedPolicy):
                 data=serialized,
                 timeout=30,
             )
-            resp.raise_for_status()
         except requests.RequestException as e:
             raise RuntimeError(
                 f"External M server request failed: {e}\n"
                 f"URL: {self.config.server_url}"
             ) from e
+
+        if not resp.ok:
+            # Include the server-side response body so the client log shows
+            # the actual traceback / error from the inference server, and a
+            # summary of the payload we sent so shape/dtype mismatches are
+            # obvious without having to attach a debugger.
+            payload_summary = {
+                k: (
+                    f"ndarray shape={v.shape} dtype={v.dtype}"
+                    if isinstance(v, np.ndarray)
+                    else type(v).__name__
+                )
+                for k, v in observation.items()
+            }
+            body_preview = resp.text[:2000] if resp.text else "<empty body>"
+            raise RuntimeError(
+                f"External M server returned HTTP {resp.status_code} for "
+                f"{self.config.server_url}\n"
+                f"Payload keys/shapes: {payload_summary}\n"
+                f"Server response body:\n{body_preview}"
+            )
 
         # -- Parse response --
         # ``json_numpy.loads`` is a strict superset of ``json.loads``: it
