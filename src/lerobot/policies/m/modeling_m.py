@@ -312,7 +312,13 @@ class MPolicy(PreTrainedPolicy):
             state_tensor = batch[OBS_STATE]
             if state_tensor.ndim == 2:
                 state_tensor = state_tensor.squeeze(0)
-            observation["state"] = state_tensor.detach().cpu().float().numpy()
+            # Match ``molmoact.py::send_request`` which forwards
+            # ``obs["joint_positions"]`` as-is (float64 by numpy default).
+            # Some MolmoAct servers are strict about dtype and will reject
+            # float32 payloads with a generic 500 error.
+            observation["state"] = (
+                state_tensor.detach().cpu().double().numpy().astype(np.float64)
+            )
 
         # -- Serialize first so we can log the on-the-wire payload size --
         serialized = json_numpy.dumps(observation)
