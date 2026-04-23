@@ -19,10 +19,22 @@ Schema verified against the canonical reference release
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
+
+logger = logging.getLogger(__name__)
+
+# Environment variable that, if set, overrides ``CosmosConfig.server_url`` at
+# construction time. Useful for launching multiple lerobot policy servers
+# (e.g. ``python -m lerobot.async_inference.policy_server ...``), each pointing
+# to a different cosmos_policy ``deploy.py`` endpoint without having to maintain
+# a separate ``lerobot_config.json`` per process. Mirrors ``LEROBOT_M_SERVER_URL``
+# in the ``m`` policy.
+SERVER_URL_ENV_VAR = "LEROBOT_COSMOS_SERVER_URL"
 
 
 @PreTrainedConfig.register_subclass("cosmos")
@@ -86,6 +98,19 @@ class CosmosConfig(PreTrainedConfig):
                 f"`n_action_steps` ({self.n_action_steps}) must not exceed "
                 f"`chunk_size` ({self.chunk_size})."
             )
+
+        # Environment-variable override for ``server_url``. When set, it takes
+        # precedence over both the dataclass default and any value loaded from
+        # ``lerobot_config.json``. Enables running multiple policy server
+        # processes that each target a different cosmos ``deploy.py`` endpoint.
+        env_url = os.environ.get(SERVER_URL_ENV_VAR)
+        if env_url:
+            if env_url != self.server_url:
+                logger.info(
+                    f"Overriding server_url from {SERVER_URL_ENV_VAR}: "
+                    f"{self.server_url!r} -> {env_url!r}"
+                )
+            self.server_url = env_url
 
     def validate_features(self) -> None:
         pass
