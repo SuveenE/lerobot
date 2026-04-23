@@ -53,7 +53,7 @@ The wrapper reshapes this into `(1, chunk_size, action_dim)` for the lerobot pip
 
 ## Quick start (tl;dr)
 
-For the common bimanual YAM / MolmoAct case where the dataclass defaults already work (`server_input_size=[360, 640]`, `action_dim/proprio_dim=14`, camera map `left→left_cam`, `front→top_cam`, `right→right_cam`, `chunk_size=30`). Only `server_url` is deployment-specific, and we override it via env var at launch.
+For the common bimanual YAM / MolmoAct case where the dataclass defaults already work (`server_input_size=[360, 640]`, `action_dim/proprio_dim=14`, camera map `left→left_cam`, `top→top_cam`, `right→right_cam`, `chunk_size=30`). Only `server_url` is deployment-specific, and we override it via env var at launch.
 
 ```bash
 # 0) One-time install
@@ -148,10 +148,10 @@ Then create `/home/<user>/m-lerobot/lerobot_config.json` (MolmoAct YAM defaults)
     "server_url": "https://your-m-server.example.com/act",
     "server_image_key_map": {
         "left":  "left_cam",
-        "front": "top_cam",
+        "top":   "top_cam",
         "right": "right_cam"
     },
-    "primary_image_key": "front",
+    "primary_image_key": "top",
     "wrist_image_keys": ["left", "right"],
     "num_images_in_input": 3,
     "action_dim": 14,
@@ -302,15 +302,15 @@ Notes:
 
 ## Camera key mapping
 
-The `server_image_key_map` translates lerobot camera names to the observation keys the external server expects. Default (MolmoAct YAM 3-view):
+The `server_image_key_map` translates lerobot camera names to the observation keys the external server expects. Default (MolmoAct YAM 3-view, matching `molmoact.py::send_request`):
 
 | Robot camera        | lerobot key | server key   | Role               |
 |---------------------|-------------|--------------|--------------------|
-| Front / scene view  | `front`     | `top_cam`    | Primary scene view |
+| Top / scene view    | `top`       | `top_cam`    | Primary scene view |
 | Left wrist          | `left`      | `left_cam`   | Left wrist camera  |
 | Right wrist         | `right`     | `right_cam`  | Right wrist camera |
 
-The lerobot-side keys (`front` / `left` / `right`) must match the keys you pass in `--robot.cameras` on the `RobotClient` — if they don't, the wrapper logs a warning and the server receives no images for those slots. The server-side key names are arbitrary labels agreed with your external inference server.
+The lerobot-side keys (`top` / `left` / `right`) must match the keys you pass in `--robot.cameras` on the `RobotClient` — if they don't, the wrapper logs a warning and the server receives no images for those slots. The server-side key names are arbitrary labels agreed with your external inference server.
 
 To switch to a **2-view MolmoAct2-style server**, override in `lerobot_config.json`:
 

@@ -49,13 +49,13 @@ class MConfig(PreTrainedConfig):
     # to bilinearly resample every frame.
     server_input_size: tuple[int, int] = (360, 640)
 
-    # Which robot camera to use as the primary (first) image slot. For
-    # MolmoAct YAM the "front" camera is the scene view (sent as
-    # ``top_cam`` to the server).
-    primary_image_key: str = "front"
+    # Which robot camera to use as the primary (first) image slot. The
+    # ``top`` camera is the overhead scene view on the YAM setup used
+    # here (see ``--robot.cameras`` in the policy-server launch command).
+    primary_image_key: str = "top"
 
-    # Auxiliary camera keys (order must match training). MolmoAct YAM pairs
-    # the scene camera with the left/right wrist cameras.
+    # Auxiliary camera keys (order must match training). Pairs the scene
+    # camera with the left/right wrist cameras.
     wrist_image_keys: list[str] = field(default_factory=lambda: ["left", "right"])
 
     # --- External server settings ---
@@ -68,12 +68,20 @@ class MConfig(PreTrainedConfig):
 
     # Maps lerobot camera keys to the observation dict keys expected by the
     # external server. Defaults match the MolmoAct YAM 3-view contract
-    # (see ``molmoact.py``): the left/front/right robot cameras are sent
-    # as ``left_cam`` / ``top_cam`` / ``right_cam`` respectively.
-    server_image_key_map: dict[str, str] = field(
+    # (see ``molmoact.py::send_request``): the YAM ``--robot.cameras``
+    # exposes ``left``, ``top``, and ``right`` RealSense cameras -- they
+    # are sent to the inference server as ``left_cam``, ``top_cam``, and
+    # ``right_cam`` respectively.
+    #
+    # Each value may be either a single server key (``"left": "left_cam"``)
+    # or a list of server keys (``"left": ["left_cam", "right_cam"]``) to
+    # fan one robot camera out to multiple server slots. The latter is
+    # useful when the external server requires N views but the robot has
+    # fewer physical cameras and the model tolerates duplicated inputs.
+    server_image_key_map: dict[str, str | list[str]] = field(
         default_factory=lambda: {
             "left": "left_cam",
-            "front": "top_cam",
+            "top": "top_cam",
             "right": "right_cam",
         }
     )

@@ -116,10 +116,10 @@ class MPolicy(PreTrainedPolicy):
                 "server_url": "https://policy9000.ngrok.app/act",
                 "server_image_key_map": {
                     "left":  "left_cam",
-                    "front": "top_cam",
+                    "top":   "top_cam",
                     "right": "right_cam"
                 },
-                "primary_image_key": "front",
+                "primary_image_key": "top",
                 "wrist_image_keys": ["left", "right"],
                 "num_images_in_input": 3,
                 "action_dim": 14,
@@ -278,21 +278,33 @@ class MPolicy(PreTrainedPolicy):
         # "skipped" means ``server_image_key_map`` referenced a camera that
         # isn't in the batch (typo in the config, wrong ``--robot.cameras``,
         # etc.) -- those never reach the server.
+        #
+        # Each value of ``server_image_key_map`` may be a single server key
+        # or a list of server keys. The latter lets one robot camera feed
+        # multiple server slots (e.g. ``"left": ["left_cam", "right_cam"]``
+        # when the external server requires 3 views but the robot has 2
+        # physical cameras). The actual uint8 image is computed once and
+        # shared by reference between duplicated slots.
         resize_hw = self.config.server_input_size
-        mapped_cams: dict[str, str] = {}
-        skipped_cams: dict[str, str] = {}
+        mapped_cams: dict[str, list[str]] = {}
+        skipped_cams: dict[str, list[str]] = {}
         incoming_image_shapes: dict[str, tuple] = {}
-        for lerobot_cam_key, server_obs_key in self.config.server_image_key_map.items():
+        for lerobot_cam_key, server_obs_keys in self.config.server_image_key_map.items():
+            if isinstance(server_obs_keys, str):
+                server_obs_keys_list = [server_obs_keys]
+            else:
+                server_obs_keys_list = list(server_obs_keys)
+
             batch_key = f"{OBS_IMAGES}.{lerobot_cam_key}"
             if batch_key in batch:
                 src_tensor = batch[batch_key]
                 incoming_image_shapes[batch_key] = tuple(src_tensor.shape)
-                observation[server_obs_key] = self._tensor_to_numpy_image(
-                    src_tensor, resize_hw=resize_hw
-                )
-                mapped_cams[lerobot_cam_key] = server_obs_key
+                img_np = self._tensor_to_numpy_image(src_tensor, resize_hw=resize_hw)
+                for server_obs_key in server_obs_keys_list:
+                    observation[server_obs_key] = img_np
+                mapped_cams[lerobot_cam_key] = server_obs_keys_list
             else:
-                skipped_cams[lerobot_cam_key] = server_obs_key
+                skipped_cams[lerobot_cam_key] = server_obs_keys_list
 
         all_image_batch_keys = [k for k in batch if k.startswith(f"{OBS_IMAGES}.")]
 
