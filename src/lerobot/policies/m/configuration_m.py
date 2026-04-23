@@ -31,12 +31,13 @@ SERVER_URL_ENV_VAR = "LEROBOT_M_SERVER_URL"
 class MConfig(PreTrainedConfig):
     """Configuration class for the M external-server policy wrapper."""
 
-    # Action chunking
+    # Action chunking. Defaults to the MolmoAct YAM action horizon of 30.
     chunk_size: int = 30
     n_action_steps: int = 30
 
-    # Number of camera images the model expects
-    num_images_in_input: int = 2
+    # Number of camera images the model expects. MolmoAct YAM uses 3 views
+    # (left / front / right); override to 2 for a two-camera setup, etc.
+    num_images_in_input: int = 3
 
     # Client-side resize applied before sending images to the server.
     # Format: (height, width). Images are always resized to this shape prior
@@ -44,11 +45,14 @@ class MConfig(PreTrainedConfig):
     # known, consistent resolution.
     server_input_size: tuple[int, int] = (180, 320)
 
-    # Which robot camera to use as the primary (first) image slot.
-    primary_image_key: str = "top"
+    # Which robot camera to use as the primary (first) image slot. For
+    # MolmoAct YAM the "front" camera is the scene view (sent as
+    # ``top_cam`` to the server).
+    primary_image_key: str = "front"
 
-    # Auxiliary camera keys (order must match training)
-    wrist_image_keys: list[str] = field(default_factory=lambda: ["right"])
+    # Auxiliary camera keys (order must match training). MolmoAct YAM pairs
+    # the scene camera with the left/right wrist cameras.
+    wrist_image_keys: list[str] = field(default_factory=lambda: ["left", "right"])
 
     # --- External server settings ---
     # Full URL (including path) of the external inference endpoint. The
@@ -59,15 +63,20 @@ class MConfig(PreTrainedConfig):
     server_url: str = "https://localhost:8777/act"
 
     # Maps lerobot camera keys to the observation dict keys expected by the
-    # external server.
+    # external server. Defaults match the MolmoAct YAM 3-view contract
+    # (see ``molmoact.py``): the left/front/right robot cameras are sent
+    # as ``left_cam`` / ``top_cam`` / ``right_cam`` respectively.
     server_image_key_map: dict[str, str] = field(
         default_factory=lambda: {
-            "top": "external_cam",
-            "right": "wrist_cam",
+            "left": "left_cam",
+            "front": "top_cam",
+            "right": "right_cam",
         }
     )
 
     # Fallback dimensions when dataset_statistics.json is unavailable.
+    # Defaults target the bimanual YAM setup (7 DoF per arm). For a single
+    # YAM arm set both to 7 in ``lerobot_config.json``.
     action_dim: int = 14
     proprio_dim: int = 14
 

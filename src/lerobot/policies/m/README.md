@@ -28,15 +28,20 @@ The `PolicyServer` and the external inference server run on **different hosts**.
 
 ## HTTP contract
 
-The M policy wrapper sends a single `POST {server_url}` request per inference. The path is whatever you put in `server_url` (commonly `/act`, but arbitrary). The body is a raw `json_numpy`-serialized dict with `Content-Type: application/json`:
+The M policy wrapper sends a single `POST {server_url}` request per inference. The path is whatever you put in `server_url` (commonly `/act`, but arbitrary). The body is a raw `json_numpy`-serialized dict with `Content-Type: application/json`.
+
+The defaults match the **MolmoAct YAM 3-view contract** (see `molmoact.py`):
 
 | Key | Type | Notes |
 |---|---|---|
 | `instruction` | `str` | Task string from `--task` |
-| `state` | `np.ndarray` shape `(proprio_dim,)` | Proprioception (default `(14,)` for bi-arm) |
-| `external_cam` | `np.ndarray` shape `(H, W, 3)` uint8 | Primary camera (default: `top`) |
-| `wrist_cam` | `np.ndarray` shape `(H, W, 3)` uint8 | Wrist camera (default: `right`, configurable) |
+| `state` | `np.ndarray` shape `(proprio_dim,)` | YAM joint positions — 14 for bimanual, 7 for unimanual |
+| `left_cam` | `np.ndarray` shape `(H, W, 3)` uint8 | Left wrist camera (from lerobot key `left`) |
+| `top_cam` | `np.ndarray` shape `(H, W, 3)` uint8 | Front / scene camera (from lerobot key `front`) |
+| `right_cam` | `np.ndarray` shape `(H, W, 3)` uint8 | Right wrist camera (from lerobot key `right`) |
 | `timestamp` | `float` | Client-side wall-clock time |
+
+The server-side key names (`left_cam`, `top_cam`, `right_cam`) are just defaults — everything is configurable through `server_image_key_map`. To target a 2-view MolmoAct2 Franka server that expects `external_cam` / `wrist_cam`, or any other layout, swap the values in the map; the wrapper logic doesn't change.
 
 Response:
 
@@ -48,7 +53,7 @@ The wrapper reshapes this into `(1, chunk_size, action_dim)` for the lerobot pip
 
 ## Quick start (tl;dr)
 
-For the common YAM / bi-arm case where the dataclass defaults already work (`server_input_size=[180, 320]`, `action_dim/proprio_dim=14`, camera map `top→external_cam`, `right→wrist_cam`). Only `server_url` is deployment-specific, and we override it via env var at launch.
+For the common bimanual YAM / MolmoAct case where the dataclass defaults already work (`server_input_size=[180, 320]`, `action_dim/proprio_dim=14`, camera map `left→left_cam`, `front→top_cam`, `right→right_cam`, `chunk_size=30`). Only `server_url` is deployment-specific, and we override it via env var at launch.
 
 ```bash
 # 0) One-time install
@@ -136,18 +141,19 @@ Create a small directory with a `lerobot_config.json`:
 mkdir -p /home/<user>/m-lerobot
 ```
 
-Then create `/home/<user>/m-lerobot/lerobot_config.json`:
+Then create `/home/<user>/m-lerobot/lerobot_config.json` (MolmoAct YAM defaults):
 
 ```json
 {
     "server_url": "https://your-m-server.example.com/act",
     "server_image_key_map": {
-        "top": "external_cam",
-        "right": "wrist_cam"
+        "left":  "left_cam",
+        "front": "top_cam",
+        "right": "right_cam"
     },
-    "primary_image_key": "top",
-    "wrist_image_keys": ["right"],
-    "num_images_in_input": 2,
+    "primary_image_key": "front",
+    "wrist_image_keys": ["left", "right"],
+    "num_images_in_input": 3,
     "action_dim": 14,
     "proprio_dim": 14,
     "chunk_size": 30,
@@ -155,7 +161,20 @@ Then create `/home/<user>/m-lerobot/lerobot_config.json`:
 }
 ```
 
-Swap `"right"` for `"left"` in `server_image_key_map` (and `wrist_image_keys`) if you want the left wrist camera instead. The third robot camera is simply not included in `server_image_key_map` and is dropped on the wrapper side — it's never sent to the server.
+For a **single YAM arm** (7 DoF), set `"action_dim": 7` and `"proprio_dim": 7`. For a **2-view Franka/MolmoAct2-style server** that expects `external_cam` / `wrist_cam`, set:
+
+```json
+{
+    "server_image_key_map": {"top": "external_cam", "right": "wrist_cam"},
+    "primary_image_key": "top",
+    "wrist_image_keys": ["right"],
+    "num_images_in_input": 2,
+    "action_dim": 8,
+    "proprio_dim": 8
+}
+```
+
+Any robot camera that isn't mentioned as a *key* in `server_image_key_map` is simply dropped on the wrapper side — it's never sent to the server.
 
 ### What goes in `--pretrained_name_or_path`?
 
@@ -271,14 +290,24 @@ Notes:
 
 ## Camera key mapping
 
-The `server_image_key_map` translates lerobot camera names to the observation keys the external server expects. Default:
+The `server_image_key_map` translates lerobot camera names to the observation keys the external server expects. Default (MolmoAct YAM 3-view):
 
-| Robot camera | lerobot key | server key     | Role          |
-|--------------|-------------|----------------|---------------|
-| Top overhead | `top`       | `external_cam` | Primary image |
-| Right wrist  | `right`     | `wrist_cam`    | Wrist camera  |
+| Robot camera        | lerobot key | server key   | Role               |
+|---------------------|-------------|--------------|--------------------|
+| Front / scene view  | `front`     | `top_cam`    | Primary scene view |
+| Left wrist          | `left`      | `left_cam`   | Left wrist camera  |
+| Right wrist         | `right`     | `right_cam`  | Right wrist camera |
 
-To use the left wrist camera instead, set `server_image_key_map` in `lerobot_config.json` to `{"top": "external_cam", "left": "wrist_cam"}` and update `wrist_image_keys` to `["left"]`.
+The lerobot-side keys (`front` / `left` / `right`) must match the keys you pass in `--robot.cameras` on the `RobotClient` — if they don't, the wrapper logs a warning and the server receives no images for those slots. The server-side key names are arbitrary labels agreed with your external inference server.
+
+To switch to a **2-view MolmoAct2-style server**, override in `lerobot_config.json`:
+
+```json
+"server_image_key_map": {"top": "external_cam", "right": "wrist_cam"},
+"primary_image_key": "top",
+"wrist_image_keys": ["right"],
+"num_images_in_input": 2
+```
 
 ## Troubleshooting
 

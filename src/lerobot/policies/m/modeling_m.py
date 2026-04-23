@@ -109,21 +109,23 @@ class MPolicy(PreTrainedPolicy):
         """Create an MConfig, applying overrides from ``lerobot_config.json``.
 
         If ``model_path`` is a local directory containing ``lerobot_config.json``,
-        its key-value pairs override the dataclass defaults. Example file::
+        its key-value pairs override the dataclass defaults. Example file
+        matching the MolmoAct YAM 3-view contract::
 
             {
-                "server_url": "http://localhost:8777/act",
+                "server_url": "https://policy9000.ngrok.app/act",
                 "server_image_key_map": {
-                    "top": "external_cam",
-                    "left": "wrist_cam"
+                    "left":  "left_cam",
+                    "front": "top_cam",
+                    "right": "right_cam"
                 },
-                "primary_image_key": "top",
-                "wrist_image_keys": ["left"],
-                "num_images_in_input": 2,
+                "primary_image_key": "front",
+                "wrist_image_keys": ["left", "right"],
+                "num_images_in_input": 3,
                 "action_dim": 14,
                 "proprio_dim": 14,
-                "chunk_size": 50,
-                "n_action_steps": 50,
+                "chunk_size": 30,
+                "n_action_steps": 30,
                 "server_input_size": [180, 320]
             }
         """
