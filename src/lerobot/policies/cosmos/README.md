@@ -197,6 +197,63 @@ python -m lerobot.async_inference.policy_server \
   --host 0.0.0.0 --port 8000 --fps 25
 ```
 
+### Overriding `server_url` per process (multi-policy setups)
+
+You can override `CosmosConfig.server_url` at launch time by setting the `LEROBOT_COSMOS_SERVER_URL` environment variable. This is the cleanest way to run **multiple lerobot `PolicyServer` processes that each proxy to a different `cosmos_policy/deploy.py` endpoint** (e.g. one `deploy.py` per fine-tuned checkpoint, on different GPUs / ports) without having to maintain a separate `lerobot_config.json` per process.
+
+Precedence (highest wins):
+
+1. `LEROBOT_COSMOS_SERVER_URL` env var
+2. `server_url` in `lerobot_config.json`
+3. `CosmosConfig` dataclass default
+
+Example — three `cosmos_policy/deploy.py` servers on the same VM (ports 8777/8778/8779, one GPU each), fronted by three lerobot policy servers on ports 8000/8001/8002:
+
+```bash
+# Launch 3 cosmos deploy.py servers (one per GPU / checkpoint)
+CUDA_VISIBLE_DEVICES=0 uv run -m cosmos_policy.experiments.robot.aloha.deploy \
+  --ckpt_path $HOME/cosmos_ckpts/yam_cube_stacking_20260415/model \
+  ... --port 8777 &
+
+CUDA_VISIBLE_DEVICES=1 uv run -m cosmos_policy.experiments.robot.aloha.deploy \
+  --ckpt_path $HOME/cosmos_ckpts/yam_fold_shirt_20260415/model \
+  ... --port 8778 &
+
+CUDA_VISIBLE_DEVICES=2 uv run -m cosmos_policy.experiments.robot.aloha.deploy \
+  --ckpt_path $HOME/cosmos_ckpts/yam_candy_in_bag_20260415/model \
+  ... --port 8779 &
+
+# One lerobot PolicyServer per deploy.py endpoint. All three can share the
+# same `lerobot_config.json` since LEROBOT_COSMOS_SERVER_URL overrides the
+# server_url field. (You may still want separate dirs if you also need to
+# pin a different `task_description` per checkpoint.)
+LEROBOT_COSMOS_SERVER_URL=http://localhost:8777/act \
+nohup python -m lerobot.async_inference.policy_server \
+  --host 0.0.0.0 --port 8000 --fps 25 \
+  > policy_server_cube.log 2>&1 &
+
+LEROBOT_COSMOS_SERVER_URL=http://localhost:8778/act \
+nohup python -m lerobot.async_inference.policy_server \
+  --host 0.0.0.0 --port 8001 --fps 25 \
+  > policy_server_fold.log 2>&1 &
+
+LEROBOT_COSMOS_SERVER_URL=http://localhost:8779/act \
+nohup python -m lerobot.async_inference.policy_server \
+  --host 0.0.0.0 --port 8002 --fps 25 \
+  > policy_server_candy.log 2>&1 &
+```
+
+Verify the override was applied:
+
+```bash
+grep 'Overriding server_url' policy_server_*.log
+# -> Overriding server_url from LEROBOT_COSMOS_SERVER_URL: 'http://0.0.0.0:8777/act' -> 'http://localhost:8778/act'
+
+pgrep -af 'lerobot.async_inference.policy_server'
+```
+
+To switch which cosmos policy the robot is driving, change `--server_address` on the `RobotClient` (e.g. `:8000` -> `:8001`). Note: if your `lerobot_config.json` also pins `task_description`, you'll still want one config dir per task (and point `--pretrained_name_or_path` at it) since `task_description` must match a key in the T5 embedding pickle used by that specific `deploy.py`.
+
 ## Step 8: Launch `RobotClient` at 25 Hz (robot machine)
 
 ```bash
@@ -301,7 +358,7 @@ All fields in `lerobot_config.json` map to attributes of `CosmosConfig`. Default
 
 | Field | Default | Purpose |
 | --- | --- | --- |
-| `server_url` | `http://0.0.0.0:8777/act` | `deploy.py` endpoint |
+| `server_url` | `http://0.0.0.0:8777/act` | `deploy.py` endpoint. Overridden by `LEROBOT_COSMOS_SERVER_URL` if set (highest precedence). |
 | `server_image_key_map` | `{"top":"primary_image","left":"left_wrist_image","right":"right_wrist_image"}` | lerobot camera key → cosmos observation key |
 | `primary_image_key` | `"top"` | Primary (third-person) camera key |
 | `wrist_image_keys` | `["left","right"]` | Wrist camera keys (order matters) |
