@@ -126,8 +126,12 @@ class MPolicy(PreTrainedPolicy):
                 "proprio_dim": 14,
                 "chunk_size": 30,
                 "n_action_steps": 30,
-                "server_input_size": [180, 320]
+                "server_input_size": null
             }
+
+        Set ``server_input_size`` to ``null`` (the default) to send images at
+        the robot camera's native resolution, matching ``molmoact.py``. To
+        force a fixed resolution, pass ``[height, width]`` instead.
         """
         overrides: dict = {}
         if os.path.isdir(model_path):
@@ -157,8 +161,16 @@ class MPolicy(PreTrainedPolicy):
 
     def _populate_features(self, config: MConfig) -> None:
         """Populate input/output features on the config for server-side processing."""
-        img_h, img_w = int(config.server_input_size[0]), int(config.server_input_size[1])
-        img_shape = (3, img_h, img_w)
+        # When ``server_input_size`` is None (native-resolution mode) we
+        # don't know the H/W at config-construction time -- images can be
+        # whatever the robot cameras produce. Record a ``(3, 0, 0)``
+        # placeholder shape; the actual frames are still forwarded at full
+        # resolution at inference time.
+        if config.server_input_size is None:
+            img_shape: tuple[int, int, int] = (3, 0, 0)
+        else:
+            img_h, img_w = int(config.server_input_size[0]), int(config.server_input_size[1])
+            img_shape = (3, img_h, img_w)
 
         if not config.input_features:
             input_features = {}
@@ -188,26 +200,30 @@ class MPolicy(PreTrainedPolicy):
     @staticmethod
     def _tensor_to_numpy_image(
         tensor: Tensor,
-        resize_hw: tuple[int, int],
+        resize_hw: tuple[int, int] | None,
     ) -> np.ndarray:
         """Convert a CHW float [0,1] tensor to HWC uint8 numpy array.
 
-        The image is resized to ``resize_hw`` (height, width) with
-        bilinear-antialiased interpolation before the uint8 conversion.
+        If ``resize_hw`` is a ``(height, width)`` tuple, the image is
+        resized to that shape with bilinear-antialiased interpolation
+        before the uint8 conversion. If ``resize_hw`` is ``None``, the
+        image is forwarded at its native resolution (matching the
+        MolmoAct YAM bridge in ``molmoact.py``).
         """
         img = tensor.detach().cpu()
         if img.ndim == 3:
             img = img.unsqueeze(0)
 
-        target_h, target_w = int(resize_hw[0]), int(resize_hw[1])
-        if img.shape[-2:] != (target_h, target_w):
-            img = torch.nn.functional.interpolate(
-                img.float(),
-                size=(target_h, target_w),
-                mode="bilinear",
-                align_corners=False,
-                antialias=True,
-            )
+        if resize_hw is not None:
+            target_h, target_w = int(resize_hw[0]), int(resize_hw[1])
+            if img.shape[-2:] != (target_h, target_w):
+                img = torch.nn.functional.interpolate(
+                    img.float(),
+                    size=(target_h, target_w),
+                    mode="bilinear",
+                    align_corners=False,
+                    antialias=True,
+                )
 
         img = img.squeeze(0)
         img = (img * 255).clamp(0, 255).to(torch.uint8)
@@ -300,11 +316,12 @@ class MPolicy(PreTrainedPolicy):
         # Fires every inference at DEBUG so it's easy to silence, but at
         # WARNING when nothing was mapped (the payload would reach the
         # server with no images at all -- almost always a config bug).
+        resize_desc = "native (no resize)" if resize_hw is None else tuple(resize_hw)
         log_msg = (
             f"M payload built | mapped={mapped_cams} | skipped={skipped_cams} | "
             f"batch_image_keys={all_image_batch_keys} | "
             f"incoming_image_shapes={incoming_image_shapes} | "
-            f"resize_hw={tuple(resize_hw)} | "
+            f"resize_hw={resize_desc} | "
             f"payload_size={_fmt_bytes(payload_bytes)} ({payload_bytes} bytes)"
         )
         if not mapped_cams:

@@ -40,10 +40,13 @@ class MConfig(PreTrainedConfig):
     num_images_in_input: int = 3
 
     # Client-side resize applied before sending images to the server.
-    # Format: (height, width). Images are always resized to this shape prior
-    # to the HTTP POST; the server therefore always receives frames at a
-    # known, consistent resolution.
-    server_input_size: tuple[int, int] = (180, 320)
+    # Format: (height, width). Set to ``None`` (the default) to send images
+    # at their native resolution -- this matches the MolmoAct YAM bridge
+    # (``molmoact.py``) which never resizes client-side. When set to a
+    # ``(height, width)`` tuple, images are resized to that shape prior to
+    # the HTTP POST so the server always receives frames at a known,
+    # consistent resolution.
+    server_input_size: tuple[int, int] | None = None
 
     # Which robot camera to use as the primary (first) image slot. For
     # MolmoAct YAM the "front" camera is the scene view (sent as
@@ -107,17 +110,21 @@ class MConfig(PreTrainedConfig):
             self.server_url = env_url
 
         # JSON / dict-based overrides deserialize tuples as lists; normalize.
-        if isinstance(self.server_input_size, list):
-            self.server_input_size = tuple(self.server_input_size)
-        if (
-            not isinstance(self.server_input_size, tuple)
-            or len(self.server_input_size) != 2
-            or not all(isinstance(v, int) and v > 0 for v in self.server_input_size)
-        ):
-            raise ValueError(
-                "`server_input_size` must be a (height, width) tuple of two "
-                f"positive ints, got {self.server_input_size!r}"
-            )
+        # ``None`` means "don't resize" -- images are forwarded at native
+        # resolution straight from the robot cameras.
+        if self.server_input_size is not None:
+            if isinstance(self.server_input_size, list):
+                self.server_input_size = tuple(self.server_input_size)
+            if (
+                not isinstance(self.server_input_size, tuple)
+                or len(self.server_input_size) != 2
+                or not all(isinstance(v, int) and v > 0 for v in self.server_input_size)
+            ):
+                raise ValueError(
+                    "`server_input_size` must be either None (no resize) or a "
+                    "(height, width) tuple of two positive ints, got "
+                    f"{self.server_input_size!r}"
+                )
 
     def validate_features(self) -> None:
         pass

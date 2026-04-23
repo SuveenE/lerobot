@@ -53,7 +53,7 @@ The wrapper reshapes this into `(1, chunk_size, action_dim)` for the lerobot pip
 
 ## Quick start (tl;dr)
 
-For the common bimanual YAM / MolmoAct case where the dataclass defaults already work (`server_input_size=[180, 320]`, `action_dim/proprio_dim=14`, camera map `left→left_cam`, `front→top_cam`, `right→right_cam`, `chunk_size=30`). Only `server_url` is deployment-specific, and we override it via env var at launch.
+For the common bimanual YAM / MolmoAct case where the dataclass defaults already work (native-resolution images, `action_dim/proprio_dim=14`, camera map `left→left_cam`, `front→top_cam`, `right→right_cam`, `chunk_size=30`). Only `server_url` is deployment-specific, and we override it via env var at launch.
 
 ```bash
 # 0) One-time install
@@ -170,9 +170,14 @@ For a **single YAM arm** (7 DoF), set `"action_dim": 7` and `"proprio_dim": 7`. 
     "wrist_image_keys": ["right"],
     "num_images_in_input": 2,
     "action_dim": 8,
-    "proprio_dim": 8
+    "proprio_dim": 8,
+    "server_input_size": [180, 320]
 }
 ```
+
+### Image resizing
+
+Images are sent at the **native camera resolution** by default (`server_input_size: null`), matching the MolmoAct YAM bridge (`molmoact.py`) which never resizes client-side. To force a fixed resolution instead, set `"server_input_size": [height, width]` in `lerobot_config.json` — for example, MolmoAct2 Franka servers typically want `[180, 320]`. When the server accepts variable image sizes you can leave it at `null`; when the server was trained at a specific resolution, setting it here saves bandwidth and keeps inputs on-distribution.
 
 Any robot camera that isn't mentioned as a *key* in `server_image_key_map` is simply dropped on the wrapper side — it's never sent to the server.
 
