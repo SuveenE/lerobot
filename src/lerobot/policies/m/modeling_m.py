@@ -253,13 +253,29 @@ class MPolicy(PreTrainedPolicy):
             "timestamp": time.time(),
         }
 
+        # Track what we pulled out of the batch so we can log which cameras
+        # were actually found client-side. "mapped" means the lerobot batch
+        # contained the expected key and we forwarded it to the server;
+        # "skipped" means ``server_image_key_map`` referenced a camera that
+        # isn't in the batch (typo in the config, wrong ``--robot.cameras``,
+        # etc.) -- those never reach the server.
         resize_hw = self.config.server_input_size
+        mapped_cams: dict[str, str] = {}
+        skipped_cams: dict[str, str] = {}
+        incoming_image_shapes: dict[str, tuple] = {}
         for lerobot_cam_key, server_obs_key in self.config.server_image_key_map.items():
             batch_key = f"{OBS_IMAGES}.{lerobot_cam_key}"
             if batch_key in batch:
+                src_tensor = batch[batch_key]
+                incoming_image_shapes[batch_key] = tuple(src_tensor.shape)
                 observation[server_obs_key] = self._tensor_to_numpy_image(
-                    batch[batch_key], resize_hw=resize_hw
+                    src_tensor, resize_hw=resize_hw
                 )
+                mapped_cams[lerobot_cam_key] = server_obs_key
+            else:
+                skipped_cams[lerobot_cam_key] = server_obs_key
+
+        all_image_batch_keys = [k for k in batch if k.startswith(f"{OBS_IMAGES}.")]
 
         if OBS_STATE in batch:
             state_tensor = batch[OBS_STATE]
@@ -267,8 +283,38 @@ class MPolicy(PreTrainedPolicy):
                 state_tensor = state_tensor.squeeze(0)
             observation["state"] = state_tensor.detach().cpu().float().numpy()
 
-        # -- POST to external server (raw json_numpy body) --
+        # -- Serialize first so we can log the on-the-wire payload size --
         serialized = json_numpy.dumps(observation)
+        payload_bytes = len(serialized.encode("utf-8")) if isinstance(serialized, str) else len(serialized)
+
+        def _fmt_bytes(n: int) -> str:
+            for unit in ("B", "KB", "MB", "GB"):
+                if n < 1024 or unit == "GB":
+                    return f"{n:.1f}{unit}" if unit != "B" else f"{n}{unit}"
+                n /= 1024
+            return f"{n:.1f}GB"
+
+        # -- Client-side sanity log --
+        # Fires every inference at DEBUG so it's easy to silence, but at
+        # WARNING when nothing was mapped (the payload would reach the
+        # server with no images at all -- almost always a config bug).
+        log_msg = (
+            f"M payload built | mapped={mapped_cams} | skipped={skipped_cams} | "
+            f"batch_image_keys={all_image_batch_keys} | "
+            f"incoming_image_shapes={incoming_image_shapes} | "
+            f"resize_hw={tuple(resize_hw)} | "
+            f"payload_size={_fmt_bytes(payload_bytes)} ({payload_bytes} bytes)"
+        )
+        if not mapped_cams:
+            logger.warning(
+                f"No camera keys from server_image_key_map matched the "
+                f"observation batch -- the external server will receive NO "
+                f"images. {log_msg}"
+            )
+        else:
+            logger.debug(log_msg)
+
+        # -- POST to external server (raw json_numpy body) --
         try:
             resp = requests.post(
                 self.config.server_url,
@@ -284,9 +330,10 @@ class MPolicy(PreTrainedPolicy):
 
         if not resp.ok:
             # Include the server-side response body so the client log shows
-            # the actual traceback / error from the inference server, and a
-            # summary of the payload we sent so shape/dtype mismatches are
-            # obvious without having to attach a debugger.
+            # the actual traceback / error from the inference server, plus a
+            # summary of the payload we sent and what arrived from the
+            # observation batch, so shape/dtype mismatches and missing camera
+            # keys are obvious without having to attach a debugger.
             payload_summary = {
                 k: (
                     f"ndarray shape={v.shape} dtype={v.dtype}"
@@ -300,6 +347,11 @@ class MPolicy(PreTrainedPolicy):
                 f"External M server returned HTTP {resp.status_code} for "
                 f"{self.config.server_url}\n"
                 f"Payload keys/shapes: {payload_summary}\n"
+                f"Payload size: {_fmt_bytes(payload_bytes)} ({payload_bytes} bytes)\n"
+                f"Batch image keys seen: {all_image_batch_keys}\n"
+                f"Cameras mapped -> server: {mapped_cams}\n"
+                f"Cameras in config but NOT in batch: {skipped_cams}\n"
+                f"Incoming image tensor shapes: {incoming_image_shapes}\n"
                 f"Server response body:\n{body_preview}"
             )
 
