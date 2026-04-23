@@ -27,6 +27,7 @@ from lerobot.datasets.utils import build_dataset_frame, hw_to_dataset_features
 # NOTE: Configs need to be loaded for the client to be able to instantiate the policy config
 from lerobot.policies import (  # noqa: F401
     ACTConfig,
+    CosmosConfig,
     DiffusionConfig,
     OpenVLAOFTConfig,
     PI0Config,
