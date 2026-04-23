@@ -126,12 +126,13 @@ class MPolicy(PreTrainedPolicy):
                 "proprio_dim": 14,
                 "chunk_size": 30,
                 "n_action_steps": 30,
-                "server_input_size": null
+                "server_input_size": [360, 640]
             }
 
-        Set ``server_input_size`` to ``null`` (the default) to send images at
-        the robot camera's native resolution, matching ``molmoact.py``. To
-        force a fixed resolution, pass ``[height, width]`` instead.
+        ``server_input_size`` should match the native resolution of your
+        robot cameras. ``PolicyServer`` resizes every frame to this shape
+        *before* it reaches this wrapper, so a mismatched value causes an
+        unwanted bilinear resample.
         """
         overrides: dict = {}
         if os.path.isdir(model_path):
@@ -160,17 +161,17 @@ class MPolicy(PreTrainedPolicy):
     # ------------------------------------------------------------------
 
     def _populate_features(self, config: MConfig) -> None:
-        """Populate input/output features on the config for server-side processing."""
-        # When ``server_input_size`` is None (native-resolution mode) we
-        # don't know the H/W at config-construction time -- images can be
-        # whatever the robot cameras produce. Record a ``(3, 0, 0)``
-        # placeholder shape; the actual frames are still forwarded at full
-        # resolution at inference time.
-        if config.server_input_size is None:
-            img_shape: tuple[int, int, int] = (3, 0, 0)
-        else:
-            img_h, img_w = int(config.server_input_size[0]), int(config.server_input_size[1])
-            img_shape = (3, img_h, img_w)
+        """Populate input/output features on the config for server-side processing.
+
+        The shape declared here drives the ``PolicyServer``'s client-side
+        image resize in ``prepare_raw_observation`` -- every robot frame
+        is bilinearly resampled to ``server_input_size`` before it ever
+        reaches this wrapper's ``predict_action_chunk``. To avoid that
+        resize, set ``server_input_size`` to match your robot cameras'
+        native resolution in ``lerobot_config.json``.
+        """
+        img_h, img_w = int(config.server_input_size[0]), int(config.server_input_size[1])
+        img_shape = (3, img_h, img_w)
 
         if not config.input_features:
             input_features = {}
@@ -200,30 +201,30 @@ class MPolicy(PreTrainedPolicy):
     @staticmethod
     def _tensor_to_numpy_image(
         tensor: Tensor,
-        resize_hw: tuple[int, int] | None,
+        resize_hw: tuple[int, int],
     ) -> np.ndarray:
         """Convert a CHW float [0,1] tensor to HWC uint8 numpy array.
 
-        If ``resize_hw`` is a ``(height, width)`` tuple, the image is
-        resized to that shape with bilinear-antialiased interpolation
-        before the uint8 conversion. If ``resize_hw`` is ``None``, the
-        image is forwarded at its native resolution (matching the
-        MolmoAct YAM bridge in ``molmoact.py``).
+        Images are bilinear-antialias resized to ``resize_hw`` (height,
+        width) if they're not already that shape. In practice incoming
+        frames are *already* at ``resize_hw`` because ``PolicyServer``
+        resizes them to ``input_features[...].shape`` upstream, so this
+        is usually a no-op -- it's kept as a safety net for direct
+        callers that bypass ``PolicyServer``.
         """
         img = tensor.detach().cpu()
         if img.ndim == 3:
             img = img.unsqueeze(0)
 
-        if resize_hw is not None:
-            target_h, target_w = int(resize_hw[0]), int(resize_hw[1])
-            if img.shape[-2:] != (target_h, target_w):
-                img = torch.nn.functional.interpolate(
-                    img.float(),
-                    size=(target_h, target_w),
-                    mode="bilinear",
-                    align_corners=False,
-                    antialias=True,
-                )
+        target_h, target_w = int(resize_hw[0]), int(resize_hw[1])
+        if img.shape[-2:] != (target_h, target_w):
+            img = torch.nn.functional.interpolate(
+                img.float(),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
+            )
 
         img = img.squeeze(0)
         img = (img * 255).clamp(0, 255).to(torch.uint8)
@@ -316,12 +317,11 @@ class MPolicy(PreTrainedPolicy):
         # Fires every inference at DEBUG so it's easy to silence, but at
         # WARNING when nothing was mapped (the payload would reach the
         # server with no images at all -- almost always a config bug).
-        resize_desc = "native (no resize)" if resize_hw is None else tuple(resize_hw)
         log_msg = (
             f"M payload built | mapped={mapped_cams} | skipped={skipped_cams} | "
             f"batch_image_keys={all_image_batch_keys} | "
             f"incoming_image_shapes={incoming_image_shapes} | "
-            f"resize_hw={resize_desc} | "
+            f"resize_hw={tuple(resize_hw)} | "
             f"payload_size={_fmt_bytes(payload_bytes)} ({payload_bytes} bytes)"
         )
         if not mapped_cams:
