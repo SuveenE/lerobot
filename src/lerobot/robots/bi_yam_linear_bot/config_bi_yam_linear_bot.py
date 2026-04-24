@@ -37,6 +37,13 @@ class BiYamLinearBotConfig(RobotConfig):
     # Whether the FlowBase has a linear rail lift module
     with_linear_rail: bool = True
 
+    # If True, only record `base.x` in observations and `base.x.vel` in actions
+    # (plus the usual arm / camera fields). Used for experiments where storage
+    # must be minimised and the task only needs X-axis base motion. The
+    # FlowBase controller still receives a 3D velocity command internally, with
+    # Y and theta forced to zero when a policy drives the robot.
+    base_x_only: bool = False
+
     # FlowBase controller velocity limits – must match the values used by the
     # running flow_base_controller so that policy outputs (physical velocities)
     # are correctly normalised to the [-1, 1] range the controller expects.

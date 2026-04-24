@@ -100,6 +100,11 @@ class BiYamLinearBot(Robot):
 
         self._flow_base_client = None
 
+        # Cached resolved FlowBase command from the most recent get_observation.
+        # Used by teleop_action_from_obs when base_x_only=True (in which case
+        # the cmd fields are not exposed in the observation dict).
+        self._last_resolved_cmd: np.ndarray = np.zeros(4)
+
     # ------------------------------------------------------------------
     # Feature declarations
     # ------------------------------------------------------------------
@@ -130,6 +135,9 @@ class BiYamLinearBot(Robot):
 
     @property
     def _base_obs_ft(self) -> dict[str, type]:
+        if self.config.base_x_only:
+            return {"base.x": float}
+
         ft: dict[str, type] = {
             "base.x": float,
             "base.y": float,
@@ -153,6 +161,9 @@ class BiYamLinearBot(Robot):
 
     @property
     def _base_action_ft(self) -> dict[str, type]:
+        if self.config.base_x_only:
+            return {"base.x.vel": float}
+
         ft: dict[str, type] = {
             "base.x.vel": float,
             "base.y.vel": float,
@@ -274,11 +285,12 @@ class BiYamLinearBot(Robot):
         translation = odometry["translation"]
         rotation = odometry["rotation"]
         obs_dict["base.x"] = float(translation[0])
-        obs_dict["base.y"] = float(translation[1])
-        obs_dict["base.theta"] = float(rotation)
+        if not self.config.base_x_only:
+            obs_dict["base.y"] = float(translation[1])
+            obs_dict["base.theta"] = float(rotation)
 
         # --- Linear rail ---
-        if self.config.with_linear_rail:
+        if self.config.with_linear_rail and not self.config.base_x_only:
             rail = self._flow_base_client.get_linear_rail_state()
             obs_dict["rail.position"] = float(rail["position"])
             obs_dict["rail.velocity"] = float(rail["velocity"])
@@ -286,13 +298,23 @@ class BiYamLinearBot(Robot):
             obs_dict["rail.lower_limit"] = 1.0 if rail.get("lower_limit_triggered") else 0.0
 
         # --- Resolved command (captures joystick and/or remote input) ---
+        # Always fetched so teleop_action_from_obs can build the action, but
+        # only exposed in obs_dict when not in base_x_only mode.
         resolved = self._flow_base_client.get_current_command()
         vel = resolved["velocity"]
-        obs_dict["base.cmd.x.vel"] = float(vel[0])
-        obs_dict["base.cmd.y.vel"] = float(vel[1])
-        obs_dict["base.cmd.theta.vel"] = float(vel[2])
-        if self.config.with_linear_rail:
-            obs_dict["rail.cmd.vel"] = float(vel[3]) if len(vel) > 3 else 0.0
+        cached = np.zeros(4)
+        cached[0] = float(vel[0])
+        cached[1] = float(vel[1]) if len(vel) > 1 else 0.0
+        cached[2] = float(vel[2]) if len(vel) > 2 else 0.0
+        cached[3] = float(vel[3]) if len(vel) > 3 else 0.0
+        self._last_resolved_cmd = cached
+
+        if not self.config.base_x_only:
+            obs_dict["base.cmd.x.vel"] = cached[0]
+            obs_dict["base.cmd.y.vel"] = cached[1]
+            obs_dict["base.cmd.theta.vel"] = cached[2]
+            if self.config.with_linear_rail:
+                obs_dict["rail.cmd.vel"] = cached[3]
 
         # --- cameras ---
         for cam_key, cam in self.cameras.items():
@@ -355,6 +377,9 @@ class BiYamLinearBot(Robot):
         # joystick blocked while valid remote commands arrive).
         has_base_action = "base.x.vel" in action or "base.y.vel" in action or "base.theta.vel" in action
         if has_base_action:
+            # In base_x_only mode y/theta are not part of the action space;
+            # the FlowBase controller still expects a 3D vector, so we
+            # explicitly zero those axes.
             base_vel = np.array([
                 action.get("base.x.vel", 0.0),
                 action.get("base.y.vel", 0.0),
@@ -391,6 +416,12 @@ class BiYamLinearBot(Robot):
     # ------------------------------------------------------------------
 
     def teleop_action_from_obs(self, obs: dict[str, Any]) -> dict[str, float]:
+        if self.config.base_x_only:
+            # cmd fields are not exposed in the observation when base_x_only is
+            # set, so fall back to the cached resolved command captured inside
+            # the latest get_observation call.
+            return {"base.x.vel": float(self._last_resolved_cmd[0])}
+
         fallback: dict[str, float] = {
             "base.x.vel": float(obs.get("base.cmd.x.vel", 0.0)),
             "base.y.vel": float(obs.get("base.cmd.y.vel", 0.0)),
