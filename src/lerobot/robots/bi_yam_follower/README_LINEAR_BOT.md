@@ -311,6 +311,104 @@ Since the follower arms, FlowBase, and cameras are all local to the
 follower PC, only `--teleop.server_host` needs the remote IP. Everything
 else points to `localhost`.
 
+### X-only data collection (rail parked + base X axis only)
+
+For tasks where the rail should sit at a fixed height and the base should
+only move along its X axis (e.g. sliding sideways), the controller and the
+LeRobot robot type both expose a coordinated "X-only" mode. The joystick
+analog axes and the rail axis are hard-disabled; only the joystick D-pad
+left/right drives a discrete +/- X velocity. The dataset schema is trimmed
+to record only `base.x` (observation) and `base.x.vel` (action) on the base
+side.
+
+#### Step A — Start the FlowBase controller in X-only mode
+
+```bash
+python i2rt/i2rt/flow_base/flow_base_controller.py \
+  --channel can_linearbot \
+  --gpio-host 172.16.0.67:8765 \
+  --x-only \
+  --rail-height 25.0
+```
+
+Startup sequence:
+1. Auto-homing drives the rail down to the lower limit (`pos = 0`).
+2. The new parking loop drives the rail up to `--rail-height` (motor rad,
+   same unit as `rail.position` printed by the controller), then engages
+   the brake.
+3. The main loop runs with D-pad-only X input. `Y`, `theta`, and rail
+   commands are masked to zero on every tick, including any incoming
+   remote command.
+
+Useful flags:
+- `--rail-height <rad>`: target height in motor rad. Omit to leave the
+  rail at home.
+- `--x-max-vel <m/s>`: speed of one D-pad press (default `0.25`).
+- `--rail-kp`, `--rail-tol`, `--rail-park-timeout`, `--rail-park-settle`:
+  P-loop tuning for parking.
+
+To lower the rail back later, simply Ctrl+C the controller and relaunch
+without `--rail-height`. Auto-homing always drives the rail to the lower
+limit on startup.
+
+#### Step B — Record with `x_only_mode=true`
+
+Add `--robot.x_only_mode=true` to the `lerobot-record` command. Everything
+else (cameras, arm servers, repo id) stays the same:
+
+```bash
+lerobot-record \
+  --robot.type=bi_yam_linear_bot \
+  --robot.arm_server_host=localhost \
+  --robot.left_arm_port=1235 \
+  --robot.right_arm_port=1234 \
+  --robot.flow_base_host=localhost \
+  --robot.with_linear_rail=true \
+  --robot.x_only_mode=true \
+  --robot.cameras='{
+    left: {"type": "intelrealsense", "serial_number_or_name": "230422272258", "width": 640, "height": 480, "fps": 30},
+    top: {"type": "intelrealsense", "serial_number_or_name": "335522072330", "width": 640, "height": 480, "fps": 30},
+    right: {"type": "intelrealsense", "serial_number_or_name": "130322271069", "width": 640, "height": 480, "fps": 30}
+  }' \
+  --teleop.type=bi_yam_leader \
+  --teleop.server_host=172.16.0.89 \
+  --teleop.left_arm_port=5002 \
+  --teleop.right_arm_port=5001 \
+  --dataset.repo_id=${HF_USER}/linear-bot-x-only \
+  --dataset.num_episodes=10 \
+  --dataset.episode_time_s=120 \
+  --dataset.reset_time_s=20 \
+  --dataset.single_task="Pick and place the object" \
+  --resume=false
+```
+
+When `x_only_mode=true`, the recorded fields shrink to:
+
+**Observation state**:
+
+| Key | Description |
+|---|---|
+| `left_joint_0.pos` .. `left_joint_5.pos` | Left arm joint positions |
+| `left_gripper.pos` | Left gripper position |
+| `right_joint_0.pos` .. `right_joint_5.pos` | Right arm joint positions |
+| `right_gripper.pos` | Right gripper position |
+| `base.x` | FlowBase odometry X translation |
+
+**Action**:
+
+| Key | Description |
+|---|---|
+| `left_joint_0.pos` .. `left_joint_5.pos` | Left arm joint targets |
+| `left_gripper.pos` | Left gripper target |
+| `right_joint_0.pos` .. `right_joint_5.pos` | Right arm joint targets |
+| `right_gripper.pos` | Right gripper target |
+| `base.x.vel` | Base X velocity command |
+
+No `base.y`, `base.theta`, `base.cmd.*`, or `rail.*` fields are written.
+The robot still queries `base.cmd.x.vel` from the FlowBase internally to
+fill in `action.base.x.vel` during teleoperation, but that key is never
+serialised to the dataset.
+
 ### Recorded fields
 
 The dataset will contain the following observation and action fields in
