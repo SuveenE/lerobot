@@ -30,6 +30,32 @@ from .config_bi_yam_follower import BiYamFollowerConfig
 logger = logging.getLogger(__name__)
 
 
+# Extra observation.state slots appended after the arm joints when
+# `BiYamFollowerConfig.enable_linear_bot_padding` is True. Order must match the reference
+# linear-bot dataset schema (see `cortexairobot/270326-linear-bot-full-slowed` meta/info.json).
+_EXTRA_STATE_NAMES: tuple[str, ...] = (
+    "base.x",
+    "base.y",
+    "base.theta",
+    "rail.position",
+    "rail.velocity",
+    "rail.upper_limit",
+    "rail.lower_limit",
+    "base.cmd.x.vel",
+    "base.cmd.y.vel",
+    "base.cmd.theta.vel",
+    "rail.cmd.vel",
+)
+
+# Extra action slots appended after the arm joints when padding is enabled.
+_EXTRA_ACTION_NAMES: tuple[str, ...] = (
+    "base.x.vel",
+    "base.y.vel",
+    "base.theta.vel",
+    "rail.vel",
+)
+
+
 class YamArmClient:
     """Client interface for a single Yam arm using the portal RPC framework."""
 
@@ -158,13 +184,27 @@ class BiYamFollower(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        """Return observation features including motors and cameras."""
-        return {**self._motors_ft, **self._cameras_ft}
+        """Return observation features including motors and cameras.
+
+        When `enable_linear_bot_padding` is True, the extra base+rail scalars are spliced in
+        between motors and cameras so the resulting `observation.state.names` list matches the
+        linear-bot dataset schema.
+        """
+        features: dict[str, type | tuple] = {**self._motors_ft}
+        if self.config.enable_linear_bot_padding:
+            for name in _EXTRA_STATE_NAMES:
+                features[name] = float
+        features.update(self._cameras_ft)
+        return features
 
     @cached_property
     def action_features(self) -> dict[str, type]:
         """Return action features (motor positions)."""
-        return self._motors_ft
+        features: dict[str, type] = {**self._motors_ft}
+        if self.config.enable_linear_bot_padding:
+            for name in _EXTRA_ACTION_NAMES:
+                features[name] = float
+        return features
 
     @property
     def is_connected(self) -> bool:
@@ -256,6 +296,14 @@ class BiYamFollower(Robot):
             else:
                 obs_dict[f"right_joint_{i}.pos"] = pos
 
+        # Linear-bot schema padding: emit zeros for the extra base+rail slots, except
+        # `rail.position`, which takes the configured constant value. Must be populated before
+        # cameras so `build_dataset_frame` finds every name declared in `observation_features`.
+        if self.config.enable_linear_bot_padding:
+            for name in _EXTRA_STATE_NAMES:
+                obs_dict[name] = 0.0
+            obs_dict["rail.position"] = float(self.config.rail_position)
+
         # Get camera observations
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
@@ -275,6 +323,10 @@ class BiYamFollower(Robot):
         Returns:
             The action that was sent
         """
+        # Note: when `enable_linear_bot_padding` is True, the action dict also contains
+        # base.*.vel / rail.vel keys. They're intentionally dropped here (no base/rail hardware
+        # on bi_yam); only the arm-prefixed keys below are forwarded to the arm servers.
+
         # Extract left arm actions
         left_action = []
         for i in range(self._left_dofs):
