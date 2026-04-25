@@ -311,49 +311,65 @@ Since the follower arms, FlowBase, and cameras are all local to the
 follower PC, only `--teleop.server_host` needs the remote IP. Everything
 else points to `localhost`.
 
-### X-only data collection (rail parked + base X axis only)
+### Y-only data collection (rail parked + base Y axis only)
 
 For tasks where the rail should sit at a fixed height and the base should
-only move along its X axis (e.g. sliding sideways), the controller and the
-LeRobot robot type both expose a coordinated "X-only" mode. The joystick
-analog axes and the rail axis are hard-disabled; only the joystick D-pad
-left/right drives a discrete +/- X velocity. The dataset schema is trimmed
-to record only `base.x` (observation) and `base.x.vel` (action) on the base
-side.
+only move along its Y axis (sideways, left/right), the controller and the
+LeRobot robot type both expose a coordinated "Y-only" mode. The joystick's
+left analog stick X axis (or the D-pad) drives base Y velocity; X, theta,
+and rail channels are hard-masked to zero. The dataset schema is trimmed
+to record only `base.y` (observation) and `base.y.vel` (action) on the
+base side.
 
-#### Step A — Start the FlowBase controller in X-only mode
+The rail is held at `--rail-height` with an active position-hold P-loop
+rather than the physical brake. On this hardware the brake circuit is
+wired into the wheel-motor power loop, so engaging it would kill wheel
+power and freeze the base.
+
+See `Y_ONLY_RUNBOOK.md` at the repo root for a fuller end-to-end
+runbook (RPi GPIO, CAN reset, four arm servers, recording, troubleshooting).
+
+#### Step A — Start the FlowBase controller in Y-only mode
 
 ```bash
 python i2rt/i2rt/flow_base/flow_base_controller.py \
   --channel can_linearbot \
   --gpio-host 172.16.0.67:8765 \
-  --x-only \
+  --y-only \
   --rail-height 25.0
 ```
 
 Startup sequence:
 1. Auto-homing drives the rail down to the lower limit (`pos = 0`).
-2. The new parking loop drives the rail up to `--rail-height` (motor rad,
-   same unit as `rail.position` printed by the controller), then engages
-   the brake.
-3. The main loop runs with D-pad-only X input. `Y`, `theta`, and rail
+2. The parking loop drives the rail up to `--rail-height` (motor rad,
+   same unit as `rail.position` printed by the controller).
+3. With `--y-only`, the brake stays released and the rail position-hold
+   loop kicks in to hold the height; wheel LEDs stay green.
+4. The main loop runs with Y-only input. `X`, `theta`, and rail
    commands are masked to zero on every tick, including any incoming
    remote command.
 
 Useful flags:
 - `--rail-height <rad>`: target height in motor rad. Omit to leave the
   rail at home.
-- `--x-max-vel <m/s>`: speed of one D-pad press (default `0.25`).
+- `--y-max-vel <m/s>`: peak Y speed at full stick deflection (default
+  `0.25`).
+- `--y-input {auto,dpad,stick}`: input source. `auto` picks D-pad if
+  the gamepad reports a hat, otherwise falls back to an analog axis.
+- `--y-axis-index <int>`: analog axis index used in stick mode (default
+  `0` = left-stick X, sideways). Watch the `aN:` values in the status
+  line to identify your controller's mapping.
+- `--y-axis-invert`, `--y-axis-deadzone <float>`: tune analog input.
 - `--rail-kp`, `--rail-tol`, `--rail-park-timeout`, `--rail-park-settle`:
   P-loop tuning for parking.
 
-To lower the rail back later, simply Ctrl+C the controller and relaunch
-without `--rail-height`. Auto-homing always drives the rail to the lower
-limit on startup.
+To lower the rail back later, Ctrl+C the controller and relaunch
+without `--rail-height` (and without `--y-only`). Auto-homing always
+drives the rail to the lower limit on startup.
 
-#### Step B — Record with `x_only_mode=true`
+#### Step B — Record with `y_only_mode=true`
 
-Add `--robot.x_only_mode=true` to the `lerobot-record` command. Everything
+Add `--robot.y_only_mode=true` to the `lerobot-record` command. Everything
 else (cameras, arm servers, repo id) stays the same:
 
 ```bash
@@ -364,7 +380,7 @@ lerobot-record \
   --robot.right_arm_port=1234 \
   --robot.flow_base_host=localhost \
   --robot.with_linear_rail=true \
-  --robot.x_only_mode=true \
+  --robot.y_only_mode=true \
   --robot.cameras='{
     left: {"type": "intelrealsense", "serial_number_or_name": "230422272258", "width": 640, "height": 480, "fps": 30},
     top: {"type": "intelrealsense", "serial_number_or_name": "335522072330", "width": 640, "height": 480, "fps": 30},
@@ -374,7 +390,7 @@ lerobot-record \
   --teleop.server_host=172.16.0.89 \
   --teleop.left_arm_port=5002 \
   --teleop.right_arm_port=5001 \
-  --dataset.repo_id=${HF_USER}/linear-bot-x-only \
+  --dataset.repo_id=${HF_USER}/linear-bot-y-only \
   --dataset.num_episodes=10 \
   --dataset.episode_time_s=120 \
   --dataset.reset_time_s=20 \
@@ -382,7 +398,7 @@ lerobot-record \
   --resume=false
 ```
 
-When `x_only_mode=true`, the recorded fields shrink to:
+When `y_only_mode=true`, the recorded fields shrink to:
 
 **Observation state**:
 
@@ -392,7 +408,7 @@ When `x_only_mode=true`, the recorded fields shrink to:
 | `left_gripper.pos` | Left gripper position |
 | `right_joint_0.pos` .. `right_joint_5.pos` | Right arm joint positions |
 | `right_gripper.pos` | Right gripper position |
-| `base.x` | FlowBase odometry X translation |
+| `base.y` | FlowBase odometry Y translation (sideways) |
 
 **Action**:
 
@@ -402,11 +418,11 @@ When `x_only_mode=true`, the recorded fields shrink to:
 | `left_gripper.pos` | Left gripper target |
 | `right_joint_0.pos` .. `right_joint_5.pos` | Right arm joint targets |
 | `right_gripper.pos` | Right gripper target |
-| `base.x.vel` | Base X velocity command |
+| `base.y.vel` | Base Y velocity command |
 
-No `base.y`, `base.theta`, `base.cmd.*`, or `rail.*` fields are written.
-The robot still queries `base.cmd.x.vel` from the FlowBase internally to
-fill in `action.base.x.vel` during teleoperation, but that key is never
+No `base.x`, `base.theta`, `base.cmd.*`, or `rail.*` fields are written.
+The robot still queries `base.cmd.y.vel` from the FlowBase internally to
+fill in `action.base.y.vel` during teleoperation, but that key is never
 serialised to the dataset.
 
 ### Recorded fields

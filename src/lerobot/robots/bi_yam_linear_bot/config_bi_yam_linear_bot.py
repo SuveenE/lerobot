@@ -37,16 +37,16 @@ class BiYamLinearBotConfig(RobotConfig):
     # Whether the FlowBase has a linear rail lift module
     with_linear_rail: bool = True
 
-    # X-only data collection mode. When True:
-    # - Observation features include only `base.x` (no y/theta, no rail.*, no
-    #   base.cmd.*).
-    # - Action features include only `base.x.vel` (no y/theta vel, no rail.vel).
-    # - send_action sends a 3D base velocity with y=theta=0 and never commands
+    # Y-only (sideways) data collection mode. When True:
+    # - Observation features include only `base.y` (no x/theta, no rail.*,
+    #   no base.cmd.*).
+    # - Action features include only `base.y.vel`.
+    # - send_action sends a 3D base velocity with x=theta=0 and never commands
     #   rail velocity, so the rail stays parked at whatever height the
     #   flow_base_controller put it at on startup (see --rail-height).
-    # Use together with `--x-only --rail-height <rad>` on the
-    # flow_base_controller for safe X-only data collection.
-    x_only_mode: bool = False
+    # Use together with `--y-only --rail-height <rad>` on the
+    # flow_base_controller for safe Y-only data collection.
+    y_only_mode: bool = False
 
     # FlowBase controller velocity limits – must match the values used by the
     # running flow_base_controller so that policy outputs (physical velocities)

@@ -130,8 +130,8 @@ class BiYamLinearBot(Robot):
 
     @property
     def _base_obs_ft(self) -> dict[str, type]:
-        if self.config.x_only_mode:
-            return {"base.x": float}
+        if self.config.y_only_mode:
+            return {"base.y": float}
 
         ft: dict[str, type] = {
             "base.x": float,
@@ -156,8 +156,8 @@ class BiYamLinearBot(Robot):
 
     @property
     def _base_action_ft(self) -> dict[str, type]:
-        if self.config.x_only_mode:
-            return {"base.x.vel": float}
+        if self.config.y_only_mode:
+            return {"base.y.vel": float}
 
         ft: dict[str, type] = {
             "base.x.vel": float,
@@ -279,16 +279,19 @@ class BiYamLinearBot(Robot):
         odometry = self._flow_base_client.get_odometry()
         translation = odometry["translation"]
         rotation = odometry["rotation"]
-        obs_dict["base.x"] = float(translation[0])
-        if not self.config.x_only_mode:
+        if self.config.y_only_mode:
+            # Y-only: record only sideways translation.
+            obs_dict["base.y"] = float(translation[1])
+        else:
+            obs_dict["base.x"] = float(translation[0])
             obs_dict["base.y"] = float(translation[1])
             obs_dict["base.theta"] = float(rotation)
 
         # --- Linear rail ---
-        # In x_only_mode the rail is parked externally and never commanded by
+        # In y_only_mode the rail is parked externally and never commanded by
         # the robot; we skip the rail RPC entirely to save a round-trip and
         # leave rail fields out of the dataset.
-        if self.config.with_linear_rail and not self.config.x_only_mode:
+        if self.config.with_linear_rail and not self.config.y_only_mode:
             rail = self._flow_base_client.get_linear_rail_state()
             obs_dict["rail.position"] = float(rail["position"])
             obs_dict["rail.velocity"] = float(rail["velocity"])
@@ -298,12 +301,12 @@ class BiYamLinearBot(Robot):
         # --- Resolved command (captures joystick and/or remote input) ---
         resolved = self._flow_base_client.get_current_command()
         vel = resolved["velocity"]
-        if self.config.x_only_mode:
-            # Stash base.cmd.x.vel in the raw obs dict so teleop_action_from_obs
-            # can copy it into action.base.x.vel. This key is intentionally NOT
-            # declared in observation_features, so build_dataset_frame will drop
-            # it from the saved dataset.
-            obs_dict["base.cmd.x.vel"] = float(vel[0])
+        if self.config.y_only_mode:
+            # Stash base.cmd.y.vel in the raw obs dict so
+            # teleop_action_from_obs can copy it into action.base.y.vel.
+            # This key is intentionally NOT declared in observation_features,
+            # so build_dataset_frame will drop it from the saved dataset.
+            obs_dict["base.cmd.y.vel"] = float(vel[1])
         else:
             obs_dict["base.cmd.x.vel"] = float(vel[0])
             obs_dict["base.cmd.y.vel"] = float(vel[1])
@@ -385,8 +388,8 @@ class BiYamLinearBot(Robot):
             base_max = np.array(self.config.base_max_vel)
             base_vel_norm = base_vel / np.where(base_max != 0, base_max, 1.0)
 
-            if self.config.x_only_mode:
-                # Send a 3D base velocity with y=theta=0; the rail is parked
+            if self.config.y_only_mode:
+                # Send a 3D base velocity with x=theta=0; the rail is parked
                 # externally and never commanded from here.
                 vel_cmd = base_vel_norm
             elif self.config.with_linear_rail:
@@ -412,12 +415,12 @@ class BiYamLinearBot(Robot):
     # ------------------------------------------------------------------
 
     def teleop_action_from_obs(self, obs: dict[str, Any]) -> dict[str, float]:
-        if self.config.x_only_mode:
-            # base.cmd.x.vel is present in the raw obs dict (stashed by
+        if self.config.y_only_mode:
+            # base.cmd.y.vel is present in the raw obs dict (stashed by
             # get_observation) even though it is not a declared observation
             # feature, so we can use it as the action fallback during
             # teleoperation when the leader only produces arm joint targets.
-            return {"base.x.vel": float(obs.get("base.cmd.x.vel", 0.0))}
+            return {"base.y.vel": float(obs.get("base.cmd.y.vel", 0.0))}
 
         fallback: dict[str, float] = {
             "base.x.vel": float(obs.get("base.cmd.x.vel", 0.0)),
