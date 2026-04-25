@@ -118,7 +118,8 @@ python i2rt/i2rt/flow_base/flow_base_controller.py \
   --channel can_linearbot \
   --gpio-host 172.16.0.67:8765 \
   --y-only \
-  --rail-height 25.0
+  --rail-height 25.0 \
+  --rail-park-max-vel 0.05
 ```
 
 Startup sequence you should see in the logs:
@@ -148,7 +149,8 @@ Useful knobs:
 | `--y-axis-deadzone <float>` | `0.15` | Deadzone for the analog axis to suppress drift. |
 | `--rail-kp <float>` | `6.0` | P-gain for the rail parking and rail position-hold loops. |
 | `--rail-tol <rad>` | `0.05` | Position tolerance for "we are there" during initial parking. |
-| `--rail-park-timeout <s>` | `20.0` | Hard timeout if parking stalls. |
+| `--rail-park-max-vel <rad/s>` | `0.5` | Max rail velocity during the parking ramp. Lower = slower, gentler movement to `--rail-height`. Pass `0.05` for a very slow crawl. |
+| `--rail-park-timeout <s>` | `20.0` | Minimum timeout for parking. The controller auto-extends this to `dist / --rail-park-max-vel * 1.5 + 5` so a slow `--rail-park-max-vel` does not cause spurious timeouts. |
 | `--rail-park-settle <s>` | `0.3` | Time the rail must stay within tolerance before parking is considered complete. |
 | `--no-gamepad` | (off) | Skip joystick init entirely. The RPC server still serves odometry and accepts remote velocity commands. Useful for arm-only teleop tests. |
 

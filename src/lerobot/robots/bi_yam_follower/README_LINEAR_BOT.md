@@ -360,6 +360,10 @@ Useful flags:
   `0` = left-stick X, sideways). Watch the `aN:` values in the status
   line to identify your controller's mapping.
 - `--y-axis-invert`, `--y-axis-deadzone <float>`: tune analog input.
+- `--rail-park-max-vel <rad/s>`: caps the parking velocity (default
+  `0.5`). Pass a low value (e.g. `0.05`) for a very slow crawl up to
+  `--rail-height`. The parking timeout is auto-extended so this does
+  not cause spurious failures.
 - `--rail-kp`, `--rail-tol`, `--rail-park-timeout`, `--rail-park-settle`:
   P-loop tuning for parking.
 
