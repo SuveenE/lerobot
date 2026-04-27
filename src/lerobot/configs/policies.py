@@ -13,6 +13,7 @@
 # limitations under the License.
 import abc
 import builtins
+import dataclasses
 import json
 import os
 import tempfile
@@ -191,24 +192,30 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
                     f"{CONFIG_NAME} not found on the HuggingFace Hub in {model_id}"
                 ) from e
 
-        # HACK: Parse the original config to get the config subclass, so that we can
-        # apply cli overrides.
-        # This is very ugly, ideally we'd like to be able to do that natively with draccus
-        # something like --policy.path (in addition to --policy.type)
-        with draccus.config_type("json"):
-            orig_config = draccus.parse(cls, config_file, args=[])
-
         if config_file is None:
             raise FileNotFoundError(f"{CONFIG_NAME} not found in {model_id}")
 
         with open(config_file) as f:
             config = json.load(f)
 
-        config.pop("type")
+        policy_type = config.pop("type", None)
+        if policy_type is None:
+            raise ValueError(f"Missing 'type' field in {config_file}")
+
+        resolved_cls = cls.get_choice_class(policy_type)
+
+        valid_fields = {f.name for f in dataclasses.fields(resolved_cls)}
+        unknown = {k for k in config if k not in valid_fields}
+        if unknown:
+            logger.warning(
+                f"Ignoring unknown fields in config.json for {resolved_cls.__name__}: {sorted(unknown)}"
+            )
+            config = {k: v for k, v in config.items() if k in valid_fields}
+
         with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
             json.dump(config, f)
             config_file = f.name
 
         cli_overrides = policy_kwargs.pop("cli_overrides", [])
         with draccus.config_type("json"):
-            return draccus.parse(orig_config.__class__, config_file, args=cli_overrides)
+            return draccus.parse(resolved_cls, config_file, args=cli_overrides)
