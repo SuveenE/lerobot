@@ -13,25 +13,46 @@
 # limitations under the License.
 
 """
-Example command:
+Example - Async inference with dataset recording:
 ```shell
-python src/lerobot/async_inference/robot_client.py \
-    --robot.type=so100_follower \
-    --robot.port=/dev/tty.usbmodem58760431541 \
-    --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}}" \
-    --robot.id=black \
-    --task="dummy" \
-    --server_address=127.0.0.1:8080 \
-    --policy_type=act \
-    --pretrained_name_or_path=user/model \
-    --policy_device=mps \
-    --actions_per_chunk=50 \
-    --chunk_size_threshold=0.5 \
-    --aggregate_fn_name=weighted_average \
-    --debug_visualize_queue_size=True
+python -m lerobot.async_inference.robot_client \
+  --server_address 35.232.231.3:8000 \
+  --robot.type bi_yam_follower \
+  --robot.left_arm_port 1235 \
+  --robot.right_arm_port 1234 \
+  --robot.cameras '{
+right: {"type": "intelrealsense", "serial_number_or_name": "323622271967", "width": 640, "height": 360, "fps": 30},
+left: {"type": "intelrealsense", "serial_number_or_name": "335122271899", "width": 640, "height": 360, "fps": 30},
+top: {"type": "intelrealsense", "serial_number_or_name": "406122071208", "width": 640, "height": 360, "fps": 30}
+}' \
+  --task "Pack snacks into the container" \
+  --policy_type pi05 \
+  --pretrained_name_or_path cortexairobot/pi05_multi_packing_200k \
+  --policy_device cuda \
+  --actions_per_chunk 30 \
+  --chunk_size_threshold 0.0 \
+  --aggregate_fn_name weighted_average \
+  --debug_visualize_queue_size True \
+  --dataset.enabled true \
+  --dataset.num_episodes 2 \
+  --dataset.repo_id cortexairobot/eval_pi05_multi_packing_200k_02122026_test \
+  --dataset.push_to_hub true \
+  --dataset.max_episode_seconds 300 \
+  --dataset.video_encoding_batch_size 2 \
+  --dataset.reset_time_s 10 \
+  --dataset.resume false
+
+# Keyboard controls when recording:
+#   'n' + Enter: Save current episode and start new one
+#   's' + Enter: Save current episode and stop recording
+#   'b' + Enter: Discard current episode and re-record (restart without saving)
+#
+# During reset, robot smoothly moves to the hardcoded initial_position
+# (defined in RobotClient.__init__). Update self.initial_position to your desired home position.
 ```
 """
 
+import contextlib
 import logging
 import pickle  # nosec
 import threading
@@ -48,6 +69,10 @@ import torch
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
+from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
+from lerobot.processor import make_default_processors
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
@@ -63,6 +88,9 @@ from lerobot.transport import (
     services_pb2_grpc,  # type: ignore
 )
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
+from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.utils.control_utils import init_keyboard_listener, is_headless
+from lerobot.utils.utils import log_say
 
 from .configs import RobotClientConfig
 from .constants import SUPPORTED_ROBOTS
@@ -136,9 +164,126 @@ class RobotClient:
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set - observations qualify for direct processing
 
+        # Dataset recording initialization
+        self.dataset: LeRobotDataset | None = None
+        self.dataset_features: dict | None = None
+        self.keyboard_listener = None
+        self.keyboard_events: dict | None = None
+
+        if config.dataset.enabled:
+            self._init_dataset_recording()
+
+        # Track if robot was already disconnected (to prevent double disconnect)
+        self._robot_disconnected = False
+
+        # Track if current episode should be aborted (don't save on error)
+        self._abort_current_episode = False
+
+        # Hardcoded initial/home position for bi_yam robot
+        # TODO: Update these values to your desired starting position
+        self.initial_position: dict[str, float] = {
+            "left_joint_0.pos": 0.0,
+            "left_joint_1.pos": 0.0,
+            "left_joint_2.pos": 0.0,
+            "left_joint_3.pos": 0.0,
+            "left_joint_4.pos": 0.0,
+            "left_joint_5.pos": 0.0,
+            "left_gripper.pos": 1.0,
+            "right_joint_0.pos": 0.0,
+            "right_joint_1.pos": 0.0,
+            "right_joint_2.pos": 0.0,
+            "right_joint_3.pos": 0.0,
+            "right_joint_4.pos": 0.0,
+            "right_joint_5.pos": 0.0,
+            "right_gripper.pos": 1.0,
+        }
+
+    def _init_dataset_recording(self):
+        """Initialize dataset recording for evaluation."""
+        self.logger.info("Initializing dataset recording...")
+
+        # Get default processors for feature transformation
+        teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+
+        # Build dataset features from robot observation and action features
+        self.dataset_features = combine_feature_dicts(
+            aggregate_pipeline_dataset_features(
+                pipeline=teleop_action_processor,
+                initial_features=create_initial_features(action=self.robot.action_features),
+                use_videos=self.config.dataset.use_videos,
+            ),
+            aggregate_pipeline_dataset_features(
+                pipeline=robot_observation_processor,
+                initial_features=create_initial_features(observation=self.robot.observation_features),
+                use_videos=self.config.dataset.use_videos,
+            ),
+        )
+
+        # Determine number of cameras for image writer threads
+        num_cameras = len(self.robot.cameras) if hasattr(self.robot, "cameras") else 0
+        num_image_writer_threads = self.config.dataset.num_image_writer_threads_per_camera * max(num_cameras, 1)
+
+        if self.config.dataset.resume:
+            # Resume recording to an existing dataset
+            # Use very high batch_encoding_size to prevent encoding during recording.
+            self.dataset = LeRobotDataset(
+                self.config.dataset.repo_id,
+                root=self.config.dataset.root,
+                batch_encoding_size=9999,  # Never batch encode during recording
+            )
+
+            if num_cameras > 0:
+                self.dataset.start_image_writer(
+                    num_processes=self.config.dataset.num_image_writer_processes,
+                    num_threads=num_image_writer_threads,
+                )
+
+            # Use features from the existing dataset
+            self.dataset_features = self.dataset.meta.features
+
+            self.logger.info(f"Resuming dataset at {self.dataset.root} with {self.dataset.num_episodes} existing episodes")
+        else:
+            # Create a new dataset
+            # Use very high batch_encoding_size to prevent encoding during recording.
+            # All encoding will happen in stop() AFTER robot is disconnected.
+            self.dataset = LeRobotDataset.create(
+                repo_id=self.config.dataset.repo_id,
+                fps=self.config.fps,
+                root=self.config.dataset.root,
+                robot_type=self.robot.name if hasattr(self.robot, "name") else None,
+                features=self.dataset_features,
+                use_videos=self.config.dataset.use_videos,
+                image_writer_processes=self.config.dataset.num_image_writer_processes,
+                image_writer_threads=num_image_writer_threads,
+                batch_encoding_size=9999,  # Never batch encode during recording
+            )
+
+            self.logger.info(f"Dataset created at {self.dataset.root} with features: {list(self.dataset_features.keys())}")
+
+        # Initialize keyboard listener for episode control
+        if not is_headless():
+            self.keyboard_listener, self.keyboard_events = init_keyboard_listener()
+            self.logger.info("Keyboard controls enabled: 'n' = save episode, 's' = stop recording, 'b' = re-record episode")
+        else:
+            self.keyboard_events = {
+                "exit_early": False,
+                "rerecord_episode": False,
+                "stop_recording": False,
+            }
+            self.logger.warning("Headless mode: keyboard controls not available. Use time-based episodes only.")
+
     @property
     def running(self):
         return not self.shutdown_event.is_set()
+
+    def abort_current_episode(self):
+        """Mark the current episode as aborted (will not be saved).
+
+        Call this when an error occurs to prevent saving corrupted data.
+        The robot will move to the initial position on disconnect.
+        """
+        self._abort_current_episode = True
+        self.logger.warning("Current episode marked as aborted - will not be saved")
 
     def start(self):
         """Start the robot client and connect to the policy server"""
@@ -171,14 +316,86 @@ class RobotClient:
             return False
 
     def stop(self):
-        """Stop the robot client"""
+        """Stop the robot client and finalize dataset if recording.
+
+        Robot is disconnected FIRST, before video encoding starts.
+        This allows starting a new inference session in another terminal
+        while video encoding happens in the background.
+        """
         self.shutdown_event.set()
 
-        self.robot.disconnect()
-        self.logger.debug("Robot disconnected")
+        # Clear action queue first
+        self._clear_action_queue()
+        self.logger.info("Action queue cleared")
 
-        self.channel.close()
-        self.logger.debug("Client stopped, channel closed")
+        # Stop keyboard listener if active
+        if self.keyboard_listener is not None:
+            with contextlib.suppress(Exception):
+                self.keyboard_listener.stop()
+
+        # Disconnect robot and policy server (if not already done in control_loop)
+        if not self._robot_disconnected:
+            # Move robot to initial/home position before disconnecting
+            self.logger.info("Moving robot to initial position before disconnect...")
+            try:
+                self._slow_move_to_position(self.initial_position, num_steps=100, step_sleep=0.1)
+                self.logger.info("Robot at initial position")
+            except Exception as e:
+                self.logger.warning(f"Error moving to initial position: {e}")
+
+            self.robot.disconnect()
+            self.logger.info("Robot disconnected")
+
+            try:
+                self.channel.close()
+                self.logger.info("Disconnected from policy server")
+            except Exception as e:
+                self.logger.warning(f"Error closing policy server connection: {e}")
+
+            self.logger.info("=== Robot and policy server disconnected ===")
+            self.logger.info("You can now start a new inference session in another terminal")
+
+        # Now do video encoding and dataset finalization (can take a while)
+        if self.dataset is not None:
+            try:
+                # Check if there are any unsaved frames in the buffer
+                if self.dataset.episode_buffer is not None and self.dataset.episode_buffer.get("size", 0) > 0:
+                    if self._abort_current_episode:
+                        self.logger.warning("Episode aborted due to error - discarding unsaved data")
+                        self.dataset.clear_episode_buffer()
+                    else:
+                        self.logger.info("Saving final episode...")
+                        self._save_current_episode()
+
+                # Encode any remaining episodes that haven't been batch encoded into videos
+                if hasattr(self.dataset, "episodes_since_last_encoding") and self.dataset.episodes_since_last_encoding > 0:
+                    start_ep = self.dataset.num_episodes - self.dataset.episodes_since_last_encoding
+                    end_ep = self.dataset.num_episodes
+                    self.logger.info(
+                        f"Encoding remaining {self.dataset.episodes_since_last_encoding} episodes "
+                        f"(episodes {start_ep} to {end_ep - 1}) into videos..."
+                    )
+                    self.logger.info("(Robot is free - you can start another inference session now)")
+                    self.dataset._batch_save_episode_video(start_ep, end_ep)
+                    self.dataset.episodes_since_last_encoding = 0
+
+                # Finalize the dataset (close parquet writers)
+                self.logger.info("Finalizing dataset...")
+                self.dataset.finalize()
+
+                # Push to hub if configured
+                if self.config.dataset.push_to_hub:
+                    self.logger.info(f"Pushing dataset to HuggingFace Hub: {self.config.dataset.repo_id}")
+                    self.dataset.push_to_hub(
+                        tags=self.config.dataset.tags,
+                        private=self.config.dataset.private,
+                    )
+                    self.logger.info("Dataset pushed to Hub successfully")
+
+                self.logger.info(f"Dataset recording complete. Total episodes: {self.dataset.num_episodes}")
+
+            except Exception as e:
+                self.logger.error(f"Error finalizing dataset: {e}")
 
     def send_observation(
         self,
@@ -352,6 +569,60 @@ class RobotClient:
         action = {key: action_tensor[i].item() for i, key in enumerate(self.robot.action_features)}
         return action
 
+    def _build_recording_frame(
+        self,
+        observation: RawObservation,
+        action: dict[str, Any],
+        task: str,
+    ) -> dict:
+        """Build a frame dict for dataset recording.
+
+        Args:
+            observation: Raw observation from the robot
+            action: Action dict that was executed
+            task: Task description string
+
+        Returns:
+            Frame dict ready for dataset.add_frame()
+        """
+        # Build observation frame
+        obs_frame = build_dataset_frame(self.dataset_features, observation, prefix=OBS_STR)
+
+        # Build action frame
+        action_frame = build_dataset_frame(self.dataset_features, action, prefix=ACTION)
+
+        # Combine into a single frame with task
+        # Note: timestamp is automatically computed by add_frame() from frame_index / fps
+        frame = {
+            **obs_frame,
+            **action_frame,
+            "task": task,
+        }
+
+        return frame
+
+    def _record_frame(
+        self,
+        observation: RawObservation,
+        action: dict[str, Any],
+        task: str,
+    ) -> None:
+        """Record a single frame to the dataset.
+
+        Args:
+            observation: Raw observation from the robot
+            action: Action dict that was executed
+            task: Task description string
+        """
+        if self.dataset is None:
+            return
+
+        try:
+            frame = self._build_recording_frame(observation, action, task)
+            self.dataset.add_frame(frame)
+        except Exception as e:
+            self.logger.error(f"Error recording frame: {e}")
+
     def control_loop_action(self, verbose: bool = False) -> dict[str, Any]:
         """Reading and performing actions in local queue"""
 
@@ -440,6 +711,161 @@ class RobotClient:
         except Exception as e:
             self.logger.error(f"Error in observation sender: {e}")
 
+    def _check_episode_end(self, episode_start_time: float) -> tuple[bool, bool]:
+        """Check if the current episode should end.
+
+        Args:
+            episode_start_time: The time when the current episode started
+
+        Returns:
+            Tuple of (should_save_episode, should_stop_recording)
+        """
+        should_save = False
+        should_stop = False
+
+        # Check keyboard events
+        if self.keyboard_events is not None:
+            if self.keyboard_events.get("exit_early", False):
+                should_save = True
+                self.keyboard_events["exit_early"] = False
+                self.logger.info("Keyboard trigger: Saving episode...")
+
+            if self.keyboard_events.get("stop_recording", False):
+                should_save = True
+                should_stop = True
+                self.logger.info("Keyboard trigger: Stopping recording...")
+
+        # Check time-based trigger
+        max_seconds = self.config.dataset.max_episode_seconds
+        if max_seconds is not None and self.dataset is not None:
+            elapsed = time.perf_counter() - episode_start_time
+            if elapsed >= max_seconds:
+                should_save = True
+                self.logger.info(f"Time trigger: Episode reached {max_seconds}s, saving...")
+                log_say("Episode reached time limit. Start reseting the environment safely...", self.config.play_sounds)
+
+        return should_save, should_stop
+
+    def _save_current_episode(self) -> None:
+        """Save the current episode to the dataset."""
+        if self.dataset is None:
+            return
+
+        try:
+            self.dataset.save_episode()
+            self.logger.info(f"Episode {self.dataset.num_episodes - 1} saved successfully")
+        except Exception as e:
+            self.logger.error(f"Error saving episode: {e}")
+
+    def _clear_action_queue(self) -> None:
+        """Clear all pending actions from the queue."""
+        with self.action_queue_lock:
+            while not self.action_queue.empty():
+                try:
+                    self.action_queue.get_nowait()
+                except Exception:
+                    break
+        self.logger.debug("Action queue cleared")
+
+    def _slow_move_to_position(self, target_position: dict[str, float], num_steps: int = 100, step_sleep: float = 0.03) -> None:
+        """Slowly move robot from current position to target position.
+
+        Matches i2rt's slow_move logic:
+        - Discrete steps (default 100)
+        - Fixed sleep between steps (default 0.03s)
+        - Linear interpolation: target * (i/num_steps) + start * (1 - i/num_steps)
+
+        Args:
+            target_position: Target joint positions
+            num_steps: Number of interpolation steps (default 100, like i2rt)
+            step_sleep: Sleep duration between steps in seconds (default 0.03s, like i2rt)
+        """
+        # Get current position as starting point
+        current_obs = self.robot.get_observation()
+        start_positions = {}
+        for key in self.robot.action_features:
+            if key in current_obs:
+                start_positions[key] = current_obs[key]
+
+        # Interpolate over num_steps (like i2rt's slow_move)
+        for i in range(num_steps):
+            blend_factor = i / num_steps  # 0 to ~1
+
+            blended_action = {}
+            for key in self.robot.action_features:
+                if key in start_positions and key in target_position:
+                    start_val = start_positions[key]
+                    target_val = target_position[key]
+                    # Same formula as i2rt: target * (i/100) + start * (1 - i/100)
+                    blended_action[key] = target_val * blend_factor + start_val * (1 - blend_factor)
+                elif key in target_position:
+                    blended_action[key] = target_position[key]
+                elif key in start_positions:
+                    blended_action[key] = start_positions[key]
+
+            self.robot.send_action(blended_action)
+            time.sleep(step_sleep)
+
+            # Check for early exit
+            if self.keyboard_events is not None and self.keyboard_events.get("exit_early", False):
+                break
+
+        # Final step: send exact target position
+        self.robot.send_action(target_position)
+
+    def _run_reset_period_initial_position(self, verbose: bool = False) -> None:
+        """Run reset period by moving robot to a fixed initial/home position.
+
+        Uses slow_move logic matching i2rt (100 steps, 0.03s sleep = ~3s move).
+        Then holds at initial position for remaining reset time.
+        """
+        reset_time_s = self.config.dataset.reset_time_s
+
+        if reset_time_s <= 0:
+            return
+
+        self.logger.info(f"=== RESET PERIOD ({reset_time_s}s) - MOVING TO HOME POSITION ===")
+        self.logger.info("  -> Slow move to initial position (100 steps, 0.1s each = 10s)")
+        self.logger.info("  -> Press 'n' + Enter to exit reset early")
+
+        # Clear pending policy actions
+        self._clear_action_queue()
+
+        reset_start_time = time.perf_counter()
+
+        # Phase 1: Slow move to initial position (100 steps * 0.1s = 10 seconds)
+        self._slow_move_to_position(self.initial_position, num_steps=100, step_sleep=0.1)
+
+        # Phase 2: Hold at initial position for remaining reset time
+        while self.running and (time.perf_counter() - reset_start_time) < reset_time_s:
+            loop_start = time.perf_counter()
+
+            # Hold at initial position
+            self.robot.send_action(self.initial_position)
+
+            # Check if user wants to exit early
+            if self.keyboard_events is not None and self.keyboard_events.get("exit_early", False):
+                self.keyboard_events["exit_early"] = False
+                self.logger.info("Exiting reset period early...")
+                break
+
+            # Maintain control frequency
+            time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - loop_start)))
+
+        self.logger.info("=== RESET COMPLETE - AT HOME POSITION, POLICY ACTIVE ===")
+
+    def _run_reset_period(self, task: str, verbose: bool = False) -> None:
+        """Run a reset period where the robot moves to the initial/home position.
+
+        Smoothly moves the robot to the hardcoded initial_position over
+        initial_position_blend_s seconds.
+
+        Args:
+            task: Task description string
+            verbose: Whether to log verbose output
+        """
+        self._run_reset_period_initial_position(verbose)
+
     def control_loop(self, task: str, verbose: bool = False) -> tuple[Observation, Action]:
         """Combined function for executing actions and streaming observations"""
         # Wait at barrier for synchronized start
@@ -449,15 +875,113 @@ class RobotClient:
         _performed_action = None
         _captured_observation = None
 
+        # Episode tracking for dataset recording
+        episode_start_time = time.perf_counter()
+        recording_active = self.dataset is not None
+        recorded_episodes = 0  # Counter for episodes recorded this session
+
+        # For consistent recording: track last executed action
+        _last_action: dict[str, Any] | None = None
+
+        if recording_active:
+            self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
+            log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
+
         while self.running:
             control_loop_start = time.perf_counter()
+
             """Control loop: (1) Performing actions, when available"""
             if self.actions_available():
                 _performed_action = self.control_loop_action(verbose)
+                _last_action = _performed_action  # Track for recording
 
             """Control loop: (2) Streaming observations to the remote policy server"""
             if self._ready_to_send_observation():
                 _captured_observation = self.control_loop_observation(task, verbose)
+
+            """Control loop: (3) Recording frame to dataset (if enabled)
+
+            For smooth recording at consistent FPS:
+            - Always capture fresh observation for recording (not just when sending to server)
+            - Use the most recently executed action
+            - Record every loop iteration once we have valid data
+            """
+            if recording_active and _last_action is not None:
+                # Get fresh observation for recording (independent of server send rate)
+                recording_observation = self.robot.get_observation()
+                self._record_frame(
+                    observation=recording_observation,
+                    action=_last_action,
+                    task=task,
+                )
+
+            """Control loop: (4) Check for episode boundaries (keyboard or time-based)"""
+            if recording_active:
+                # Check for rerecord episode (discard current and restart)
+                if self.keyboard_events is not None and self.keyboard_events.get("rerecord_episode", False):
+                    self.keyboard_events["rerecord_episode"] = False
+                    self.keyboard_events["exit_early"] = False  # Clear to prevent reset period from exiting immediately
+                    self.logger.info("Re-recording episode - discarding current episode...")
+                    log_say("Re-record episode", self.config.play_sounds)
+
+                    # Clear episode buffer without saving
+                    self.dataset.clear_episode_buffer()
+
+                    # Clear pending policy actions
+                    self._clear_action_queue()
+
+                    # Run reset period to give time to reset the environment
+                    self._run_reset_period(task, verbose)
+
+                    # Restart episode tracking
+                    episode_start_time = time.perf_counter()
+                    _last_action = None
+                    self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
+                    log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
+                    continue
+
+                should_save, should_stop = self._check_episode_end(episode_start_time)
+
+                if should_save:
+                    self._save_current_episode()
+                    recorded_episodes += 1
+
+                    # Check if we've reached the target number of episodes for this session
+                    num_episodes_target = self.config.dataset.num_episodes
+                    if num_episodes_target is not None and recorded_episodes >= num_episodes_target:
+                        self.logger.info(f"Recorded {num_episodes_target} episodes. Total: {self.dataset.num_episodes}. Stopping.")
+                        should_stop = True
+
+                    if should_stop:
+                        log_say("Stop recording", self.config.play_sounds, blocking=True)
+                        self.logger.info("Recording complete - moving to initial position before disconnect...")
+                        # Move robot to initial position before stopping
+                        self._clear_action_queue()
+                        self._slow_move_to_position(self.initial_position, num_steps=100, step_sleep=0.1)
+                        self.logger.info("Robot at initial position")
+
+                        # Disconnect robot and policy server NOW, before any remaining encoding
+                        self.robot.disconnect()
+                        self.logger.info("Robot disconnected")
+                        try:
+                            self.channel.close()
+                            self.logger.info("Disconnected from policy server")
+                        except Exception as e:
+                            self.logger.warning(f"Error closing policy server connection: {e}")
+                        self.logger.info("=== Robot and policy server disconnected ===")
+                        self.logger.info("You can now start a new inference session in another terminal")
+                        self._robot_disconnected = True  # Flag to prevent double disconnect in stop()
+                        break
+                    else:
+                        # Run reset period to give time to reset the environment
+                        log_say("Reset the environment", self.config.play_sounds)
+                        self._run_reset_period(task, verbose)
+
+                        # Start new episode
+                        episode_start_time = time.perf_counter()
+                        _last_action = None  # Reset so we wait for first action of new episode
+                        self.logger.info(f"=== EPISODE {self.dataset.num_episodes} - POLICY ACTIVE ===")
+                        log_say(f"Recording episode {self.dataset.num_episodes}", self.config.play_sounds)
 
             self.logger.debug(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency
@@ -487,6 +1011,14 @@ def async_client(cfg: RobotClientConfig):
         try:
             # The main thread runs the control loop
             client.control_loop(task=cfg.task)
+
+        except KeyboardInterrupt:
+            client.logger.warning("KeyboardInterrupt received - aborting current episode")
+            client.abort_current_episode()
+
+        except Exception as e:
+            client.logger.error(f"Error in control loop: {e}")
+            client.abort_current_episode()
 
         finally:
             client.stop()
