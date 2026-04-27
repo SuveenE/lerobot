@@ -94,6 +94,7 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     bi_so100_follower,
     bi_yam_follower,
+    bi_yam_linear_bot,
     hope_jr,
     koch_follower,
     make_robot_from_config,
@@ -347,7 +348,8 @@ def record_loop(
             action_values = act_processed_policy
             robot_action_to_send = robot_action_processor((act_processed_policy, obs))
         else:
-            action_values = act_processed_teleop
+            obs_fallback = robot.teleop_action_from_obs(obs)
+            action_values = {**obs_fallback, **act_processed_teleop}
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
         # Send action to robot
