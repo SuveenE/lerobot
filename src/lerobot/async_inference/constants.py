@@ -38,4 +38,4 @@ SUPPORTED_POLICIES = [
 ]
 
 # TODO: Add all other robots
-SUPPORTED_ROBOTS = ["so100_follower", "so101_follower", "bi_so100_follower", "bi_yam_follower"]
+SUPPORTED_ROBOTS = ["so100_follower", "so101_follower", "bi_so100_follower", "bi_yam_follower", "bi_yam_linear_bot"]
