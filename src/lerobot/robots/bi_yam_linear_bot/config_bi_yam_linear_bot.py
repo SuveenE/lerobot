@@ -37,6 +37,17 @@ class BiYamLinearBotConfig(RobotConfig):
     # Whether the FlowBase has a linear rail lift module
     with_linear_rail: bool = True
 
+    # When True, send_action skips the FlowBase RPC entirely so the base
+    # never moves, even if the action dict contains base velocity keys. The
+    # observation/action schema is unchanged (so a policy trained on a
+    # base-aware dataset can still be deployed without retraining), arm
+    # commands and odometry RPCs continue as normal -- only the
+    # set_target_velocity call is suppressed. Useful for arm-only inference
+    # tests, dry-runs, or any time you want to confirm the policy without
+    # risking the wheels moving. Pairs naturally with y_only_mode=True for a
+    # safe headless test of a Y-only policy.
+    disable_base: bool = False
+
     # Y-only (sideways) data collection mode. When True:
     # - Observation features include only `base.y` (no x/theta, no rail.*,
     #   no base.cmd.*).

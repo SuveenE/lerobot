@@ -224,6 +224,13 @@ class BiYamLinearBot(Robot):
             f"Connected to FlowBase at {self.config.flow_base_host} "
             f"(linear rail: {self.config.with_linear_rail})"
         )
+        if self.config.disable_base:
+            logger.warning(
+                "disable_base=True: send_action will NOT send base velocity "
+                "RPCs. Arms move normally, base stays still (FlowBase will "
+                "fall back to joystick / zero after the 200 ms remote-command "
+                "timeout)."
+            )
 
         for cam in self.cameras.values():
             cam.connect()
@@ -373,8 +380,14 @@ class BiYamLinearBot(Robot):
         # so we must NOT send zeros -- that would override joystick input on
         # the FlowBase controller (its remote-command timeout keeps the
         # joystick blocked while valid remote commands arrive).
+        #
+        # disable_base short-circuits the base path entirely: the policy can
+        # still emit base.*.vel keys (schema unchanged), but no RPC is sent
+        # so the wheels never move. After ~200 ms without a remote command
+        # the FlowBase controller falls back to its joystick value (0 by
+        # default), which is exactly the safe behaviour we want.
         has_base_action = "base.x.vel" in action or "base.y.vel" in action or "base.theta.vel" in action
-        if has_base_action:
+        if has_base_action and not self.config.disable_base:
             base_vel = np.array([
                 action.get("base.x.vel", 0.0),
                 action.get("base.y.vel", 0.0),
