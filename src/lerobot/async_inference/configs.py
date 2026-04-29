@@ -228,6 +228,18 @@ class RobotClientConfig:
         default=False, metadata={"help": "Visualize the action queue size"}
     )
 
+    # Pretty-print every received action chunk with one line per timestep,
+    # showing each action feature name and value. Useful for inspecting what
+    # the policy is actually emitting in real time. Off by default because it
+    # is verbose (15 floats x actions_per_chunk per chunk for bi_yam_linear_bot).
+    log_chunk_actions: bool = field(
+        default=False,
+        metadata={
+            "help": "Log every received action chunk with feature names and values "
+            "(verbose; off by default)."
+        },
+    )
+
     # Use vocal synthesis to read events
     play_sounds: bool = field(
         default=True, metadata={"help": "Use vocal synthesis to announce events (recording, reset, etc.)"}
@@ -286,6 +298,7 @@ class RobotClientConfig:
             "actions_per_chunk": self.actions_per_chunk,
             "task": self.task,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
+            "log_chunk_actions": self.log_chunk_actions,
             "aggregate_fn_name": self.aggregate_fn_name,
             "dataset": {
                 "enabled": self.dataset.enabled,
