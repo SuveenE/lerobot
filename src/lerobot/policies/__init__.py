@@ -16,6 +16,7 @@ from .act.configuration_act import ACTConfig as ACTConfig
 from .cosmos.configuration_cosmos import CosmosConfig as CosmosConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
 from .groot.configuration_groot import GrootConfig as GrootConfig
+from .m.configuration_m import MConfig as MConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .pi05.configuration_pi05 import PI05Config as PI05Config
 from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
@@ -35,6 +36,7 @@ __all__ = [
     "TDMPCConfig",
     "VQBeTConfig",
     "GrootConfig",
+    "MConfig",
     "OpenVLAOFTConfig",
     "XVLAConfig",
 ]

@@ -29,6 +29,7 @@ from lerobot.policies import (  # noqa: F401
     ACTConfig,
     CosmosConfig,
     DiffusionConfig,
+    MConfig,
     OpenVLAOFTConfig,
     PI0Config,
     PI05Config,
