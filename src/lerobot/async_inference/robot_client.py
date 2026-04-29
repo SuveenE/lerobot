@@ -505,6 +505,12 @@ class RobotClient:
 
                 self.action_chunk_size = max(self.action_chunk_size, len(timed_actions))
 
+                # Pretty-print the full chunk if --log_chunk_actions is set.
+                # Logged BEFORE _aggregate_action_queues so the user sees what
+                # the policy actually emitted, not the post-blend values.
+                if self.config.log_chunk_actions and len(timed_actions) > 0:
+                    self._log_chunk_actions(timed_actions)
+
                 # Calculate network latency if we have matching observations
                 if len(timed_actions) > 0 and verbose:
                     with self.latest_action_lock:
@@ -568,6 +574,39 @@ class RobotClient:
     def _action_tensor_to_action_dict(self, action_tensor: torch.Tensor) -> dict[str, float]:
         action = {key: action_tensor[i].item() for i, key in enumerate(self.robot.action_features)}
         return action
+
+    def _log_chunk_actions(self, timed_actions: "list[TimedAction]") -> None:
+        """Pretty-print every action in a received chunk.
+
+        Format (one chunk per call):
+            === Action chunk: K actions, timesteps T0..T1 ===
+            [t=T0]  feat_a=+0.1234  feat_b=-0.0010  ...  base.y.vel=+0.0250
+            [t=T0+1] ...
+        Feature names come from self.robot.action_features in order, so they
+        match exactly what _action_tensor_to_action_dict zips at dispatch.
+        """
+        try:
+            feature_keys = list(self.robot.action_features.keys())
+        except Exception:
+            feature_keys = []
+
+        first_t = timed_actions[0].get_timestep()
+        last_t = timed_actions[-1].get_timestep()
+        self.logger.info(
+            f"=== Action chunk received: {len(timed_actions)} actions, "
+            f"timesteps {first_t}..{last_t} ==="
+        )
+        for ta in timed_actions:
+            tensor = ta.get_action()
+            try:
+                values = tensor.tolist()
+            except Exception:
+                values = list(tensor)
+            if feature_keys and len(feature_keys) == len(values):
+                pairs = "  ".join(f"{k}={v:+.4f}" for k, v in zip(feature_keys, values))
+            else:
+                pairs = "  ".join(f"a{i}={v:+.4f}" for i, v in enumerate(values))
+            self.logger.info(f"[t={ta.get_timestep():>5d}] {pairs}")
 
     def _build_recording_frame(
         self,
