@@ -933,6 +933,12 @@ class RobotClient:
                     # Run reset period to give time to reset the environment
                     self._run_reset_period(task, verbose)
 
+                    # Drop any stale chunks that the server returned for pre-'b'
+                    # observations and that the receiver thread aggregated back into
+                    # the queue while we were resetting. Without this, the new episode
+                    # would start by replaying the previous episode's tail.
+                    self._clear_action_queue()
+
                     # Restart episode tracking
                     episode_start_time = time.perf_counter()
                     _last_action = None
@@ -976,6 +982,11 @@ class RobotClient:
                         # Run reset period to give time to reset the environment
                         log_say("Reset the environment", self.config.play_sounds)
                         self._run_reset_period(task, verbose)
+
+                        # Drop any stale chunks aggregated into the queue during reset
+                        # so the new episode doesn't start by replaying the tail of the
+                        # previous one.
+                        self._clear_action_queue()
 
                         # Start new episode
                         episode_start_time = time.perf_counter()
