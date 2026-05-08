@@ -187,6 +187,8 @@ def download_source(api, repo_id: str, dest: Path) -> None:
 
 
 def upload_aggregated(api, repo_id: str, folder: Path, source_list: list[str]) -> None:
+    from lerobot.datasets.utils import create_lerobot_dataset_card, load_info
+
     api.create_repo(repo_id=repo_id, repo_type="dataset", private=True, exist_ok=True)
     api.upload_large_folder(
         repo_id=repo_id,
@@ -194,22 +196,23 @@ def upload_aggregated(api, repo_id: str, folder: Path, source_list: list[str]) -
         folder_path=str(folder),
         ignore_patterns=["images/*"],
     )
-    # Lightweight README documenting the merge sources for traceability.
-    readme = folder / "README.md"
-    body = (
-        f"# {repo_id}\n\n"
-        f"Aggregated from {len(source_list)} source datasets via "
-        f"`lerobot.datasets.aggregate.aggregate_datasets`:\n\n"
-        + "\n".join(f"- `{s}`" for s in source_list)
-        + "\n"
+
+    # Generate the standard LeRobot dataset card (proper YAML front-matter,
+    # tags, task_categories, configs) so the Hub doesn't warn about missing
+    # metadata. Append our source-list as the description.
+    info = load_info(folder)
+    sources_md = "\n".join(f"- `{s}`" for s in source_list)
+    description = (
+        f"Aggregated from {len(source_list)} source dataset(s) via "
+        f"`lerobot.datasets.aggregate.aggregate_datasets`:\n\n{sources_md}\n"
     )
-    readme.write_text(body)
-    api.upload_file(
-        path_or_fileobj=str(readme),
-        path_in_repo="README.md",
-        repo_id=repo_id,
-        repo_type="dataset",
+    card = create_lerobot_dataset_card(
+        tags=["aggregated", "evaluation"],
+        dataset_info=info,
+        license="apache-2.0",
+        dataset_description=description,
     )
+    card.push_to_hub(repo_id=repo_id, repo_type="dataset")
 
 
 # ---------- Core merge step ------------------------------------------------
