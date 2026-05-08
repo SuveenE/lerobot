@@ -170,20 +170,37 @@ def remote_repo_exists(api, repo_id: str) -> bool:
         return False
 
 
-def download_source(api, repo_id: str, dest: Path) -> None:
+def download_source(api, repo_id: str, dest: Path,
+                    attempts: int = 4, log: logging.Logger | None = None) -> None:
     from huggingface_hub import snapshot_download
 
     dest.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type="dataset",
-        local_dir=str(dest),
-        # Pull everything we need to merge: meta + data + videos. Skip
-        # ``images/`` since aggregate uses videos and pushed datasets
-        # ignore ``images/`` too.
-        ignore_patterns=["images/*", ".gitattributes"],
-        max_workers=8,
-    )
+    delay = 10
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            snapshot_download(
+                repo_id=repo_id,
+                repo_type="dataset",
+                local_dir=str(dest),
+                # Pull everything we need to merge: meta + data + videos.
+                # Skip ``images/`` since aggregate uses videos and pushed
+                # datasets ignore ``images/`` too.
+                ignore_patterns=["images/*", ".gitattributes"],
+                # Bounded TCP-connect timeout per request (default is 10s).
+                etag_timeout=30,
+                max_workers=4,
+            )
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if log is not None:
+                log.warning(f"  download attempt {attempt}/{attempts} for {repo_id} failed: {e}")
+            if attempt < attempts:
+                time.sleep(delay)
+                delay = min(delay * 3, 180)
+    assert last_err is not None
+    raise last_err
 
 
 def upload_aggregated(api, repo_id: str, folder: Path, source_list: list[str]) -> None:
@@ -229,7 +246,7 @@ def merge_one_group(
         local = src_dir / s.replace("/", "__")
         if not local.exists() or not (local / "meta" / "info.json").exists():
             log.info(f"  download  {s}")
-            download_source(api, s, local)
+            download_source(api, s, local, log=log)
         else:
             log.info(f"  cached    {s}")
         src_roots.append(local)
