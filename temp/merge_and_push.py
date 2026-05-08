@@ -197,20 +197,13 @@ def upload_aggregated(api, repo_id: str, folder: Path, source_list: list[str]) -
         ignore_patterns=["images/*"],
     )
 
-    # Generate the standard LeRobot dataset card (proper YAML front-matter,
-    # tags, task_categories, configs) so the Hub doesn't warn about missing
-    # metadata. Append our source-list as the description.
+    # Push the same LeRobot dataset card the rest of the cortexairobot
+    # datasets use (no custom tags, no description) so the YAML metadata
+    # warning goes away and the Hub UI matches the rest of the org.
     info = load_info(folder)
-    sources_md = "\n".join(f"- `{s}`" for s in source_list)
-    description = (
-        f"Aggregated from {len(source_list)} source dataset(s) via "
-        f"`lerobot.datasets.aggregate.aggregate_datasets`:\n\n{sources_md}\n"
-    )
     card = create_lerobot_dataset_card(
-        tags=["aggregated", "evaluation"],
         dataset_info=info,
         license="apache-2.0",
-        dataset_description=description,
     )
     card.push_to_hub(repo_id=repo_id, repo_type="dataset")
 
