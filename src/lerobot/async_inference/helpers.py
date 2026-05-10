@@ -28,6 +28,7 @@ from lerobot.datasets.utils import build_dataset_frame, hw_to_dataset_features
 from lerobot.policies import (  # noqa: F401
     ACTConfig,
     DiffusionConfig,
+    DreamZeroConfig,
     OpenVLAOFTConfig,
     PI0Config,
     PI05Config,

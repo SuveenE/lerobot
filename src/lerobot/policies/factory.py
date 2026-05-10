@@ -40,6 +40,7 @@ from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.utils import validate_visual_features_consistency
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
+from lerobot.policies.dreamzero.configuration_dreamzero import DreamZeroConfig
 from lerobot.policies.openvla_oft.configuration_openvla_oft import OpenVLAOFTConfig
 from lerobot.policies.xvla.configuration_xvla import XVLAConfig
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
@@ -117,6 +118,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.openvla_oft.modeling_openvla_oft import OpenVLAOFTPolicy
 
         return OpenVLAOFTPolicy
+    elif name == "dreamzero":
+        from lerobot.policies.dreamzero.modeling_dreamzero import DreamZeroPolicy
+
+        return DreamZeroPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -164,6 +169,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return XVLAConfig(**kwargs)
     elif policy_type == "openvla_oft":
         return OpenVLAOFTConfig(**kwargs)
+    elif policy_type == "dreamzero":
+        return DreamZeroConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 
@@ -220,6 +227,20 @@ def make_pre_post_processors(
         NotImplementedError: If a processor factory is not implemented for the given
             policy configuration type.
     """
+    # DreamZero handles all preprocessing on the external server,
+    # so always create minimal pass-through processors regardless of pretrained_path.
+    if isinstance(policy_cfg, DreamZeroConfig):
+        from lerobot.policies.dreamzero.processor_dreamzero import (
+            make_dreamzero_pre_post_processors,
+        )
+
+        return make_dreamzero_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+            preprocessor_overrides=kwargs.get("preprocessor_overrides"),
+            postprocessor_overrides=kwargs.get("postprocessor_overrides"),
+        )
+
     # OpenVLA-OFT handles its own preprocessing and unnormalization internally,
     # so always create minimal pass-through processors regardless of pretrained_path.
     if isinstance(policy_cfg, OpenVLAOFTConfig):
