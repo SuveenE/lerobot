@@ -40,3 +40,12 @@ class BiYamFollowerConfig(RobotConfig):
     # Cameras (shared between both arms)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
+    # When True, pad observation.state / action with the extra base+rail fields used by the
+    # linear-bot datasets so recordings made on a plain bi_yam match that schema. All extra
+    # fields are written as 0.0 except rail.position, which takes the value of `rail_position`.
+    enable_linear_bot_padding: bool = False
+
+    # Constant value written into observation.state's `rail.position` slot every frame when
+    # `enable_linear_bot_padding` is True. Ignored otherwise.
+    rail_position: float = 0.0
+
