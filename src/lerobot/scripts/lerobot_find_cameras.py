@@ -43,9 +43,11 @@ from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.cameras.realsense.camera_realsense import RealSenseCamera
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 DEFAULT_IMAGE_SIZE = (640, 360)
+DEFAULT_FPS = 30
 
 
 def find_all_opencv_cameras() -> list[dict[str, Any]]:
@@ -143,6 +145,7 @@ def save_image(
     """
     try:
         img = Image.fromarray(img_array, mode="RGB")
+        source_size = img.size
         if img.size != image_size:
             img = img.resize(image_size, Image.Resampling.LANCZOS)
 
@@ -153,18 +156,66 @@ def save_image(
         path = images_dir / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         img.save(str(path))
-        logger.info(f"Saved image: {path}")
+        logger.info(
+            f"Saved image: {path} ({source_size[0]}x{source_size[1]} -> {img.size[0]}x{img.size[1]})"
+        )
     except Exception as e:
         logger.error(f"Failed to save image for camera {camera_identifier} (type {camera_type}): {e}")
 
 
-def create_camera_instance(cam_meta: dict[str, Any]) -> dict[str, Any] | None:
+def get_camera_fps(cam_meta: dict[str, Any]) -> int:
+    """Get the detected camera FPS, falling back to a common camera default."""
+    default_profile = cam_meta.get("default_stream_profile")
+    if isinstance(default_profile, dict):
+        fps = default_profile.get("fps")
+        if isinstance(fps, int | float) and fps > 0:
+            return int(fps)
+
+    return DEFAULT_FPS
+
+
+def create_camera_instance(cam_meta: dict[str, Any], image_size: tuple[int, int]) -> dict[str, Any] | None:
     """Create and connect to a camera instance based on metadata."""
     cam_type = cam_meta.get("type")
     cam_id = cam_meta.get("id")
     instance = None
+    width, height = image_size
 
-    logger.info(f"Preparing {cam_type} ID {cam_id} with default profile")
+    logger.info(f"Preparing {cam_type} ID {cam_id} with {width}x{height} profile")
+
+    try:
+        if cam_type == "OpenCV":
+            cv_config = OpenCVCameraConfig(
+                index_or_path=cam_id,
+                width=width,
+                height=height,
+                color_mode=ColorMode.RGB,
+            )
+            instance = OpenCVCamera(cv_config)
+        elif cam_type == "RealSense":
+            rs_config = RealSenseCameraConfig(
+                serial_number_or_name=cam_id,
+                fps=get_camera_fps(cam_meta),
+                width=width,
+                height=height,
+                color_mode=ColorMode.RGB,
+            )
+            instance = RealSenseCamera(rs_config)
+        else:
+            logger.warning(f"Unknown camera type: {cam_type} for ID {cam_id}. Skipping.")
+            return None
+
+        if instance:
+            logger.info(f"Connecting to {cam_type} camera: {cam_id}...")
+            instance.connect(warmup=True)
+            return {"instance": instance, "meta": cam_meta}
+    except Exception as e:
+        logger.warning(
+            f"Failed to connect or configure {cam_type} camera {cam_id} at {width}x{height}: {e}. "
+            "Retrying with default profile."
+        )
+        if instance and instance.is_connected:
+            instance.disconnect()
 
     try:
         if cam_type == "OpenCV":
@@ -180,13 +231,11 @@ def create_camera_instance(cam_meta: dict[str, Any]) -> dict[str, Any] | None:
             )
             instance = RealSenseCamera(rs_config)
         else:
-            logger.warning(f"Unknown camera type: {cam_type} for ID {cam_id}. Skipping.")
             return None
 
-        if instance:
-            logger.info(f"Connecting to {cam_type} camera: {cam_id}...")
-            instance.connect(warmup=True)
-            return {"instance": instance, "meta": cam_meta}
+        logger.info(f"Connecting to {cam_type} camera with default profile: {cam_id}...")
+        instance.connect(warmup=True)
+        return {"instance": instance, "meta": cam_meta}
     except Exception as e:
         logger.error(f"Failed to connect or configure {cam_type} camera {cam_id}: {e}")
         if instance and instance.is_connected:
@@ -263,7 +312,7 @@ def save_images_from_all_cameras(
 
     cameras_to_use = []
     for cam_meta in all_camera_metadata:
-        camera_instance = create_camera_instance(cam_meta)
+        camera_instance = create_camera_instance(cam_meta, image_size)
         if camera_instance:
             cameras_to_use.append(camera_instance)
 
@@ -335,6 +384,7 @@ def main():
         help=f"Height of saved images. Default: {DEFAULT_IMAGE_SIZE[1]}.",
     )
     args = parser.parse_args()
+    logger.info(f"Using camera script: {Path(__file__).resolve()}")
     save_images_from_all_cameras(**vars(args))
 
 
