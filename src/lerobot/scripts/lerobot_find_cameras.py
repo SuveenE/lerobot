@@ -45,6 +45,8 @@ from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraCon
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_IMAGE_SIZE = (640, 360)
+
 
 def find_all_opencv_cameras() -> list[dict[str, Any]]:
     """
@@ -134,12 +136,15 @@ def save_image(
     camera_identifier: str | int,
     images_dir: Path,
     camera_type: str,
+    image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
 ):
     """
     Saves a single image to disk using Pillow. Handles color conversion if necessary.
     """
     try:
         img = Image.fromarray(img_array, mode="RGB")
+        if img.size != image_size:
+            img = img.resize(image_size, Image.Resampling.LANCZOS)
 
         safe_identifier = str(camera_identifier).replace("/", "_").replace("\\", "_")
         filename_prefix = f"{camera_type.lower()}_{safe_identifier}"
@@ -190,7 +195,7 @@ def create_camera_instance(cam_meta: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def process_camera_image(
-    cam_dict: dict[str, Any], output_dir: Path, current_time: float
+    cam_dict: dict[str, Any], output_dir: Path, current_time: float, image_size: tuple[int, int]
 ) -> concurrent.futures.Future | None:
     """Capture and process an image from a single camera."""
     cam = cam_dict["instance"]
@@ -206,6 +211,7 @@ def process_camera_image(
             cam_id_str,
             output_dir,
             cam_type_str,
+            image_size,
         )
     except TimeoutError:
         logger.warning(
@@ -231,6 +237,8 @@ def save_images_from_all_cameras(
     output_dir: Path,
     record_time_s: float = 2.0,
     camera_type: str | None = None,
+    width: int = DEFAULT_IMAGE_SIZE[0],
+    height: int = DEFAULT_IMAGE_SIZE[1],
 ):
     """
     Connects to detected cameras (optionally filtered by type) and saves images from each.
@@ -241,9 +249,12 @@ def save_images_from_all_cameras(
         record_time_s: Duration in seconds to record images.
         camera_type: Optional string to filter cameras ("realsense" or "opencv").
                             If None, uses all detected cameras.
+        width: Width of saved images.
+        height: Height of saved images.
     """
+    image_size = (width, height)
     output_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Saving images to {output_dir}")
+    logger.info(f"Saving {width}x{height} images to {output_dir}")
     all_camera_metadata = find_and_print_cameras(camera_type_filter=camera_type)
 
     if not all_camera_metadata:
@@ -270,7 +281,7 @@ def save_images_from_all_cameras(
                 current_capture_time = time.perf_counter()
 
                 for cam_dict in cameras_to_use:
-                    future = process_camera_image(cam_dict, output_dir, current_capture_time)
+                    future = process_camera_image(cam_dict, output_dir, current_capture_time, image_size)
                     if future:
                         futures.append(future)
 
@@ -310,6 +321,18 @@ def main():
         type=float,
         default=6.0,
         help="Time duration to attempt capturing frames. Default: 6 seconds.",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=DEFAULT_IMAGE_SIZE[0],
+        help=f"Width of saved images. Default: {DEFAULT_IMAGE_SIZE[0]}.",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=DEFAULT_IMAGE_SIZE[1],
+        help=f"Height of saved images. Default: {DEFAULT_IMAGE_SIZE[1]}.",
     )
     args = parser.parse_args()
     save_images_from_all_cameras(**vars(args))
