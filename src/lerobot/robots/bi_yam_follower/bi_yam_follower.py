@@ -121,32 +121,28 @@ class BiYamFollower(Robot):
 
     @property
     def _motors_ft(self) -> dict[str, type]:
-        """Define motor feature types for both arms."""
-        if self._left_dofs is None or self._right_dofs is None:
-            # Default to 7 DOFs (6 joints + 1 gripper) per arm if not yet connected
-            left_dofs = 7
-            right_dofs = 7
-        else:
-            left_dofs = self._left_dofs
-            right_dofs = self._right_dofs
+        """Define motor feature types for both arms (positions)."""
+        return {
+            **self._build_per_arm_features("left", "pos"),
+            **self._build_per_arm_features("right", "pos"),
+        }
 
-        features = {}
-        # Left arm joints and gripper
-        # Assume last DOF is gripper if we have 7 DOFs
-        for i in range(left_dofs):
-            if left_dofs == 7 and i == left_dofs - 1:  # Last DOF is gripper
-                features["left_gripper.pos"] = float
+    def _build_per_arm_features(self, side: str, suffix: str) -> dict[str, type]:
+        """Build a flat per-motor feature dict for one arm, keyed `{side}_{joint|gripper}.{suffix}`.
+
+        7 DOFs are assumed to be 6 joints + gripper; otherwise all motors are named
+        `joint_i`. Positions (`.pos`) and torques (`.eff`) share this layout so they
+        line up 1-to-1 by motor.
+        """
+        dofs_attr = self._left_dofs if side == "left" else self._right_dofs
+        dofs = dofs_attr if dofs_attr is not None else 7
+
+        features: dict[str, type] = {}
+        for i in range(dofs):
+            if dofs == 7 and i == dofs - 1:
+                features[f"{side}_gripper.{suffix}"] = float
             else:
-                features[f"left_joint_{i}.pos"] = float
-
-        # Right arm joints and gripper
-        # Assume last DOF is gripper if we have 7 DOFs
-        for i in range(right_dofs):
-            if right_dofs == 7 and i == right_dofs - 1:  # Last DOF is gripper
-                features["right_gripper.pos"] = float
-            else:
-                features[f"right_joint_{i}.pos"] = float
-
+                features[f"{side}_joint_{i}.{suffix}"] = float
         return features
 
     @property
@@ -158,13 +154,37 @@ class BiYamFollower(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        """Return observation features including motors and cameras."""
+        """Return observation features including motors and cameras.
+
+        Note: torques are intentionally exposed as a separate dataset column via
+        `extra_dataset_features` rather than folded into `observation.state`, so
+        pretrained policies trained on positions-only datasets remain compatible.
+        """
         return {**self._motors_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict[str, type]:
         """Return action features (motor positions)."""
         return self._motors_ft
+
+    @property
+    def extra_dataset_features(self) -> dict[str, dict]:
+        """Per-arm torque columns that bypass the standard hw_to_dataset_features lumping.
+
+        Emits a separate `observation.left_torques` and `observation.right_torques`
+        column, each built from the flat `.eff` keys produced by `get_observation()`.
+        Consumed by `lerobot.scripts.lerobot_record` via
+        `getattr(robot, "extra_dataset_features", {})`.
+        """
+        features: dict[str, dict] = {}
+        for side in ("left", "right"):
+            names = list(self._build_per_arm_features(side, "eff").keys())
+            features[f"observation.{side}_torques"] = {
+                "dtype": "float32",
+                "shape": (len(names),),
+                "names": names,
+            }
+        return features
 
     @property
     def is_connected(self) -> bool:
@@ -222,41 +242,17 @@ class BiYamFollower(Robot):
         Get current observation from both arms and cameras.
 
         Returns:
-            Dictionary with joint positions for both arms and camera images
+            Dictionary with joint positions and motor torques (efforts) for both arms
+            (as flat `{side}_{joint|gripper}.{pos|eff}` keys) and camera images.
         """
         obs_dict = {}
 
-        # Get left arm observations
         left_obs = self.left_arm.get_observations()
-        left_joint_pos = left_obs["joint_pos"]
-        left_has_gripper = "gripper_pos" in left_obs
-        if left_has_gripper:
-            left_joint_pos = np.concatenate([left_joint_pos, left_obs["gripper_pos"]])
+        self._populate_arm_obs(obs_dict, side="left", arm_obs=left_obs)
 
-        # Add with "left_" prefix
-        for i, pos in enumerate(left_joint_pos):
-            # Gripper is the last DOF if present
-            if left_has_gripper and i == len(left_joint_pos) - 1:
-                obs_dict["left_gripper.pos"] = pos
-            else:
-                obs_dict[f"left_joint_{i}.pos"] = pos
-
-        # Get right arm observations
         right_obs = self.right_arm.get_observations()
-        right_joint_pos = right_obs["joint_pos"]
-        right_has_gripper = "gripper_pos" in right_obs
-        if right_has_gripper:
-            right_joint_pos = np.concatenate([right_joint_pos, right_obs["gripper_pos"]])
+        self._populate_arm_obs(obs_dict, side="right", arm_obs=right_obs)
 
-        # Add with "right_" prefix
-        for i, pos in enumerate(right_joint_pos):
-            # Gripper is the last DOF if present
-            if right_has_gripper and i == len(right_joint_pos) - 1:
-                obs_dict["right_gripper.pos"] = pos
-            else:
-                obs_dict[f"right_joint_{i}.pos"] = pos
-
-        # Get camera observations
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
             obs_dict[cam_key] = cam.async_read()
@@ -264,6 +260,38 @@ class BiYamFollower(Robot):
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
         return obs_dict
+
+    @staticmethod
+    def _populate_arm_obs(obs_dict: dict[str, Any], side: str, arm_obs: dict[str, np.ndarray]) -> None:
+        """Emit flat `.pos` and `.eff` keys for one arm from a single RPC response.
+
+        The i2rt server returns joint and gripper components separately; we concatenate
+        them so a 7-DOF (6 joints + gripper) arm yields keys 0..5 + `gripper`. Torques
+        come from `joint_eff` / `gripper_eff` (motor effort feedback over CAN).
+        """
+        joint_pos = arm_obs["joint_pos"]
+        joint_eff = arm_obs.get("joint_eff")
+        has_gripper = "gripper_pos" in arm_obs
+
+        if has_gripper:
+            joint_pos = np.concatenate([joint_pos, arm_obs["gripper_pos"]])
+            if joint_eff is not None and "gripper_eff" in arm_obs:
+                joint_eff = np.concatenate([joint_eff, arm_obs["gripper_eff"]])
+
+        for i, pos in enumerate(joint_pos):
+            if has_gripper and i == len(joint_pos) - 1:
+                obs_dict[f"{side}_gripper.pos"] = pos
+            else:
+                obs_dict[f"{side}_joint_{i}.pos"] = pos
+
+        if joint_eff is None:
+            return
+
+        for i, eff in enumerate(joint_eff):
+            if has_gripper and i == len(joint_eff) - 1:
+                obs_dict[f"{side}_gripper.eff"] = eff
+            else:
+                obs_dict[f"{side}_joint_{i}.eff"] = eff
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         """
