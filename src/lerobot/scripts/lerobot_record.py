@@ -398,6 +398,15 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         ),
     )
 
+    # Robots may expose additional pre-formatted dataset columns (e.g. a separate
+    # `observation.torques` column) that bypass the standard scalar-float -> single
+    # `observation.state` lumping in `hw_to_dataset_features`. Merge them in here so
+    # they appear as dedicated columns in the dataset schema.
+    dataset_features = combine_feature_dicts(
+        dataset_features,
+        getattr(robot, "extra_dataset_features", {}) or {},
+    )
+
     if cfg.resume:
         dataset = LeRobotDataset(
             cfg.dataset.repo_id,
