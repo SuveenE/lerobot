@@ -24,8 +24,10 @@ python -m lerobot.async_inference.policy_server \
 ```
 """
 
+import json
 import logging
 import pickle  # nosec
+import tempfile
 import threading
 import time
 from concurrent import futures
@@ -38,8 +40,11 @@ import draccus
 import grpc
 import torch
 
+from lerobot.configs import PreTrainedConfig
+from lerobot.configs.types import FeatureType
 from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.processor import PolicyProcessorPipeline
+from lerobot.processor.rename_processor import RenameObservationsProcessorStep
 from lerobot.transport import (
     services_pb2,  # type: ignore
     services_pb2_grpc,  # type: ignore
@@ -148,21 +153,80 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         policy_class = get_policy_class(self.policy_type)
 
-        start = time.perf_counter()
-        self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
-        self.policy.to(self.device)
+        # Apply any CLI-style overrides shipped by the client (e.g.
+        # --norm_tag=so101, --inference_action_mode=continuous,
+        # --checkpoint_path=allenai/MolmoAct2-SO100_101). This lets a GPU-less
+        # client tune deployment-only fields without editing the checkpoint.
+        cli_overrides = list(getattr(policy_specs, "policy_config_overrides", []) or [])
+        if cli_overrides:
+            self.logger.info(f"Applying {len(cli_overrides)} policy config override(s): {cli_overrides}")
 
-        # Load preprocessor and postprocessor, overriding device to match requested device
-        device_override = {"device": self.device}
-        self.preprocessor, self.postprocessor = make_pre_post_processors(
-            self.policy.config,
-            pretrained_path=policy_specs.pretrained_name_or_path,
-            preprocessor_overrides={
-                "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
-            },
-            postprocessor_overrides={"device_processor": device_override},
-        )
+        start = time.perf_counter()
+
+        rename_map = dict(policy_specs.rename_map or {})
+
+        if policy_specs.pretrained_name_or_path:
+            # LeRobot-saved checkpoint path: draccus config.json + safetensors are at
+            # `pretrained_name_or_path`. Load the saved config (applying overrides),
+            # then load weights via the standard `from_pretrained` flow.
+            policy_config = PreTrainedConfig.from_pretrained(
+                policy_specs.pretrained_name_or_path,
+                cli_overrides=cli_overrides,
+            )
+            policy_config.device = self.device
+            self.policy = policy_class.from_pretrained(
+                policy_specs.pretrained_name_or_path,
+                config=policy_config,
+            )
+            self.policy.to(self.device)
+
+            # Load preprocessor and postprocessor, overriding device to match requested device
+            device_override = {"device": self.device}
+            self.preprocessor, self.postprocessor = make_pre_post_processors(
+                self.policy.config,
+                pretrained_path=policy_specs.pretrained_name_or_path,
+                preprocessor_overrides={
+                    "device_processor": device_override,
+                    "rename_observations_processor": {"rename_map": rename_map},
+                },
+                postprocessor_overrides={"device_processor": device_override},
+            )
+        else:
+            # HF-original checkpoint path: no draccus config.json at the policy path.
+            # The user must supply the underlying HF weights location via
+            # `--policy_config_overrides='[..., "--checkpoint_path=<hf_repo>", ...]'`.
+            # The policy's __init__ (e.g. MolmoAct2._load_hf_model) will then pull
+            # the sharded safetensors from that HF repo on its own.
+            self.logger.info(
+                f"No `pretrained_name_or_path` provided; building {self.policy_type} config "
+                f"from policy_config_overrides only (HF-original checkpoint mode)."
+            )
+            policy_config = self._build_policy_config_from_overrides(self.policy_type, cli_overrides)
+            policy_config.device = self.device
+
+            # The robot client knows the observation/action features; populate them
+            # on the freshly-built config so the policy and processors see the right
+            # input/output shapes. Mirrors what `make_policy` does for the
+            # `env_cfg`-only path in `lerobot-eval`.
+            output_features = {
+                key: ft for key, ft in self.lerobot_features.items() if ft.type is FeatureType.ACTION
+            }
+            input_features = {
+                key: ft for key, ft in self.lerobot_features.items() if key not in output_features
+            }
+            policy_config.output_features = output_features
+            if not policy_config.input_features:
+                policy_config.input_features = input_features
+
+            self.policy = policy_class(policy_config)
+            self.policy.to(self.device)
+
+            # No saved preprocessor pipeline → build a fresh one from the config.
+            # MolmoAct2's processor factory will fetch `norm_stats.json` from the
+            # HF checkpoint using `config.norm_tag` when `dataset_stats=None`.
+            self.preprocessor, self.postprocessor = make_pre_post_processors(self.policy.config)
+            if rename_map:
+                _inject_rename_map(self.preprocessor, rename_map)
 
         end = time.perf_counter()
 
@@ -404,10 +468,44 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         return action_chunk
 
+    @staticmethod
+    def _build_policy_config_from_overrides(policy_type: str, cli_overrides: list[str]) -> PreTrainedConfig:
+        """Build a fresh ``PreTrainedConfig`` subclass instance from draccus CLI overrides.
+
+        Used in HF-original checkpoint mode, where the server has no draccus-saved
+        ``config.json`` to load. We hand draccus an empty JSON file and let the
+        provided overrides (e.g. ``--checkpoint_path=...``, ``--norm_tag=...``,
+        ``--inference_action_mode=continuous``) populate the dataclass on top of
+        its defaults.
+        """
+        config_class = PreTrainedConfig.get_choice_class(policy_type)
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
+            json.dump({}, f)
+            temp_config_file = f.name
+        with draccus.config_type("json"):
+            return draccus.parse(config_class, temp_config_file, args=cli_overrides)
+
     def stop(self):
         """Stop the server"""
         self._reset_server()
         self.logger.info("Server stopping...")
+
+
+def _inject_rename_map(
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    rename_map: dict[str, str],
+) -> None:
+    """Update the first ``RenameObservationsProcessorStep`` in a freshly-built
+    preprocessor pipeline with the rename map provided by the client.
+
+    Saved pipelines accept ``rename_observations_processor`` overrides via
+    ``PolicyProcessorPipeline.from_pretrained``; for fresh pipelines (HF-original
+    checkpoint mode) we have to patch the step directly.
+    """
+    for step in preprocessor.steps:
+        if isinstance(step, RenameObservationsProcessorStep):
+            step.rename_map = dict(rename_map)
+            return
 
 
 @draccus.wrap()
