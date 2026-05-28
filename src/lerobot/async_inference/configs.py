@@ -195,12 +195,22 @@ class RobotClientConfig:
 
     # Policy configuration
     policy_type: str = field(metadata={"help": "Type of policy to use"})
+
+    # Robot configuration (for CLI usage - robot instance will be created from this)
+    robot: RobotConfig = field(metadata={"help": "Robot configuration"})
+
+    # Policies typically output K actions at max, but we can use less to avoid wasting bandwidth (as actions
+    # would be aggregated on the client side anyway, depending on the value of `chunk_size_threshold`)
+    actions_per_chunk: int = field(metadata={"help": "Number of actions per chunk"})
+
     # Optional: a LeRobot-saved checkpoint (draccus config.json + weights) loadable
     # via PreTrainedConfig.from_pretrained / PreTrainedPolicy.from_pretrained.
     # Leave empty to use the HF-original mode, in which the server constructs the
     # policy config purely from `policy_config_overrides` (the checkpoint location
     # for the underlying weights then comes from the policy-specific field, e.g.
     # MolmoAct2's `--checkpoint_path=allenai/MolmoAct2-SO100_101`).
+    # NOTE: kept after the required fields above so the dataclass rule
+    # "non-default arguments may not follow default arguments" is satisfied.
     pretrained_name_or_path: str = field(
         default="",
         metadata={
@@ -211,13 +221,6 @@ class RobotClientConfig:
             )
         },
     )
-
-    # Robot configuration (for CLI usage - robot instance will be created from this)
-    robot: RobotConfig = field(metadata={"help": "Robot configuration"})
-
-    # Policies typically output K actions at max, but we can use less to avoid wasting bandwidth (as actions
-    # would be aggregated on the client side anyway, depending on the value of `chunk_size_threshold`)
-    actions_per_chunk: int = field(metadata={"help": "Number of actions per chunk"})
 
     # Task instruction for the robot to execute (e.g., 'fold my tshirt')
     task: str = field(default="", metadata={"help": "Task instruction for the robot to execute"})
