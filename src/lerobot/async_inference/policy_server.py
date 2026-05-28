@@ -51,6 +51,7 @@ from lerobot.transport import (
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
 from lerobot.types import PolicyAction
+from lerobot.utils.feature_utils import dataset_to_policy_features
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES
@@ -208,11 +209,17 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             # on the freshly-built config so the policy and processors see the right
             # input/output shapes. Mirrors what `make_policy` does for the
             # `env_cfg`-only path in `lerobot-eval`.
+            #
+            # `self.lerobot_features` is a dataset-features dict (`dict[str, dict]`
+            # with `{"dtype", "shape", "names"}` entries) produced by
+            # `map_robot_keys_to_lerobot_features`. Convert it to `PolicyFeature`s
+            # before splitting into input/output features.
+            policy_features = dataset_to_policy_features(self.lerobot_features)
             output_features = {
-                key: ft for key, ft in self.lerobot_features.items() if ft.type is FeatureType.ACTION
+                key: ft for key, ft in policy_features.items() if ft.type is FeatureType.ACTION
             }
             input_features = {
-                key: ft for key, ft in self.lerobot_features.items() if key not in output_features
+                key: ft for key, ft in policy_features.items() if key not in output_features
             }
             policy_config.output_features = output_features
             if not policy_config.input_features:
