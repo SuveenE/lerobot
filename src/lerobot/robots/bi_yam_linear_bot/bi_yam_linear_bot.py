@@ -106,26 +106,27 @@ class BiYamLinearBot(Robot):
 
     @property
     def _arm_ft(self) -> dict[str, type]:
-        if self._left_dofs is None or self._right_dofs is None:
-            left_dofs = 7
-            right_dofs = 7
-        else:
-            left_dofs = self._left_dofs
-            right_dofs = self._right_dofs
+        return {
+            **self._build_per_arm_features("left", "pos"),
+            **self._build_per_arm_features("right", "pos"),
+        }
+
+    def _build_per_arm_features(self, side: str, suffix: str) -> dict[str, type]:
+        """Build a flat per-motor feature dict for one arm, keyed `{side}_{joint|gripper}.{suffix}`.
+
+        7 DOFs are assumed to be 6 joints + gripper; otherwise all motors are named
+        `joint_i`. Positions (`.pos`) and torques (`.eff`) share this layout so they
+        line up 1-to-1 by motor.
+        """
+        dofs_attr = self._left_dofs if side == "left" else self._right_dofs
+        dofs = dofs_attr if dofs_attr is not None else 7
 
         features: dict[str, type] = {}
-        for i in range(left_dofs):
-            if left_dofs == 7 and i == left_dofs - 1:
-                features["left_gripper.pos"] = float
+        for i in range(dofs):
+            if dofs == 7 and i == dofs - 1:
+                features[f"{side}_gripper.{suffix}"] = float
             else:
-                features[f"left_joint_{i}.pos"] = float
-
-        for i in range(right_dofs):
-            if right_dofs == 7 and i == right_dofs - 1:
-                features["right_gripper.pos"] = float
-            else:
-                features[f"right_joint_{i}.pos"] = float
-
+                features[f"{side}_joint_{i}.{suffix}"] = float
         return features
 
     @property
@@ -176,6 +177,29 @@ class BiYamLinearBot(Robot):
     @cached_property
     def action_features(self) -> dict[str, type]:
         return {**self._arm_ft, **self._base_action_ft}
+
+    @property
+    def extra_dataset_features(self) -> dict[str, dict]:
+        """Per-arm torque columns that bypass the standard hw_to_dataset_features lumping.
+
+        Returns empty when `config.record_torques` is False. When enabled, emits
+        `observation.left_torques` and `observation.right_torques` columns built
+        from the flat `.eff` keys produced by `get_observation()`. Consumed by
+        `lerobot.scripts.lerobot_record` via
+        `getattr(robot, "extra_dataset_features", {})`.
+        """
+        if not getattr(self.config, "record_torques", False):
+            return {}
+
+        features: dict[str, dict] = {}
+        for side in ("left", "right"):
+            names = list(self._build_per_arm_features(side, "eff").keys())
+            features[f"observation.{side}_torques"] = {
+                "dtype": "float32",
+                "shape": (len(names),),
+                "names": names,
+            }
+        return features
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -246,28 +270,10 @@ class BiYamLinearBot(Robot):
 
         # --- arms ---
         left_obs = self.left_arm.get_observations()
-        left_joint_pos = left_obs["joint_pos"]
-        left_has_gripper = "gripper_pos" in left_obs
-        if left_has_gripper:
-            left_joint_pos = np.concatenate([left_joint_pos, left_obs["gripper_pos"]])
-
-        for i, pos in enumerate(left_joint_pos):
-            if left_has_gripper and i == len(left_joint_pos) - 1:
-                obs_dict["left_gripper.pos"] = pos
-            else:
-                obs_dict[f"left_joint_{i}.pos"] = pos
+        self._populate_arm_obs(obs_dict, side="left", arm_obs=left_obs)
 
         right_obs = self.right_arm.get_observations()
-        right_joint_pos = right_obs["joint_pos"]
-        right_has_gripper = "gripper_pos" in right_obs
-        if right_has_gripper:
-            right_joint_pos = np.concatenate([right_joint_pos, right_obs["gripper_pos"]])
-
-        for i, pos in enumerate(right_joint_pos):
-            if right_has_gripper and i == len(right_joint_pos) - 1:
-                obs_dict["right_gripper.pos"] = pos
-            else:
-                obs_dict[f"right_joint_{i}.pos"] = pos
+        self._populate_arm_obs(obs_dict, side="right", arm_obs=right_obs)
 
         # --- FlowBase odometry ---
         odometry = self._flow_base_client.get_odometry()
@@ -302,6 +308,42 @@ class BiYamLinearBot(Robot):
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
         return obs_dict
+
+    def _populate_arm_obs(self, obs_dict: dict[str, Any], side: str, arm_obs: dict[str, np.ndarray]) -> None:
+        """Emit flat `.pos` (and optionally `.eff`) keys for one arm from a single RPC response.
+
+        The i2rt server returns joint and gripper components separately; we concatenate
+        them so a 7-DOF (6 joints + gripper) arm yields keys 0..5 + `gripper`. Torques
+        come from `joint_eff` / `gripper_eff` (motor effort feedback over CAN) and are
+        only emitted when `config.record_torques=True`.
+        """
+        joint_pos = arm_obs["joint_pos"]
+        has_gripper = "gripper_pos" in arm_obs
+
+        if has_gripper:
+            joint_pos = np.concatenate([joint_pos, arm_obs["gripper_pos"]])
+
+        for i, pos in enumerate(joint_pos):
+            if has_gripper and i == len(joint_pos) - 1:
+                obs_dict[f"{side}_gripper.pos"] = pos
+            else:
+                obs_dict[f"{side}_joint_{i}.pos"] = pos
+
+        if not getattr(self.config, "record_torques", False):
+            return
+
+        joint_eff = arm_obs.get("joint_eff")
+        if joint_eff is None:
+            return
+
+        if has_gripper and "gripper_eff" in arm_obs:
+            joint_eff = np.concatenate([joint_eff, arm_obs["gripper_eff"]])
+
+        for i, eff in enumerate(joint_eff):
+            if has_gripper and i == len(joint_eff) - 1:
+                obs_dict[f"{side}_gripper.eff"] = eff
+            else:
+                obs_dict[f"{side}_joint_{i}.eff"] = eff
 
     # ------------------------------------------------------------------
     # Action
