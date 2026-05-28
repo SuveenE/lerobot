@@ -16,13 +16,16 @@
 
 """
 Camera overlay tool for precise item positioning.
-Overlays a live camera feed on top of a reference image to help position
-items in the exact same location. Useful for reproducible robot setups.
+Shows a live camera feed, optionally overlaid on top of a reference image to
+help position items in the exact same location. Useful for reproducible robot setups.
 Open http://localhost:8000 to view the overlay.
-Use the slider to adjust the blend between live feed and reference image.
+Use the slider to adjust the blend between live feed and reference image when
+a reference image is provided.
 Press Ctrl+C to stop.
 Example:
 ```shell
+# Show full live camera feed
+lerobot-overlay-camera --camera-id 128422270679
 # Overlay camera feed on reference image
 lerobot-overlay-camera --camera-id 128422270679 --reference-image /path/to/reference.png
 # Specify camera resolution
@@ -93,21 +96,24 @@ def create_camera(camera_id: str, width: int, height: int, fps: int) -> RealSens
     return camera
 
 
-def blend_frames(live_frame: np.ndarray, reference_frame: np.ndarray, alpha: float) -> np.ndarray:
+def blend_frames(live_frame: np.ndarray, reference_frame: np.ndarray | None, alpha: float) -> np.ndarray:
     """Blend live frame with reference image.
     
     Args:
         live_frame: Current camera frame
-        reference_frame: Reference image
+        reference_frame: Reference image, if one was provided
         alpha: Blend factor (0.0 = full reference, 1.0 = full live)
     
     Returns:
         Blended frame
     """
+    if reference_frame is None:
+        return live_frame
+
     return cv2.addWeighted(live_frame, alpha, reference_frame, 1 - alpha, 0)
 
 
-def add_overlay_info(frame: np.ndarray, alpha: float, fps: float) -> np.ndarray:
+def add_overlay_info(frame: np.ndarray, alpha: float, fps: float, has_reference: bool) -> np.ndarray:
     """Add information overlay to the frame."""
     h, w = frame.shape[:2]
 
@@ -118,13 +124,18 @@ def add_overlay_info(frame: np.ndarray, alpha: float, fps: float) -> np.ndarray:
 
     font = cv2.FONT_HERSHEY_SIMPLEX
 
-    # Blend info
-    live_pct = int(alpha * 100)
-    ref_pct = int((1 - alpha) * 100)
+    if has_reference:
+        live_pct = int(alpha * 100)
+        ref_pct = int((1 - alpha) * 100)
+        status_text = f"Live: {live_pct}% | Reference: {ref_pct}%"
+        help_text = "Adjust blend with slider in browser"
+    else:
+        status_text = "Live camera view"
+        help_text = "Showing full live camera frame"
 
-    cv2.putText(frame, f"Live: {live_pct}% | Reference: {ref_pct}%", (20, 35), font, 0.6, (0, 255, 136), 1)
+    cv2.putText(frame, status_text, (20, 35), font, 0.6, (0, 255, 136), 1)
     cv2.putText(frame, f"FPS: {fps:.1f} | {w}x{h}", (20, 55), font, 0.5, (200, 200, 200), 1)
-    cv2.putText(frame, "Adjust blend with slider in browser", (20, 80), font, 0.45, (150, 150, 150), 1)
+    cv2.putText(frame, help_text, (20, 80), font, 0.45, (150, 150, 150), 1)
 
     return frame
 
@@ -134,7 +145,8 @@ def camera_capture_thread():
     global running, blend_alpha
 
     cam = camera_state["camera"]
-    reference = camera_state["reference"]
+    reference = camera_state.get("reference")
+    has_reference = reference is not None
 
     frame_count = 0
     last_fps_time = time.time()
@@ -157,7 +169,7 @@ def camera_capture_thread():
             blended = blend_frames(live_frame, reference, blend_alpha)
 
             # Add overlay info
-            blended_with_info = add_overlay_info(blended, blend_alpha, fps)
+            blended_with_info = add_overlay_info(blended, blend_alpha, fps, has_reference)
 
             # Store frame
             with camera_state["lock"]:
@@ -169,7 +181,7 @@ def camera_capture_thread():
             time.sleep(0.1)
 
 
-def generate_html_page() -> str:
+def generate_html_page(has_reference: bool) -> str:
     """Generate HTML page with camera overlay and controls."""
     html = '''<!DOCTYPE html>
 <html>
@@ -182,16 +194,20 @@ def generate_html_page() -> str:
             background: linear-gradient(145deg, #0d0d0d 0%, #1a1a2e 40%, #16213e 100%);
             min-height: 100vh;
             color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
         }
         header {
             background: rgba(0, 0, 0, 0.8);
             backdrop-filter: blur(12px);
-            padding: 18px 25px;
+            padding: 14px 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
             border-bottom: 2px solid #00ff88;
             box-shadow: 0 4px 30px rgba(0, 255, 136, 0.1);
+            flex-shrink: 0;
         }
         .logo {
             display: flex;
@@ -216,6 +232,21 @@ def generate_html_page() -> str:
             padding: 12px 20px;
             border-radius: 10px;
             border: 1px solid #333;
+        }
+        .controls.hidden {
+            display: none;
+        }
+        .live-only-badge {
+            background: rgba(0, 255, 136, 0.12);
+            border: 1px solid #00ff88;
+            color: #00ff88;
+            padding: 10px 16px;
+            border-radius: 10px;
+            letter-spacing: 1px;
+            font-size: 0.85em;
+        }
+        .live-only-badge.hidden {
+            display: none;
         }
         .slider-container {
             display: flex;
@@ -279,8 +310,10 @@ def generate_html_page() -> str:
         main {
             display: flex;
             justify-content: center;
-            align-items: flex-start;
-            padding: 30px;
+            align-items: stretch;
+            padding: 16px;
+            flex: 1;
+            min-height: 0;
         }
         .video-container {
             background: rgba(15, 15, 25, 0.9);
@@ -289,15 +322,27 @@ def generate_html_page() -> str:
             border: 2px solid #333;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 40px rgba(0, 255, 136, 0.05);
             transition: border-color 0.3s;
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            min-height: 0;
         }
         .video-container:hover {
             border-color: #00ff88;
         }
+        .stream-frame {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #111;
+        }
         .video-container img {
             display: block;
-            max-width: 90vw;
-            max-height: 75vh;
-            background: #111;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
         }
         .status-bar {
             background: rgba(0, 0, 0, 0.6);
@@ -307,6 +352,7 @@ def generate_html_page() -> str:
             align-items: center;
             font-size: 0.8em;
             color: #666;
+            flex-shrink: 0;
         }
         .status-indicator {
             display: flex;
@@ -326,9 +372,10 @@ def generate_html_page() -> str:
         }
         footer {
             text-align: center;
-            padding: 20px;
+            padding: 12px 20px;
             color: #444;
             font-size: 0.75em;
+            flex-shrink: 0;
         }
         .help-text {
             margin-top: 8px;
@@ -343,7 +390,7 @@ def generate_html_page() -> str:
             <span class="icon">📷</span>
             <h1>OVERLAY CAMERA</h1>
         </div>
-        <div class="controls">
+        <div class="controls __CONTROLS_CLASS__">
             <div class="slider-container">
                 <span class="slider-label">Reference</span>
                 <input type="range" id="blendSlider" min="0" max="100" value="50">
@@ -358,36 +405,42 @@ def generate_html_page() -> str:
                 <button class="preset-btn" onclick="setBlend(100)">Live Only</button>
             </div>
         </div>
+        <div class="live-only-badge __LIVE_BADGE_CLASS__">LIVE VIEW</div>
     </header>
     <main>
         <div class="video-container">
-            <img id="streamImg" src="/stream" alt="Camera Overlay">
+            <div class="stream-frame">
+                <img id="streamImg" src="/stream" alt="__IMAGE_ALT__">
+            </div>
             <div class="status-bar">
                 <div class="status-indicator">
                     <div class="status-dot"></div>
                     <span>Streaming</span>
                 </div>
-                <span>Position items to match the reference image</span>
+                <span>__STATUS_TEXT__</span>
             </div>
         </div>
     </main>
     <footer>
         LeRobot Camera Overlay Tool • Press Ctrl+C in terminal to stop
         <div class="help-text">
-            Tip: Use 50% blend to see both live feed and reference simultaneously
+            __HELP_TEXT__
         </div>
     </footer>
     <script>
+        const hasReference = __HAS_REFERENCE__;
         const slider = document.getElementById('blendSlider');
         const valueDisplay = document.getElementById('blendValue');
         const streamImg = document.getElementById('streamImg');
         
         function setBlend(value) {
+            if (!hasReference) return;
             slider.value = value;
             updateBlend();
         }
         
         function updateBlend() {
+            if (!hasReference) return;
             const value = slider.value;
             valueDisplay.textContent = value + '%';
             
@@ -397,10 +450,27 @@ def generate_html_page() -> str:
             });
         }
         
-        slider.addEventListener('input', updateBlend);
+        if (hasReference) {
+            slider.addEventListener('input', updateBlend);
+        }
     </script>
 </body>
 </html>'''
+    replacements = {
+        "__CONTROLS_CLASS__": "" if has_reference else "hidden",
+        "__LIVE_BADGE_CLASS__": "hidden" if has_reference else "",
+        "__IMAGE_ALT__": "Camera Overlay" if has_reference else "Live Camera",
+        "__STATUS_TEXT__": "Position items to match the reference image"
+        if has_reference
+        else "Showing full live camera view",
+        "__HELP_TEXT__": "Tip: Use 50% blend to see both live feed and reference simultaneously"
+        if has_reference
+        else "Tip: Provide --reference-image to enable overlay controls",
+        "__HAS_REFERENCE__": "true" if has_reference else "false",
+    }
+    for placeholder, value in replacements.items():
+        html = html.replace(placeholder, value)
+
     return html
 
 
@@ -420,7 +490,7 @@ class OverlayStreamHandler(BaseHTTPRequestHandler):
 
         if path == "/" or path == "/index.html":
             # Serve HTML page
-            content = generate_html_page().encode()
+            content = generate_html_page(camera_state.get("reference") is not None).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", len(content))
@@ -474,7 +544,7 @@ class OverlayStreamHandler(BaseHTTPRequestHandler):
 
 def run_overlay_camera(
     camera_id: str,
-    reference_image: str,
+    reference_image: str | None,
     width: int = 640,
     height: int = 360,
     fps: int = 30,
@@ -486,7 +556,7 @@ def run_overlay_camera(
     
     Args:
         camera_id: RealSense camera serial number or name.
-        reference_image: Path to reference image.
+        reference_image: Path to reference image, or None for live-only view.
         width: Camera width resolution.
         height: Camera height resolution.
         fps: Camera FPS.
@@ -495,14 +565,15 @@ def run_overlay_camera(
     """
     global camera_state, running, blend_alpha
 
-    blend_alpha = initial_blend
+    blend_alpha = initial_blend if reference_image is not None else 1.0
 
-    # Load reference image
-    try:
-        reference = load_reference_image(reference_image, width, height)
-    except Exception as e:
-        logger.error(f"Failed to load reference image: {e}")
-        return
+    reference = None
+    if reference_image is not None:
+        try:
+            reference = load_reference_image(reference_image, width, height)
+        except Exception as e:
+            logger.error(f"Failed to load reference image: {e}")
+            return
 
     # Connect to camera
     try:
@@ -544,9 +615,10 @@ def run_overlay_camera(
     print(f"📷 Camera overlay preview running!")
     print(f"   Open in browser: http://localhost:{port}")
     print(f"   Camera: {camera_id} ({width}x{height} @ {fps}fps)")
-    print(f"   Reference: {reference_image}")
+    print(f"   Reference: {reference_image if reference_image is not None else 'none (live-only view)'}")
     print(f"{'='*55}")
-    print("Use the slider in the browser to adjust blend.")
+    if reference_image is not None:
+        print("Use the slider in the browser to adjust blend.")
     print("Press Ctrl+C to stop.\n")
 
     try:
@@ -570,7 +642,7 @@ def run_overlay_camera(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Overlay live camera feed on a reference image for precise item positioning."
+        description="Show a live camera feed with an optional reference image overlay."
     )
     parser.add_argument(
         "--camera-id",
@@ -581,8 +653,8 @@ def main():
     parser.add_argument(
         "--reference-image",
         type=str,
-        required=True,
-        help="Path to the reference image.",
+        default=None,
+        help="Optional path to the reference image.",
     )
     parser.add_argument(
         "--width",

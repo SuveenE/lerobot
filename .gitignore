@@ -177,4 +177,4 @@ outputs/
 *.urdf
 *.xml
 *.part
-internal/*
+internal/
