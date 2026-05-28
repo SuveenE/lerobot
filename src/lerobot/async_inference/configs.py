@@ -64,6 +64,37 @@ class PolicyServerConfig:
         default=DEFAULT_OBS_QUEUE_TIMEOUT, metadata={"help": "Timeout for observation queue in seconds"}
     )
 
+    # Optional joint-frame conversion applied around the policy call:
+    #   state_model = joint_signs * state_robot + joint_offsets       (preprocessor input)
+    #   action_robot = (action_model - joint_offsets) * joint_signs   (postprocessor output)
+    # Use for the LeRobot v3.0 -> v2.1 SO-100/101 calibration shift required by
+    # MolmoAct2 (and other policies trained on pre-PR777 datasets). Mirrors the
+    # reference impl in https://github.com/irenegracekp/molmoact2-so101 and the
+    # official docs at https://huggingface.co/docs/lerobot/backwardcomp.
+    # Defaults are empty lists, meaning the identity transform is applied (i.e.
+    # no behavior change). For SO-100/101 + MolmoAct2 pass:
+    #   --joint_signs='[1,-1,1,1,1,1]' --joint_offsets='[0,90,90,0,0,0]'
+    joint_signs: list[float] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Per-joint sign multiplier (+/-1) for the robot<->model frame "
+                "conversion applied around the policy call. Empty list disables "
+                "the conversion. Length must match state/action dim."
+            )
+        },
+    )
+    joint_offsets: list[float] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Per-joint offset (degrees) for the robot<->model frame "
+                "conversion applied around the policy call. Empty list disables "
+                "the conversion. Length must match state/action dim."
+            )
+        },
+    )
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.port < 1 or self.port > 65535:
@@ -77,6 +108,22 @@ class PolicyServerConfig:
 
         if self.obs_queue_timeout < 0:
             raise ValueError(f"obs_queue_timeout must be non-negative, got {self.obs_queue_timeout}")
+
+        # joint_signs and joint_offsets must either both be empty (disabled) or
+        # both be the same non-zero length. Sign values are restricted to +/-1
+        # to match the molmoact2-so101 reference and avoid silent scaling bugs.
+        if bool(self.joint_signs) != bool(self.joint_offsets):
+            raise ValueError(
+                "joint_signs and joint_offsets must either both be empty or "
+                "both be non-empty with matching lengths."
+            )
+        if self.joint_signs and len(self.joint_signs) != len(self.joint_offsets):
+            raise ValueError(
+                f"joint_signs (len {len(self.joint_signs)}) and joint_offsets "
+                f"(len {len(self.joint_offsets)}) must have the same length."
+            )
+        if any(s not in (-1.0, 1.0) for s in self.joint_signs):
+            raise ValueError(f"joint_signs values must be +/-1, got {self.joint_signs}")
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PolicyServerConfig":

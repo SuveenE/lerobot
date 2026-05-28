@@ -51,6 +51,7 @@ from lerobot.transport import (
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
 from lerobot.types import PolicyAction
+from lerobot.utils.constants import OBS_STATE
 from lerobot.utils.feature_utils import dataset_to_policy_features
 
 from .configs import PolicyServerConfig
@@ -84,6 +85,20 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self._predicted_timesteps = set()
 
         self.last_processed_obs = None
+
+        # Optional robot<->model joint-frame conversion (e.g. LeRobot v3.0 -> v2.1
+        # for MolmoAct2 on SO-100/101). When both lists are non-empty in the
+        # config, applied inline around the policy call. None == disabled.
+        if config.joint_signs and config.joint_offsets:
+            self._joint_signs: torch.Tensor | None = torch.tensor(
+                config.joint_signs, dtype=torch.float32
+            )
+            self._joint_offsets: torch.Tensor | None = torch.tensor(
+                config.joint_offsets, dtype=torch.float32
+            )
+        else:
+            self._joint_signs = None
+            self._joint_offsets = None
 
         # Attributes will be set by SendPolicyInstructions
         self.device = None
@@ -415,6 +430,17 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.lerobot_features,
             self.policy_image_features,
         )
+
+        # Robot -> model frame conversion. Mirrors the inline transform in
+        # https://github.com/irenegracekp/molmoact2-so101 (runtime.py) so the
+        # policy sees state in the convention its training dataset was recorded
+        # in (LeRobot v2.1), not the robot's current convention (v3.0).
+        if self._joint_signs is not None and OBS_STATE in observation:
+            state = observation[OBS_STATE]
+            signs = self._joint_signs.to(device=state.device, dtype=state.dtype)
+            offsets = self._joint_offsets.to(device=state.device, dtype=state.dtype)
+            observation[OBS_STATE] = signs * state + offsets
+
         prepare_time = time.perf_counter() - start_prepare
 
         """2. Apply preprocessor"""
@@ -451,6 +477,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.logger.debug(f"Postprocessed action shape: {action_tensor.shape}")
 
         action_tensor = action_tensor.detach().cpu()
+
+        # Model -> robot frame conversion (inverse of the state transform above).
+        # Mirrors `(model_action - offsets) * signs` from molmoact2-so101's
+        # runtime._postprocess. Applied after unnormalization so the robot
+        # receives raw degrees in its own convention.
+        if self._joint_signs is not None:
+            signs = self._joint_signs.to(device=action_tensor.device, dtype=action_tensor.dtype)
+            offsets = self._joint_offsets.to(device=action_tensor.device, dtype=action_tensor.dtype)
+            action_tensor = (action_tensor - offsets) * signs
 
         """5. Convert to TimedAction list"""
         action_chunk = self._time_action_chunk(
