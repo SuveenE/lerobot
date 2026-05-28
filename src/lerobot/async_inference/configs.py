@@ -195,7 +195,22 @@ class RobotClientConfig:
 
     # Policy configuration
     policy_type: str = field(metadata={"help": "Type of policy to use"})
-    pretrained_name_or_path: str = field(metadata={"help": "Pretrained model name or path"})
+    # Optional: a LeRobot-saved checkpoint (draccus config.json + weights) loadable
+    # via PreTrainedConfig.from_pretrained / PreTrainedPolicy.from_pretrained.
+    # Leave empty to use the HF-original mode, in which the server constructs the
+    # policy config purely from `policy_config_overrides` (the checkpoint location
+    # for the underlying weights then comes from the policy-specific field, e.g.
+    # MolmoAct2's `--checkpoint_path=allenai/MolmoAct2-SO100_101`).
+    pretrained_name_or_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "LeRobot-saved checkpoint (HF repo id or local dir). "
+                "Leave empty when using an HF-original checkpoint, in which case "
+                "the policy config is built entirely from --policy_config_overrides."
+            )
+        },
+    )
 
     # Robot configuration (for CLI usage - robot instance will be created from this)
     robot: RobotConfig = field(metadata={"help": "Robot configuration"})
@@ -221,6 +236,37 @@ class RobotClientConfig:
     aggregate_fn_name: str = field(
         default="weighted_average",
         metadata={"help": f"Name of aggregate function to use. Options: {list(AGGREGATE_FUNCTIONS.keys())}"},
+    )
+
+    # Optional rename map applied server-side to translate robot observation keys
+    # (e.g. {"observation.images.front": "observation.images.cam_high"}) into the
+    # names baked into the policy's saved processor (`config.image_keys`).
+    rename_map: dict[str, str] = field(
+        default_factory=dict,
+        metadata={
+            "help": (
+                "Rename map applied server-side via the policy preprocessor's "
+                "RenameObservationsProcessorStep, used when the robot's observation "
+                "keys differ from the policy's expected feature keys."
+            )
+        },
+    )
+
+    # Draccus CLI-style overrides shipped to the server and applied to the saved
+    # policy config before the policy is instantiated, e.g.
+    # ``["--norm_tag=so101", "--inference_action_mode=continuous",
+    # "--normalize_gripper=true", "--rtc_config=null"]``. Useful when the
+    # checkpoint's config.json was saved without deployment-specific fields and
+    # the client cannot edit it (e.g. running MolmoAct2 on SO-101 from a
+    # GPU-less robot).
+    policy_config_overrides: list[str] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "List of draccus CLI overrides (e.g. '--norm_tag=so101') applied "
+                "server-side to the saved policy config before instantiation."
+            )
+        },
     )
 
     # Debug configuration
@@ -252,8 +298,16 @@ class RobotClientConfig:
         if not self.policy_type:
             raise ValueError("policy_type cannot be empty")
 
-        if not self.pretrained_name_or_path:
-            raise ValueError("pretrained_name_or_path cannot be empty")
+        # `pretrained_name_or_path` is optional: when empty, the server runs in
+        # HF-original mode and builds the policy config from
+        # `policy_config_overrides` only. Require at least one of the two so the
+        # server has something to construct the policy from.
+        if not self.pretrained_name_or_path and not self.policy_config_overrides:
+            raise ValueError(
+                "Either `pretrained_name_or_path` (LeRobot-saved checkpoint) or "
+                "`policy_config_overrides` (HF-original checkpoint, e.g. "
+                "'--checkpoint_path=allenai/MolmoAct2-SO100_101') must be set."
+            )
 
         if not self.policy_device:
             raise ValueError("policy_device cannot be empty")
@@ -287,6 +341,8 @@ class RobotClientConfig:
             "task": self.task,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
+            "rename_map": dict(self.rename_map),
+            "policy_config_overrides": list(self.policy_config_overrides),
             "dataset": {
                 "enabled": self.dataset.enabled,
                 "repo_id": self.dataset.repo_id,

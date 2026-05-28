@@ -28,6 +28,7 @@ from lerobot.datasets.utils import build_dataset_frame, hw_to_dataset_features
 from lerobot.policies import (  # noqa: F401
     ACTConfig,
     DiffusionConfig,
+    MolmoAct2Config,
     PI0Config,
     PI05Config,
     SmolVLAConfig,
@@ -269,6 +270,12 @@ class RemotePolicyConfig:
     actions_per_chunk: int
     device: str = "cpu"
     rename_map: dict[str, str] = field(default_factory=dict)
+    # Draccus CLI-style overrides applied to the saved policy config server-side
+    # before the policy is instantiated. Each entry looks like a CLI argument,
+    # e.g. ``"--norm_tag=so101"`` or ``"--inference_action_mode=continuous"``.
+    # This lets a GPU-less client tune things like normalization tag, gripper
+    # handling, and RTC for VLA policies without editing the checkpoint.
+    policy_config_overrides: list[str] = field(default_factory=list)
 
 
 def _compare_observation_states(obs1_state: torch.Tensor, obs2_state: torch.Tensor, atol: float) -> bool:
