@@ -109,6 +109,14 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
 
+        # Cache the last successfully-loaded policy signature so subsequent
+        # SendPolicyInstructions calls with the same `(policy_type,
+        # pretrained_name_or_path, cli_overrides, device)` can skip the
+        # expensive weight load (≥3 minutes for MolmoAct2 on GPU). `rename_map`
+        # is deliberately excluded — it only affects the preprocessor and can
+        # be patched in cheaply via `_inject_rename_map`.
+        self._loaded_policy_key: tuple | None = None
+
     @property
     def running(self):
         return not self.shutdown_event.is_set()
@@ -177,9 +185,28 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         if cli_overrides:
             self.logger.info(f"Applying {len(cli_overrides)} policy config override(s): {cli_overrides}")
 
-        start = time.perf_counter()
-
         rename_map = dict(policy_specs.rename_map or {})
+
+        # Fast path: identical signature to the last load -> reuse the in-memory
+        # policy and processors, just refresh the rename map and per-request state.
+        load_key = (
+            policy_specs.policy_type,
+            policy_specs.pretrained_name_or_path,
+            tuple(cli_overrides),
+            policy_specs.device,
+        )
+        if self._loaded_policy_key == load_key and self.policy is not None:
+            self.logger.info(
+                "Policy already loaded with identical signature "
+                f"(policy_type={policy_specs.policy_type}, "
+                f"checkpoint={policy_specs.pretrained_name_or_path or '<hf-original>'}, "
+                f"overrides={len(cli_overrides)}, device={policy_specs.device}) -- skipping reload."
+            )
+            if self.preprocessor is not None:
+                _inject_rename_map(self.preprocessor, rename_map)
+            return services_pb2.Empty()
+
+        start = time.perf_counter()
 
         if policy_specs.pretrained_name_or_path:
             # LeRobot-saved checkpoint path: draccus config.json + safetensors are at
@@ -253,6 +280,10 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         end = time.perf_counter()
 
         self.logger.info(f"Time taken to put policy on {self.device}: {end - start:.4f} seconds")
+
+        # Record the load signature so future identical SendPolicyInstructions
+        # calls can short-circuit and reuse the in-memory policy + processors.
+        self._loaded_policy_key = load_key
 
         return services_pb2.Empty()
 
