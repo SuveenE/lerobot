@@ -28,12 +28,21 @@ from lerobot.datasets.utils import build_dataset_frame, hw_to_dataset_features
 from lerobot.policies import (  # noqa: F401
     ACTConfig,
     DiffusionConfig,
-    MolmoAct2Config,
     PI0Config,
     PI05Config,
     SmolVLAConfig,
     VQBeTConfig,
 )
+
+# MolmoAct2 is optional: this branch may be built off a base that predates the
+# MolmoAct2 policy being added to `lerobot.policies` (PR #3604). The client side
+# of async inference only ships string overrides to the server, so it doesn't
+# actually need the config class; we just want it registered with draccus when
+# it is available so users on a MolmoAct2-aware branch can pass `--policy.type=molmoact2`.
+try:
+    from lerobot.policies import MolmoAct2Config  # noqa: F401
+except ImportError:
+    pass
 from lerobot.robots.robot import Robot
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE, OBS_STR
 from lerobot.utils.utils import init_logging
