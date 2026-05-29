@@ -43,7 +43,7 @@ import logging
 import signal
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import cv2
@@ -61,6 +61,12 @@ logger = logging.getLogger(__name__)
 # Global state for cameras
 cameras: list[dict[str, Any]] = []
 running = True
+
+# Browsers (Chrome/Firefox/Safari) allow ~6 concurrent HTTP/1.1 connections per
+# origin. Each MJPEG stream holds one connection open indefinitely, so we cap
+# the number of simultaneously displayed cameras to keep one slot free for the
+# HTML page and any other requests.
+MAX_CAMERAS = 5
 
 
 def find_all_opencv_cameras() -> list[dict[str, Any]]:
@@ -137,7 +143,14 @@ def create_camera_instance(cam_meta: dict[str, Any]) -> Any | None:
         
         camera.connect(warmup=True)
         logger.info(f"Connected to {cam_type} camera: {cam_id}")
-        return {"instance": camera, "meta": cam_meta, "frame": None, "fps": 0.0, "lock": threading.Lock()}
+        return {
+            "instance": camera,
+            "meta": cam_meta,
+            "jpeg": None,
+            "fps": 0.0,
+            "lock": threading.Lock(),
+            "frame_event": threading.Event(),
+        }
     
     except Exception as e:
         logger.error(f"Failed to connect to {cam_type} camera {cam_id}: {e}")
@@ -168,20 +181,24 @@ def add_info_overlay(frame: np.ndarray, cam_meta: dict[str, Any], fps: float) ->
 
 
 def camera_capture_thread(cam_dict: dict[str, Any]):
-    """Thread to continuously capture frames from a camera."""
+    """Thread to continuously capture frames from a camera and pre-encode JPEGs.
+
+    JPEG encoding happens here (once per frame) rather than per stream handler so
+    that CPU cost stays bounded as the number of connected viewers grows.
+    """
     global running
-    
+
     cam = cam_dict["instance"]
     meta = cam_dict["meta"]
-    
+
     frame_count = 0
     last_fps_time = time.time()
-    
+
     while running:
         try:
             frame = cam.read()
             frame_count += 1
-            
+
             # Calculate FPS
             current_time = time.time()
             elapsed = current_time - last_fps_time
@@ -189,14 +206,19 @@ def camera_capture_thread(cam_dict: dict[str, Any]):
                 cam_dict["fps"] = frame_count / elapsed
                 frame_count = 0
                 last_fps_time = current_time
-            
-            # Add overlay
+
             frame_with_overlay = add_info_overlay(frame, meta, cam_dict["fps"])
-            
-            # Store frame
+
+            ok, jpeg = cv2.imencode(".jpg", frame_with_overlay, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ok:
+                continue
+            jpeg_bytes = jpeg.tobytes()
+
             with cam_dict["lock"]:
-                cam_dict["frame"] = frame_with_overlay
-                
+                cam_dict["jpeg"] = jpeg_bytes
+            # Wake any streaming clients waiting for a new frame.
+            cam_dict["frame_event"].set()
+
         except Exception as e:
             logger.warning(f"Error reading from camera {meta.get('id')}: {e}")
             time.sleep(0.1)
@@ -206,14 +228,12 @@ def generate_html_page() -> str:
     """Generate HTML page with all camera feeds."""
     num_cameras = len(cameras)
     
-    # Calculate grid layout
+    # Calculate grid layout. Tuned for up to MAX_CAMERAS (=5) cameras.
     if num_cameras == 1:
         cols = 1
-    elif num_cameras == 2:
+    elif num_cameras == 2 or num_cameras == 4:
         cols = 2
-    elif num_cameras <= 4:
-        cols = 2
-    else:
+    else:  # 3, 5, 6+
         cols = 3
     
     camera_divs = []
@@ -322,7 +342,7 @@ def generate_html_page() -> str:
 
 class StreamHandler(BaseHTTPRequestHandler):
     """HTTP request handler for MJPEG streaming."""
-    
+
     def log_message(self, format, *args):
         """Suppress default logging."""
         pass
@@ -346,35 +366,38 @@ class StreamHandler(BaseHTTPRequestHandler):
                 if cam_index >= len(cameras):
                     self.send_error(404, "Camera not found")
                     return
-                
+
                 cam_dict = cameras[cam_index]
-                
+
                 self.send_response(200)
                 self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
                 self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
                 self.send_header("Pragma", "no-cache")
                 self.end_headers()
-                
+
+                last_jpeg = None
                 while running:
+                    # Wait until the capture thread signals a new frame, with a
+                    # timeout so we periodically re-check `running` for shutdown.
+                    cam_dict["frame_event"].wait(timeout=1.0)
+                    cam_dict["frame_event"].clear()
+
                     with cam_dict["lock"]:
-                        frame = cam_dict["frame"]
-                    
-                    if frame is not None:
-                        # Encode frame as JPEG
-                        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                        jpeg_bytes = jpeg.tobytes()
-                        
-                        try:
-                            self.wfile.write(b"--frame\r\n")
-                            self.wfile.write(b"Content-Type: image/jpeg\r\n")
-                            self.wfile.write(f"Content-Length: {len(jpeg_bytes)}\r\n\r\n".encode())
-                            self.wfile.write(jpeg_bytes)
-                            self.wfile.write(b"\r\n")
-                        except (BrokenPipeError, ConnectionResetError):
-                            break
-                    
-                    time.sleep(0.033)  # ~30 FPS
-                    
+                        jpeg_bytes = cam_dict["jpeg"]
+
+                    if jpeg_bytes is None or jpeg_bytes is last_jpeg:
+                        continue
+                    last_jpeg = jpeg_bytes
+
+                    try:
+                        self.wfile.write(b"--frame\r\n")
+                        self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                        self.wfile.write(f"Content-Length: {len(jpeg_bytes)}\r\n\r\n".encode())
+                        self.wfile.write(jpeg_bytes)
+                        self.wfile.write(b"\r\n")
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+
             except (ValueError, IndexError):
                 self.send_error(400, "Invalid camera index")
         else:
@@ -405,12 +428,21 @@ def run_live_preview(camera_type: str | None = None, port: int = 8000):
     for i, meta in enumerate(camera_metas):
         print(f"  {i}: {meta.get('type')} - {meta.get('id')} ({meta.get('name', 'N/A')})")
     print("-" * 25)
-    
+
+    if len(camera_metas) > MAX_CAMERAS:
+        logger.warning(
+            f"Detected {len(camera_metas)} cameras; capping to {MAX_CAMERAS} to stay under the "
+            "browser's per-origin HTTP/1.1 connection limit."
+        )
+        camera_metas = camera_metas[:MAX_CAMERAS]
+
     # Connect to cameras
     for meta in camera_metas:
         cam = create_camera_instance(meta)
         if cam:
             cameras.append(cam)
+        if len(cameras) >= MAX_CAMERAS:
+            break
     
     if not cameras:
         logger.error("No cameras could be connected.")
@@ -435,23 +467,28 @@ def run_live_preview(camera_type: str | None = None, port: int = 8000):
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Start HTTP server
-    server = HTTPServer(("0.0.0.0", port), StreamHandler)
-    server.timeout = 1
-    
+    # Start HTTP server. ThreadingHTTPServer spawns a new thread per request so
+    # that each camera's long-lived MJPEG stream can be served concurrently.
+    server = ThreadingHTTPServer(("0.0.0.0", port), StreamHandler)
+    server.daemon_threads = True
+
     print(f"\n{'='*50}")
     print(f"🎥 Live camera preview running!")
     print(f"   Open in browser: http://localhost:{port}")
     print(f"   {len(cameras)} camera(s) streaming")
     print(f"{'='*50}")
     print("Press Ctrl+C to stop.\n")
-    
+
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
     try:
         while running:
-            server.handle_request()
+            time.sleep(0.2)
     finally:
         print("\nCleaning up...")
         running = False
+        server.shutdown()
         server.server_close()
         
         for cam in cameras:
