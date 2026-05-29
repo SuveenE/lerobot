@@ -37,6 +37,13 @@ class BiYamFollowerConfig(RobotConfig):
     left_arm_max_relative_target: float | dict[str, float] | None = None
     right_arm_max_relative_target: float | dict[str, float] | None = None
 
+    # When True, also record per-arm motor torques (joint_eff / gripper_eff) as
+    # dedicated `observation.left_torques` and `observation.right_torques`
+    # columns. Defaults to False so existing recordings / pretrained
+    # positions-only policies remain unaffected. Enable via
+    # `--robot.record_torques=true` on the lerobot-record CLI.
+    record_torques: bool = False
+
     # Cameras (shared between both arms)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
