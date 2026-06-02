@@ -65,13 +65,11 @@ def visualize_action_queue_size(action_queue_size: list[int]) -> None:
 
 
 def map_robot_keys_to_lerobot_features(robot: Robot) -> dict[str, dict]:
-    """Build a LeRobot dataset-features dict describing both observations and the action.
+    """Build a LeRobot dataset-features dict for both observations and the action.
 
-    The observation features (state + images) are needed client-side to build
-    LeRobot-format observations from the raw robot dict. The action feature is
-    needed server-side (in HF-original checkpoint mode) so the policy config's
-    `output_features` reflects the real robot action dim, not the policy's
-    padded `expected_max_action_dim`.
+    Observation features are used client-side to build LeRobot observations; the
+    action feature lets the server set the policy's `output_features` to the real
+    robot action dim (used in HF-original mode).
     """
     obs_features = hw_to_dataset_features(robot.observation_features, OBS_STR, use_video=False)
     action_features = hw_to_dataset_features(robot.action_features, ACTION, use_video=False)
@@ -281,11 +279,8 @@ class RemotePolicyConfig:
     actions_per_chunk: int
     device: str = "cpu"
     rename_map: dict[str, str] = field(default_factory=dict)
-    # Draccus CLI-style overrides applied to the saved policy config server-side
-    # before the policy is instantiated. Each entry looks like a CLI argument,
-    # e.g. ``"--norm_tag=so101"`` or ``"--inference_action_mode=continuous"``.
-    # This lets a GPU-less client tune things like normalization tag, gripper
-    # handling, and RTC for VLA policies without editing the checkpoint.
+    # Draccus CLI-style overrides applied to the policy config server-side before
+    # instantiation, e.g. ``"--inference_action_mode=continuous"``.
     policy_config_overrides: list[str] = field(default_factory=list)
 
 
