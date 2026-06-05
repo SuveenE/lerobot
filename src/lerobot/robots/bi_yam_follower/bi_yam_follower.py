@@ -351,6 +351,62 @@ class BiYamFollower(Robot):
 
         return action
 
+    def _initial_arm_target(self, dofs: int) -> np.ndarray:
+        """Home joint vector for one arm: all joints at 0.0, gripper open (1.0).
+
+        For a 7-DOF arm (6 joints + gripper) the last entry is the gripper.
+        """
+        target = np.zeros(dofs, dtype=float)
+        if dofs == 7:
+            target[-1] = 1.0
+        return target
+
+    def move_to_initial_position(
+        self,
+        events: dict | None = None,
+        num_steps: int = 100,
+        step_sleep: float = 0.1,
+    ) -> None:
+        """Slowly drive both arms back to the home position.
+
+        Called at the start of the reset window so the arms return to a known
+        home pose instead of freezing wherever the episode ended (often
+        mid-air). Logic matches the async-inference
+        `RobotClient._slow_move_to_position`: linear interpolation over
+        `num_steps` discrete steps with a fixed `step_sleep` between them
+        (default 100 x 0.1s = ~10s). After this the caller resumes the normal
+        teleop `record_loop` reset so the operator can reset the environment.
+        """
+
+        def _should_exit() -> bool:
+            return events is not None and events.get("exit_early", False)
+
+        left_target = self._initial_arm_target(self._left_dofs)
+        right_target = self._initial_arm_target(self._right_dofs)
+
+        left_start = np.array(self.left_arm.get_joint_pos(), dtype=float)
+        right_start = np.array(self.right_arm.get_joint_pos(), dtype=float)
+
+        # Smooth linear interpolation to the home pose.
+        for i in range(num_steps):
+            if _should_exit():
+                break
+            blend = i / num_steps  # 0 -> ~1
+            left_cmd = left_target * blend + left_start * (1.0 - blend)
+            right_cmd = right_target * blend + right_start * (1.0 - blend)
+            self.left_arm.command_joint_pos(left_cmd)
+            self.right_arm.command_joint_pos(right_cmd)
+            time.sleep(step_sleep)
+
+        # Final exact target so we settle precisely at home.
+        if not _should_exit():
+            self.left_arm.command_joint_pos(left_target)
+            self.right_arm.command_joint_pos(right_target)
+
+        # Consume the exit flag so it doesn't leak into the following reset loop.
+        if events is not None and events.get("exit_early", False):
+            events["exit_early"] = False
+
     def _clip_relative_target(
         self, target: np.ndarray, current: np.ndarray, max_relative: float | dict[str, float]
     ) -> np.ndarray:
