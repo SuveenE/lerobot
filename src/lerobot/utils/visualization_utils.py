@@ -27,8 +27,16 @@ def init_rerun(session_name: str = "lerobot_control_loop") -> None:
     batch_size = os.getenv("RERUN_FLUSH_NUM_BYTES", "8000")
     os.environ["RERUN_FLUSH_NUM_BYTES"] = batch_size
     rr.init(session_name)
-    memory_limit = os.getenv("LEROBOT_RERUN_MEMORY_LIMIT", "10%")
-    rr.spawn(memory_limit=memory_limit)
+
+    # Stream to a Rerun viewer running on another machine in the network.
+    # Start the viewer there with `rerun --port 9876` and set e.g.
+    # LEROBOT_RERUN_CONNECT="rerun+http://192.168.1.50:9876/proxy".
+    remote = os.getenv("LEROBOT_RERUN_CONNECT")
+    if remote:
+        rr.connect_grpc(url=remote)
+    else:
+        memory_limit = os.getenv("LEROBOT_RERUN_MEMORY_LIMIT", "10%")
+        rr.spawn(memory_limit=memory_limit)
 
 
 def _is_scalar(x):
