@@ -46,6 +46,22 @@ def _should_skip_images() -> bool:
     return False
 
 
+def _is_camera_streamed(key: str) -> bool:
+    """Whitelist which camera views are streamed via LEROBOT_RERUN_CAMERAS (if set).
+
+    Set e.g. LEROBOT_RERUN_CAMERAS="front,back,top" to only stream those views and
+    skip the rest. Matching is case-insensitive against the last segment of the key
+    (e.g. "observation.images.front" -> "front"). Recording is unaffected.
+    """
+    whitelist = os.getenv("LEROBOT_RERUN_CAMERAS")
+    if not whitelist:
+        return True
+
+    allowed = {name.strip().lower() for name in whitelist.split(",") if name.strip()}
+    cam_name = str(key).split(".")[-1].lower()
+    return cam_name in allowed
+
+
 def _log_image(key: str, arr: np.ndarray) -> None:
     """Log an image to Rerun, optionally downscaling and/or JPEG-compressing.
 
@@ -145,7 +161,7 @@ def log_rerun_data(
                 if v.ndim == 1:
                     for i, vi in enumerate(v):
                         rr.log(f"{key}_{i}", rr.Scalars(float(vi)))
-                elif not skip_images:
+                elif not skip_images and _is_camera_streamed(key):
                     _log_image(key, v)
 
     if action:
