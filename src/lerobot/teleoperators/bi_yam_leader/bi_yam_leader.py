@@ -76,26 +76,39 @@ class YamLeaderClient:
             raise RuntimeError("Client not connected")
         return self._client.get_observations().result()
 
-    def get_gripper_from_encoder(self) -> float:
+    @staticmethod
+    def gripper_from_encoder_obs(obs: dict) -> float:
+        """
+        Derive gripper state from teaching handle encoder button in an observation dict.
+        Returns a value between 0 (closed) and 1 (open).
+        Falls back to 1.0 (open) if not available.
+        """
+        try:
+            if "io_inputs" in obs:
+                # Button pressed = closed gripper (0), not pressed = open (1)
+                return 0.0 if obs["io_inputs"][0] > 0.5 else 1.0
+            return 1.0
+        except Exception:
+            return 1.0
+
+    def get_gripper_from_encoder(self, obs: dict | None = None) -> float:
         """
         Try to get gripper state from teaching handle encoder button.
         Returns a value between 0 (closed) and 1 (open).
         Falls back to 1.0 (open) if not available.
+
+        Args:
+            obs: Optional pre-fetched observations. When provided, avoids an extra RPC call.
         """
+        if obs is not None:
+            return self.gripper_from_encoder_obs(obs)
+
         if self._client is None:
             raise RuntimeError("Client not connected")
         try:
-            # Try to get encoder state if the server exposes it
-            # This requires custom method in the i2rt server
-            obs = self._client.get_observations().result()
-            # Check if encoder button data is available in observations
-            # The encoder button state might be in io_inputs or similar field
-            if "io_inputs" in obs:
-                # Button pressed = closed gripper (0), not pressed = open (1)
-                return 0.0 if obs["io_inputs"][0] > 0.5 else 1.0
-            return 1.0  # Default to open if no encoder data
+            return self.gripper_from_encoder_obs(self._client.get_observations().result())
         except Exception:
-            return 1.0  # Default to open on any error
+            return 1.0
 
 
 class BiYamLeader(Teleoperator):
@@ -230,8 +243,8 @@ class BiYamLeader(Teleoperator):
         if left_has_gripper:
             left_joint_pos = np.concatenate([left_joint_pos, left_obs["gripper_pos"]])
         else:
-            # Teaching handle: try to get gripper from encoder button
-            left_gripper = self.left_arm.get_gripper_from_encoder()
+            # Teaching handle: derive gripper from encoder button in the same obs
+            left_gripper = self.left_arm.get_gripper_from_encoder(left_obs)
             left_joint_pos = np.concatenate([left_joint_pos, [left_gripper]])
             left_has_gripper = True
 
@@ -252,8 +265,8 @@ class BiYamLeader(Teleoperator):
         if right_has_gripper:
             right_joint_pos = np.concatenate([right_joint_pos, right_obs["gripper_pos"]])
         else:
-            # Teaching handle: try to get gripper from encoder button
-            right_gripper = self.right_arm.get_gripper_from_encoder()
+            # Teaching handle: derive gripper from encoder button in the same obs
+            right_gripper = self.right_arm.get_gripper_from_encoder(right_obs)
             right_joint_pos = np.concatenate([right_joint_pos, [right_gripper]])
             right_has_gripper = True
 
