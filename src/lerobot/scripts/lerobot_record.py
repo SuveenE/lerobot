@@ -520,6 +520,15 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
             ):
                 log_say("Reset the environment", cfg.play_sounds)
+                # Robots that expose `move_to_initial_position` (e.g. the Yam
+                # arms) first slowly interpolate back to a fixed home pose so
+                # the arms don't freeze wherever the episode ended (often
+                # mid-air). The normal teleop reset loop then runs so the
+                # operator can reset the environment before the next episode.
+                move_to_initial_position = getattr(robot, "move_to_initial_position", None)
+                if callable(move_to_initial_position):
+                    move_to_initial_position(events=events)
+
                 record_loop(
                     robot=robot,
                     events=events,
