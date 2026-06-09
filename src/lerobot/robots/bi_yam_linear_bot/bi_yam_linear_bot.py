@@ -251,6 +251,17 @@ class BiYamLinearBot(Robot):
         io_workers = len(self.cameras) + (5 if self.config.with_linear_rail else 4)
         self._io_executor = ThreadPoolExecutor(max_workers=max(io_workers, 4))
 
+        # Prime async camera buffers before the first record loop iteration.
+        # connect() only warms up via synchronous read(); read_latest() still has to
+        # start background threads and wait for the first frame on the first poll.
+        if self.cameras:
+            cam_futures = [
+                self._io_executor.submit(cam.read_latest) for cam in self.cameras.values()
+            ]
+            for future in cam_futures:
+                future.result()
+            logger.info("Camera background read threads warmed up")
+
         logger.info("Successfully connected to Linear Bot")
 
     @property
