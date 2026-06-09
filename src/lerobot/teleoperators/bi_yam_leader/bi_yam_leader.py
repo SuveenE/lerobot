@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 
 import numpy as np
@@ -144,6 +145,7 @@ class BiYamLeader(Teleoperator):
         # Store number of DOFs (will be set after connection)
         self._left_dofs = None
         self._right_dofs = None
+        self._io_executor: ThreadPoolExecutor | None = None
 
     @cached_property
     def action_features(self) -> dict[str, type]:
@@ -203,6 +205,7 @@ class BiYamLeader(Teleoperator):
         self._right_dofs = self.right_arm.num_dofs()
 
         logger.info(f"Left leader arm DOFs: {self._left_dofs}, Right leader arm DOFs: {self._right_dofs}")
+        self._io_executor = ThreadPoolExecutor(max_workers=2)
         logger.info("Successfully connected to bimanual Yam leader arms")
 
     @property
@@ -232,10 +235,16 @@ class BiYamLeader(Teleoperator):
         Returns:
             Dictionary with joint positions for both arms (including gripper)
         """
+        if self._io_executor is None:
+            raise RuntimeError(f"{self} is not connected.")
+
         action_dict = {}
 
-        # Get left arm observations
-        left_obs = self.left_arm.get_observations()
+        left_future = self._io_executor.submit(self.left_arm.get_observations)
+        right_future = self._io_executor.submit(self.right_arm.get_observations)
+        left_obs = left_future.result()
+        right_obs = right_future.result()
+
         left_joint_pos = left_obs["joint_pos"]
 
         # Handle gripper: either from physical gripper or teaching handle encoder
@@ -256,8 +265,6 @@ class BiYamLeader(Teleoperator):
             else:
                 action_dict[f"left_joint_{i}.pos"] = float(pos)
 
-        # Get right arm observations
-        right_obs = self.right_arm.get_observations()
         right_joint_pos = right_obs["joint_pos"]
 
         # Handle gripper: either from physical gripper or teaching handle encoder
@@ -296,6 +303,10 @@ class BiYamLeader(Teleoperator):
 
         self.left_arm.disconnect()
         self.right_arm.disconnect()
+
+        if self._io_executor is not None:
+            self._io_executor.shutdown(wait=False, cancel_futures=True)
+            self._io_executor = None
 
         logger.info("Disconnected from bimanual Yam leader arms")
 

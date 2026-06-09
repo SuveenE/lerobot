@@ -13,9 +13,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import multiprocessing
 import queue
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +126,40 @@ def worker_process(queue: queue.Queue, num_threads: int):
         threads.append(t)
     for t in threads:
         t.join()
+
+
+def _dataset_frame_writer_loop(frame_queue: queue.Queue, add_frame: Callable[[dict], None]) -> None:
+    while True:
+        frame = frame_queue.get()
+        if frame is None:
+            frame_queue.task_done()
+            break
+        add_frame(frame)
+        frame_queue.task_done()
+
+
+class AsyncDatasetFrameWriter:
+    """Background thread that calls ``dataset.add_frame`` off the record control loop."""
+
+    def __init__(self, add_frame: Callable[[dict], None]):
+        self._add_frame = add_frame
+        self._queue: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(
+            target=_dataset_frame_writer_loop,
+            args=(self._queue, add_frame),
+            name="dataset_frame_writer",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def put(self, frame: dict) -> None:
+        self._queue.put(frame)
+
+    def close(self) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout=60)
+        if self._thread.is_alive():
+            logging.warning("Dataset frame writer did not stop within 60s")
 
 
 class AsyncImageWriter:
