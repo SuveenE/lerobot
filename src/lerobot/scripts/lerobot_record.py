@@ -316,6 +316,7 @@ def record_loop(
     try:
         while timestamp < control_time_s:
             start_loop_t = time.perf_counter()
+            t_before_action = t_after_get_action = start_loop_t
 
             if events["exit_early"]:
                 events["exit_early"] = False
@@ -345,7 +346,9 @@ def record_loop(
                 act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
 
             elif policy is None and isinstance(teleop, Teleoperator):
+                t_before_action = time.perf_counter()
                 act = teleop.get_action()
+                t_after_get_action = time.perf_counter()
 
                 # Applies a pipeline to the raw teleop action, default is IdentityProcessor
                 act_processed_teleop = teleop_action_processor((act, obs))
@@ -403,10 +406,18 @@ def record_loop(
                 action_ms = (t_after_action - t_after_obs) * 1e3
                 send_ms = (t_after_send - t_after_action) * 1e3
                 frame_ms = (t_after_frame - t_after_send) * 1e3
+                teleop_ms = (
+                    (t_after_get_action - t_before_action) * 1e3
+                    if policy is None and isinstance(teleop, Teleoperator)
+                    else None
+                )
+                teleop_detail = (
+                    f" teleop_get={teleop_ms:.0f}ms" if teleop_ms is not None else ""
+                )
                 logging.warning(
                     f"Record loop overrun #{overrun_count}: {dt_s * 1e3:.1f}ms > "
                     f"{loop_budget_s * 1e3:.1f}ms budget at {fps} fps "
-                    f"(obs={obs_ms:.0f}ms action={action_ms:.0f}ms "
+                    f"(obs={obs_ms:.0f}ms action={action_ms:.0f}ms{teleop_detail} "
                     f"send={send_ms:.0f}ms frame={frame_ms:.0f}ms)"
                 )
             busy_wait(loop_budget_s - dt_s)

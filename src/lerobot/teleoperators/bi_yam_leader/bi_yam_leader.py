@@ -213,6 +213,13 @@ class BiYamLeader(Teleoperator):
 
         logger.info(f"Left leader arm DOFs: {self._left_dofs}, Right leader arm DOFs: {self._right_dofs}")
         self._io_executor = ThreadPoolExecutor(max_workers=2)
+
+        # Prime cached action before recording starts so get_action() never blocks on first poll.
+        first_action = self._fetch_action_from_arms()
+        with self._action_lock:
+            self._latest_action = first_action
+        self._action_ready.set()
+
         self._stop_event = Event()
         self._poll_thread = Thread(target=self._poll_action_loop, name="bi_yam_leader_poll", daemon=True)
         self._poll_thread.start()

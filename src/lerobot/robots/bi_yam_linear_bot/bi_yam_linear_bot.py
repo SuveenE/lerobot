@@ -295,37 +295,42 @@ class BiYamLinearBot(Robot):
             cam_key: self._io_executor.submit(cam.read_latest) for cam_key, cam in self.cameras.items()
         }
 
+        # FlowBase RPCs share one portal client — sequential, but run while arms/cams fetch in parallel.
+        t_base = time.perf_counter()
+        odometry = self._flow_base_client.get_odometry()
+        translation = odometry["translation"]
+        rotation = odometry["rotation"]
+
+        if self.config.with_linear_rail:
+            rail = self._flow_base_client.get_linear_rail_state()
+        else:
+            rail = None
+
+        resolved = self._flow_base_client.get_current_command()
+        vel = resolved["velocity"]
+        base_ms = (time.perf_counter() - t_base) * 1e3
+
         t_arms = time.perf_counter()
         obs_dict: dict[str, Any] = {}
         self._populate_arm_obs(obs_dict, side="left", arm_obs=arm_futures["left"].result())
         self._populate_arm_obs(obs_dict, side="right", arm_obs=arm_futures["right"].result())
         arms_ms = (time.perf_counter() - t_arms) * 1e3
 
-        # FlowBase RPCs share one portal client — keep sequential for thread safety.
-        t_base = time.perf_counter()
-        odometry = self._flow_base_client.get_odometry()
-        translation = odometry["translation"]
-        rotation = odometry["rotation"]
         obs_dict["base.x"] = float(translation[0])
         obs_dict["base.y"] = float(translation[1])
         obs_dict["base.theta"] = float(rotation)
 
-        if self.config.with_linear_rail:
-            rail = self._flow_base_client.get_linear_rail_state()
+        if rail is not None:
             obs_dict["rail.position"] = float(rail["position"])
             obs_dict["rail.velocity"] = float(rail["velocity"])
             obs_dict["rail.upper_limit"] = 1.0 if rail.get("upper_limit_triggered") else 0.0
             obs_dict["rail.lower_limit"] = 1.0 if rail.get("lower_limit_triggered") else 0.0
 
-        resolved = self._flow_base_client.get_current_command()
-        vel = resolved["velocity"]
         obs_dict["base.cmd.x.vel"] = float(vel[0])
         obs_dict["base.cmd.y.vel"] = float(vel[1])
         obs_dict["base.cmd.theta.vel"] = float(vel[2])
         if self.config.with_linear_rail:
             obs_dict["rail.cmd.vel"] = float(vel[3]) if len(vel) > 3 else 0.0
-
-        base_ms = (time.perf_counter() - t_base) * 1e3
 
         t_cams = time.perf_counter()
         for cam_key in self.cameras:
