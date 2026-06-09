@@ -135,7 +135,7 @@ from lerobot.utils.utils import (
     init_logging,
     log_say,
 )
-from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+from lerobot.utils.visualization_utils import AsyncRerunLogger, init_rerun
 
 
 @dataclass
@@ -312,6 +312,9 @@ def record_loop(
     timestamp = 0
     start_episode_t = time.perf_counter()
     frame_writer = AsyncDatasetFrameWriter(dataset.add_frame) if dataset is not None else None
+    # Log to Rerun off the control loop: logging many raw camera images synchronously
+    # takes tens of ms/frame and blows the loop budget (every frame overruns).
+    rerun_logger = AsyncRerunLogger() if display_data else None
     overrun_count = 0
     loop_budget_s = 1 / fps
     # Absolute tick index: each iteration targets `start_episode_t + tick * loop_budget_s`
@@ -401,8 +404,9 @@ def record_loop(
             else:
                 t_after_frame = t_after_send
 
-            if display_data:
-                log_rerun_data(observation=obs_processed, action=action_values)
+            if rerun_logger is not None:
+                rerun_logger.log(observation=obs_processed, action=action_values)
+            t_after_rerun = time.perf_counter()
 
             dt_s = time.perf_counter() - start_loop_t
             if dt_s > loop_budget_s:
@@ -411,6 +415,7 @@ def record_loop(
                 action_ms = (t_after_action - t_after_obs) * 1e3
                 send_ms = (t_after_send - t_after_action) * 1e3
                 frame_ms = (t_after_frame - t_after_send) * 1e3
+                rerun_ms = (t_after_rerun - t_after_frame) * 1e3
                 teleop_ms = (
                     (t_after_get_action - t_before_action) * 1e3
                     if policy is None and isinstance(teleop, Teleoperator)
@@ -419,11 +424,12 @@ def record_loop(
                 teleop_detail = (
                     f" teleop_get={teleop_ms:.0f}ms" if teleop_ms is not None else ""
                 )
+                rerun_detail = f" rerun={rerun_ms:.0f}ms" if rerun_logger is not None else ""
                 logging.warning(
                     f"Record loop overrun #{overrun_count}: {dt_s * 1e3:.1f}ms > "
                     f"{loop_budget_s * 1e3:.1f}ms budget at {fps} fps "
                     f"(obs={obs_ms:.0f}ms action={action_ms:.0f}ms{teleop_detail} "
-                    f"send={send_ms:.0f}ms frame={frame_ms:.0f}ms)"
+                    f"send={send_ms:.0f}ms frame={frame_ms:.0f}ms{rerun_detail})"
                 )
 
             # Wait until the next absolute grid tick. Targeting `start_episode_t + tick *
@@ -435,6 +441,8 @@ def record_loop(
 
             timestamp = time.perf_counter() - start_episode_t
     finally:
+        if rerun_logger is not None:
+            rerun_logger.close()
         if frame_writer is not None:
             frame_writer.close()
             if timestamp > 0:
