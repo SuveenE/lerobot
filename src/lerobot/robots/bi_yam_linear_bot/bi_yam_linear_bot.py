@@ -100,6 +100,7 @@ class BiYamLinearBot(Robot):
         self._right_dofs = None
 
         self._flow_base_client = None
+        self._camera_executor: ThreadPoolExecutor | None = None
 
     # ------------------------------------------------------------------
     # Feature declarations
@@ -247,6 +248,9 @@ class BiYamLinearBot(Robot):
         for cam in self.cameras.values():
             cam.connect()
 
+        if self.cameras:
+            self._camera_executor = ThreadPoolExecutor(max_workers=len(self.cameras))
+
         logger.info("Successfully connected to Linear Bot")
 
     @property
@@ -302,12 +306,14 @@ class BiYamLinearBot(Robot):
             obs_dict["rail.cmd.vel"] = float(vel[3]) if len(vel) > 3 else 0.0
 
         # --- cameras (parallel snapshot of latest buffered frames) ---
-        if self.cameras:
+        if self.cameras and self._camera_executor is not None:
             start = time.perf_counter()
-            with ThreadPoolExecutor(max_workers=len(self.cameras)) as pool:
-                futures = {cam_key: pool.submit(cam.read_latest) for cam_key, cam in self.cameras.items()}
-                for cam_key, future in futures.items():
-                    obs_dict[cam_key] = future.result()
+            futures = {
+                cam_key: self._camera_executor.submit(cam.read_latest)
+                for cam_key, cam in self.cameras.items()
+            }
+            for cam_key, future in futures.items():
+                obs_dict[cam_key] = future.result()
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read cameras: {dt_ms:.1f}ms")
 
@@ -537,5 +543,9 @@ class BiYamLinearBot(Robot):
 
         for cam in self.cameras.values():
             cam.disconnect()
+
+        if self._camera_executor is not None:
+            self._camera_executor.shutdown(wait=False, cancel_futures=True)
+            self._camera_executor = None
 
         logger.info("Disconnected from Linear Bot")

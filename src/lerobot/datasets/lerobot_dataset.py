@@ -1239,6 +1239,16 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 temp_dir=self.root,
             )
 
+        # Stream video frames in parallel to avoid blocking the record loop per camera.
+        if self._streaming_encoder is not None:
+            streaming_frames = {
+                key: frame[key]
+                for key in frame
+                if key in self.features and self.features[key]["dtype"] == "video"
+            }
+            if streaming_frames:
+                self._streaming_encoder.feed_frames(streaming_frames)
+
         # Add frame features to episode_buffer
         for key in frame:
             if key not in self.features:
@@ -1247,7 +1257,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 )
 
             if self.features[key]["dtype"] == "video" and self._streaming_encoder is not None:
-                self._streaming_encoder.feed_frame(key, frame[key])
                 self.episode_buffer[key].append(None)  # Placeholder (video keys are skipped in parquet)
             elif self.features[key]["dtype"] in ["image", "video"]:
                 img_path = self._get_image_file_path(
@@ -1786,7 +1795,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.vcodec = vcodec
         obj._encoder_threads = encoder_threads
 
-        if image_writer_processes or image_writer_threads:
+        if not streaming_encoding and (image_writer_processes or image_writer_threads):
             obj.start_image_writer(image_writer_processes, image_writer_threads)
 
         # TODO(aliberts, rcadene, alexander-soare): Merge this with OnlineBuffer/DataBuffer

@@ -388,7 +388,12 @@ def record_loop(
             log_rerun_data(observation=obs_processed, action=action_values)
 
         dt_s = time.perf_counter() - start_loop_t
-        busy_wait(1 / fps - dt_s)
+        loop_budget_s = 1 / fps
+        if dt_s > loop_budget_s:
+            logging.debug(
+                f"Record loop overrun: {dt_s * 1e3:.1f}ms > {loop_budget_s * 1e3:.1f}ms budget at {fps} fps"
+            )
+        busy_wait(loop_budget_s - dt_s)
 
         timestamp = time.perf_counter() - start_episode_t
 
@@ -442,7 +447,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             encoder_threads=cfg.dataset.encoder_threads,
         )
 
-        if hasattr(robot, "cameras") and len(robot.cameras) > 0:
+        if (
+            not cfg.dataset.streaming_encoding
+            and hasattr(robot, "cameras")
+            and len(robot.cameras) > 0
+        ):
             dataset.start_image_writer(
                 num_processes=cfg.dataset.num_image_writer_processes,
                 num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
