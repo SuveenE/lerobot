@@ -16,6 +16,7 @@
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import Any
 
@@ -300,12 +301,15 @@ class BiYamLinearBot(Robot):
         if self.config.with_linear_rail:
             obs_dict["rail.cmd.vel"] = float(vel[3]) if len(vel) > 3 else 0.0
 
-        # --- cameras ---
-        for cam_key, cam in self.cameras.items():
+        # --- cameras (parallel snapshot of latest buffered frames) ---
+        if self.cameras:
             start = time.perf_counter()
-            obs_dict[cam_key] = cam.async_read()
+            with ThreadPoolExecutor(max_workers=len(self.cameras)) as pool:
+                futures = {cam_key: pool.submit(cam.read_latest) for cam_key, cam in self.cameras.items()}
+                for cam_key, future in futures.items():
+                    obs_dict[cam_key] = future.result()
             dt_ms = (time.perf_counter() - start) * 1e3
-            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+            logger.debug(f"{self} read cameras: {dt_ms:.1f}ms")
 
         return obs_dict
 

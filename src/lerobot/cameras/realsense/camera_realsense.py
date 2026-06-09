@@ -552,6 +552,32 @@ class RealSenseCamera(Camera):
 
         return frame
 
+    def read_latest(self, timeout_ms: float = 200) -> NDArray[Any]:
+        """Return the most recent background-captured frame without waiting for a newer one."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        if self.thread is None or not self.thread.is_alive():
+            self._start_read_thread()
+
+        with self.frame_lock:
+            frame = self.latest_frame
+
+        if frame is None:
+            if not self.new_frame_event.wait(timeout=timeout_ms / 1000.0):
+                thread_alive = self.thread is not None and self.thread.is_alive()
+                raise TimeoutError(
+                    f"Timed out waiting for first frame from camera {self} after {timeout_ms} ms. "
+                    f"Read thread alive: {thread_alive}."
+                )
+            with self.frame_lock:
+                frame = self.latest_frame
+
+        if frame is None:
+            raise RuntimeError(f"Internal error: Event set but no frame available for {self}.")
+
+        return frame.copy()
+
     def disconnect(self) -> None:
         """
         Disconnects from the camera, stops the pipeline, and cleans up resources.
