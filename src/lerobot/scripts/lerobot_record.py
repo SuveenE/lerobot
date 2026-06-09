@@ -313,6 +313,12 @@ def record_loop(
     start_episode_t = time.perf_counter()
     frame_writer = AsyncDatasetFrameWriter(dataset.add_frame) if dataset is not None else None
     overrun_count = 0
+    loop_budget_s = 1 / fps
+    # Absolute tick index: each iteration targets `start_episode_t + tick * loop_budget_s`
+    # rather than waiting `budget - work`. This prevents sub-millisecond sleep/scheduling
+    # overshoot from accumulating across thousands of frames (which otherwise silently
+    # drops frames and shortens the recorded video without triggering any overrun).
+    tick = 0
     try:
         while timestamp < control_time_s:
             start_loop_t = time.perf_counter()
@@ -399,7 +405,6 @@ def record_loop(
                 log_rerun_data(observation=obs_processed, action=action_values)
 
             dt_s = time.perf_counter() - start_loop_t
-            loop_budget_s = 1 / fps
             if dt_s > loop_budget_s:
                 overrun_count += 1
                 obs_ms = (t_after_obs - start_loop_t) * 1e3
@@ -420,7 +425,13 @@ def record_loop(
                     f"(obs={obs_ms:.0f}ms action={action_ms:.0f}ms{teleop_detail} "
                     f"send={send_ms:.0f}ms frame={frame_ms:.0f}ms)"
                 )
-            busy_wait(loop_budget_s - dt_s)
+
+            # Wait until the next absolute grid tick. Targeting `start_episode_t + tick *
+            # budget` (instead of `busy_wait(budget - dt_s)`) keeps the loop locked to real
+            # time: a slow iteration is absorbed by the next tick instead of compounding.
+            tick += 1
+            next_tick_t = start_episode_t + tick * loop_budget_s
+            busy_wait(next_tick_t - time.perf_counter())
 
             timestamp = time.perf_counter() - start_episode_t
     finally:
