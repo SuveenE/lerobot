@@ -15,8 +15,10 @@
 # limitations under the License.
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
+from threading import Event, Lock, Thread
 
 import numpy as np
 import portal
@@ -146,6 +148,11 @@ class BiYamLeader(Teleoperator):
         self._left_dofs = None
         self._right_dofs = None
         self._io_executor: ThreadPoolExecutor | None = None
+        self._poll_thread: Thread | None = None
+        self._stop_event: Event | None = None
+        self._action_lock = Lock()
+        self._action_ready = Event()
+        self._latest_action: dict[str, float] | None = None
 
     @cached_property
     def action_features(self) -> dict[str, type]:
@@ -206,6 +213,9 @@ class BiYamLeader(Teleoperator):
 
         logger.info(f"Left leader arm DOFs: {self._left_dofs}, Right leader arm DOFs: {self._right_dofs}")
         self._io_executor = ThreadPoolExecutor(max_workers=2)
+        self._stop_event = Event()
+        self._poll_thread = Thread(target=self._poll_action_loop, name="bi_yam_leader_poll", daemon=True)
+        self._poll_thread.start()
         logger.info("Successfully connected to bimanual Yam leader arms")
 
     @property
@@ -225,12 +235,62 @@ class BiYamLeader(Teleoperator):
         """Setup motors (not needed for Yam leader arms)."""
         pass
 
+    def _action_from_arm_obs(self, side: str, arm_obs: dict[str, np.ndarray]) -> dict[str, float]:
+        action_dict: dict[str, float] = {}
+        joint_pos = arm_obs["joint_pos"]
+
+        has_gripper = "gripper_pos" in arm_obs
+        if has_gripper:
+            joint_pos = np.concatenate([joint_pos, arm_obs["gripper_pos"]])
+        else:
+            gripper = YamLeaderClient.gripper_from_encoder_obs(arm_obs)
+            joint_pos = np.concatenate([joint_pos, [gripper]])
+            has_gripper = True
+
+        for i, pos in enumerate(joint_pos):
+            if has_gripper and i == len(joint_pos) - 1:
+                action_dict[f"{side}_gripper.pos"] = float(pos)
+            else:
+                action_dict[f"{side}_joint_{i}.pos"] = float(pos)
+        return action_dict
+
+    def _fetch_action_from_arms(self) -> dict[str, float]:
+        if self._io_executor is None:
+            raise RuntimeError(f"{self} is not connected.")
+
+        left_future = self._io_executor.submit(self.left_arm.get_observations)
+        right_future = self._io_executor.submit(self.right_arm.get_observations)
+        left_obs = left_future.result()
+        right_obs = right_future.result()
+        return {
+            **self._action_from_arm_obs("left", left_obs),
+            **self._action_from_arm_obs("right", right_obs),
+        }
+
+    def _poll_action_loop(self) -> None:
+        """Background loop: polls remote leader arms so get_action() never blocks on RPC."""
+        poll_interval_s = 1.0 / 30.0
+        while self._stop_event is not None and not self._stop_event.is_set():
+            start = time.perf_counter()
+            try:
+                action = self._fetch_action_from_arms()
+                with self._action_lock:
+                    self._latest_action = action
+                self._action_ready.set()
+            except Exception as e:
+                logger.warning(f"{self} background action poll failed: {e}")
+
+            elapsed = time.perf_counter() - start
+            remaining = poll_interval_s - elapsed
+            if remaining > 0 and self._stop_event is not None:
+                self._stop_event.wait(timeout=remaining)
+
     def get_action(self) -> dict[str, float]:
         """
-        Get action from both leader arms by reading their current joint positions.
+        Return the latest leader action polled by the background thread.
 
-        For teaching handles (no physical gripper), we try to read encoder button state
-        to control the gripper, falling back to fully open if not available.
+        Remote RPC latency is kept off the record-loop critical path. The returned
+        action may be up to one poll interval stale when the network is slow.
 
         Returns:
             Dictionary with joint positions for both arms (including gripper)
@@ -238,54 +298,13 @@ class BiYamLeader(Teleoperator):
         if self._io_executor is None:
             raise RuntimeError(f"{self} is not connected.")
 
-        action_dict = {}
+        if not self._action_ready.wait(timeout=2.0):
+            raise TimeoutError(f"Timed out waiting for first leader action from {self}.")
 
-        left_future = self._io_executor.submit(self.left_arm.get_observations)
-        right_future = self._io_executor.submit(self.right_arm.get_observations)
-        left_obs = left_future.result()
-        right_obs = right_future.result()
-
-        left_joint_pos = left_obs["joint_pos"]
-
-        # Handle gripper: either from physical gripper or teaching handle encoder
-        left_has_gripper = "gripper_pos" in left_obs
-        if left_has_gripper:
-            left_joint_pos = np.concatenate([left_joint_pos, left_obs["gripper_pos"]])
-        else:
-            # Teaching handle: derive gripper from encoder button in the same obs
-            left_gripper = self.left_arm.get_gripper_from_encoder(left_obs)
-            left_joint_pos = np.concatenate([left_joint_pos, [left_gripper]])
-            left_has_gripper = True
-
-        # Add with "left_" prefix
-        for i, pos in enumerate(left_joint_pos):
-            # Gripper is the last DOF if present
-            if left_has_gripper and i == len(left_joint_pos) - 1:
-                action_dict["left_gripper.pos"] = float(pos)
-            else:
-                action_dict[f"left_joint_{i}.pos"] = float(pos)
-
-        right_joint_pos = right_obs["joint_pos"]
-
-        # Handle gripper: either from physical gripper or teaching handle encoder
-        right_has_gripper = "gripper_pos" in right_obs
-        if right_has_gripper:
-            right_joint_pos = np.concatenate([right_joint_pos, right_obs["gripper_pos"]])
-        else:
-            # Teaching handle: derive gripper from encoder button in the same obs
-            right_gripper = self.right_arm.get_gripper_from_encoder(right_obs)
-            right_joint_pos = np.concatenate([right_joint_pos, [right_gripper]])
-            right_has_gripper = True
-
-        # Add with "right_" prefix
-        for i, pos in enumerate(right_joint_pos):
-            # Gripper is the last DOF if present
-            if right_has_gripper and i == len(right_joint_pos) - 1:
-                action_dict["right_gripper.pos"] = float(pos)
-            else:
-                action_dict[f"right_joint_{i}.pos"] = float(pos)
-
-        return action_dict
+        with self._action_lock:
+            if self._latest_action is None:
+                raise RuntimeError(f"Internal error: action event set but no action cached for {self}.")
+            return dict(self._latest_action)
 
     def send_feedback(self, feedback: dict[str, float]) -> None:
         """
@@ -300,6 +319,16 @@ class BiYamLeader(Teleoperator):
     def disconnect(self) -> None:
         """Disconnect from both leader arms."""
         logger.info("Disconnecting from bimanual Yam leader arms")
+
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._poll_thread is not None and self._poll_thread.is_alive():
+            self._poll_thread.join(timeout=2.0)
+        self._poll_thread = None
+        self._stop_event = None
+        self._action_ready.clear()
+        with self._action_lock:
+            self._latest_action = None
 
         self.left_arm.disconnect()
         self.right_arm.disconnect()
