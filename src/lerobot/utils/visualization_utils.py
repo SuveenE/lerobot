@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import numbers
 import os
+import queue
+import threading
 import time
 from typing import Any
 
@@ -181,3 +184,72 @@ def log_rerun_data(
                     flat = v.flatten()
                     for i, vi in enumerate(flat):
                         rr.log(f"{key}_{i}", rr.Scalars(float(vi)))
+
+
+class AsyncRerunLogger:
+    """Logs observation/action data to Rerun on a background thread.
+
+    Logging many raw camera images synchronously can take tens of milliseconds per
+    frame, which blows the control/record loop budget and drops frames. Visualization
+    only needs the latest frame, so this uses a drop-latest queue (maxsize=1): if the
+    logger thread is still busy when a newer frame arrives, the stale frame is discarded
+    and the loop never blocks or accumulates lag.
+
+    The caller must not mutate the passed observation/action arrays after calling
+    ``log`` (the record loop builds fresh dicts each iteration, so this holds there).
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue = queue.Queue(maxsize=1)
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="rerun_logger",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                break
+            observation, action = item
+            try:
+                log_rerun_data(observation=observation, action=action)
+            except Exception as e:
+                logging.warning(f"Rerun logging failed: {e}")
+            finally:
+                self._queue.task_done()
+
+    def log(self, observation: dict[str, Any] | None = None, action: dict[str, Any] | None = None) -> None:
+        """Enqueue the latest frame for logging, dropping any unprocessed older frame."""
+        try:
+            self._queue.put_nowait((observation, action))
+        except queue.Full:
+            # Drop the stale frame still waiting in the queue and replace it.
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait((observation, action))
+            except queue.Full:
+                pass
+
+    def close(self) -> None:
+        # Ensure the sentinel gets in even if a frame is queued.
+        while True:
+            try:
+                self._queue.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                    self._queue.task_done()
+                except queue.Empty:
+                    pass
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            logging.warning("Rerun logger did not stop within 5s")

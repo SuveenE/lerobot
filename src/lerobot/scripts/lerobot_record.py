@@ -79,7 +79,7 @@ from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # no
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
-from lerobot.datasets.image_writer import safe_stop_image_writer
+from lerobot.datasets.image_writer import AsyncDatasetFrameWriter, safe_stop_image_writer
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
 from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
@@ -135,7 +135,7 @@ from lerobot.utils.utils import (
     init_logging,
     log_say,
 )
-from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+from lerobot.utils.visualization_utils import AsyncRerunLogger, init_rerun
 
 
 @dataclass
@@ -311,86 +311,147 @@ def record_loop(
 
     timestamp = 0
     start_episode_t = time.perf_counter()
-    while timestamp < control_time_s:
-        start_loop_t = time.perf_counter()
+    frame_writer = AsyncDatasetFrameWriter(dataset.add_frame) if dataset is not None else None
+    # Log to Rerun off the control loop: logging many raw camera images synchronously
+    # takes tens of ms/frame and blows the loop budget (every frame overruns).
+    rerun_logger = AsyncRerunLogger() if display_data else None
+    overrun_count = 0
+    loop_budget_s = 1 / fps
+    # Absolute tick index: each iteration targets `start_episode_t + tick * loop_budget_s`
+    # rather than waiting `budget - work`. This prevents sub-millisecond sleep/scheduling
+    # overshoot from accumulating across thousands of frames (which otherwise silently
+    # drops frames and shortens the recorded video without triggering any overrun).
+    tick = 0
+    try:
+        while timestamp < control_time_s:
+            start_loop_t = time.perf_counter()
+            t_before_action = t_after_get_action = start_loop_t
 
-        if events["exit_early"]:
-            events["exit_early"] = False
-            break
+            if events["exit_early"]:
+                events["exit_early"] = False
+                break
 
-        # Get robot observation
-        obs = robot.get_observation()
+            # Get robot observation
+            obs = robot.get_observation()
+            t_after_obs = time.perf_counter()
 
-        # Applies a pipeline to the raw robot observation, default is IdentityProcessor
-        obs_processed = robot_observation_processor(obs)
+            # Applies a pipeline to the raw robot observation, default is IdentityProcessor
+            obs_processed = robot_observation_processor(obs)
 
-        if policy is not None or dataset is not None:
-            observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+            # Get action from either policy or teleop
+            if policy is not None and preprocessor is not None and postprocessor is not None:
+                observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+                action_values = predict_action(
+                    observation=observation_frame,
+                    policy=policy,
+                    device=get_safe_torch_device(policy.config.device),
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    use_amp=policy.config.use_amp,
+                    task=single_task,
+                    robot_type=robot.robot_type,
+                )
 
-        # Get action from either policy or teleop
-        if policy is not None and preprocessor is not None and postprocessor is not None:
-            action_values = predict_action(
-                observation=observation_frame,
-                policy=policy,
-                device=get_safe_torch_device(policy.config.device),
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                use_amp=policy.config.use_amp,
-                task=single_task,
-                robot_type=robot.robot_type,
-            )
+                act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
 
-            act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
+            elif policy is None and isinstance(teleop, Teleoperator):
+                t_before_action = time.perf_counter()
+                act = teleop.get_action()
+                t_after_get_action = time.perf_counter()
 
-        elif policy is None and isinstance(teleop, Teleoperator):
-            act = teleop.get_action()
+                # Applies a pipeline to the raw teleop action, default is IdentityProcessor
+                act_processed_teleop = teleop_action_processor((act, obs))
 
-            # Applies a pipeline to the raw teleop action, default is IdentityProcessor
-            act_processed_teleop = teleop_action_processor((act, obs))
+            elif policy is None and isinstance(teleop, list):
+                arm_action = teleop_arm.get_action()
+                arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
+                keyboard_action = teleop_keyboard.get_action()
+                base_action = robot._from_keyboard_to_base_action(keyboard_action)
+                act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+                act_processed_teleop = teleop_action_processor((act, obs))
+            else:
+                logging.info(
+                    "No policy or teleoperator provided, skipping action generation."
+                    "This is likely to happen when resetting the environment without a teleop device."
+                    "The robot won't be at its rest position at the start of the next episode."
+                )
+                continue
+            t_after_action = time.perf_counter()
 
-        elif policy is None and isinstance(teleop, list):
-            arm_action = teleop_arm.get_action()
-            arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
-            keyboard_action = teleop_keyboard.get_action()
-            base_action = robot._from_keyboard_to_base_action(keyboard_action)
-            act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
-            act_processed_teleop = teleop_action_processor((act, obs))
-        else:
-            logging.info(
-                "No policy or teleoperator provided, skipping action generation."
-                "This is likely to happen when resetting the environment without a teleop device."
-                "The robot won't be at its rest position at the start of the next episode."
-            )
-            continue
+            # Applies a pipeline to the action, default is IdentityProcessor
+            if policy is not None and act_processed_policy is not None:
+                action_values = act_processed_policy
+                robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+            else:
+                obs_fallback = robot.teleop_action_from_obs(obs)
+                action_values = {**obs_fallback, **act_processed_teleop}
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
-        # Applies a pipeline to the action, default is IdentityProcessor
-        if policy is not None and act_processed_policy is not None:
-            action_values = act_processed_policy
-            robot_action_to_send = robot_action_processor((act_processed_policy, obs))
-        else:
-            obs_fallback = robot.teleop_action_from_obs(obs)
-            action_values = {**obs_fallback, **act_processed_teleop}
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+            # Send action to robot before dataset serialization so teleop stays responsive.
+            # Action can eventually be clipped using `max_relative_target`,
+            # so action actually sent is saved in the dataset. action = postprocessor.process(action)
+            # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+            _sent_action = robot.send_action(robot_action_to_send)
+            t_after_send = time.perf_counter()
 
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        _sent_action = robot.send_action(robot_action_to_send)
+            # Write to dataset on a background thread so encoding does not block teleop.
+            if frame_writer is not None:
+                observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+                action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+                frame = {**observation_frame, **action_frame, "task": single_task}
+                frame_writer.put(frame)
+                t_after_frame = time.perf_counter()
+            else:
+                t_after_frame = t_after_send
 
-        # Write to dataset
-        if dataset is not None:
-            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
-            frame = {**observation_frame, **action_frame, "task": single_task}
-            dataset.add_frame(frame)
+            if rerun_logger is not None:
+                rerun_logger.log(observation=obs_processed, action=action_values)
+            t_after_rerun = time.perf_counter()
 
-        if display_data:
-            log_rerun_data(observation=obs_processed, action=action_values)
+            dt_s = time.perf_counter() - start_loop_t
+            if dt_s > loop_budget_s:
+                overrun_count += 1
+                obs_ms = (t_after_obs - start_loop_t) * 1e3
+                action_ms = (t_after_action - t_after_obs) * 1e3
+                send_ms = (t_after_send - t_after_action) * 1e3
+                frame_ms = (t_after_frame - t_after_send) * 1e3
+                rerun_ms = (t_after_rerun - t_after_frame) * 1e3
+                teleop_ms = (
+                    (t_after_get_action - t_before_action) * 1e3
+                    if policy is None and isinstance(teleop, Teleoperator)
+                    else None
+                )
+                teleop_detail = (
+                    f" teleop_get={teleop_ms:.0f}ms" if teleop_ms is not None else ""
+                )
+                rerun_detail = f" rerun={rerun_ms:.0f}ms" if rerun_logger is not None else ""
+                logging.warning(
+                    f"Record loop overrun #{overrun_count}: {dt_s * 1e3:.1f}ms > "
+                    f"{loop_budget_s * 1e3:.1f}ms budget at {fps} fps "
+                    f"(obs={obs_ms:.0f}ms action={action_ms:.0f}ms{teleop_detail} "
+                    f"send={send_ms:.0f}ms frame={frame_ms:.0f}ms{rerun_detail})"
+                )
 
-        dt_s = time.perf_counter() - start_loop_t
-        busy_wait(1 / fps - dt_s)
+            # Wait until the next absolute grid tick. Targeting `start_episode_t + tick *
+            # budget` (instead of `busy_wait(budget - dt_s)`) keeps the loop locked to real
+            # time: a slow iteration is absorbed by the next tick instead of compounding.
+            tick += 1
+            next_tick_t = start_episode_t + tick * loop_budget_s
+            busy_wait(next_tick_t - time.perf_counter())
 
-        timestamp = time.perf_counter() - start_episode_t
+            timestamp = time.perf_counter() - start_episode_t
+    finally:
+        if rerun_logger is not None:
+            rerun_logger.close()
+        if frame_writer is not None:
+            frame_writer.close()
+            if timestamp > 0:
+                actual_frames = dataset.episode_buffer["size"] if dataset.episode_buffer else 0
+                expected_frames = int(timestamp * fps)
+                logging.info(
+                    f"Episode capture: {actual_frames} frames in {timestamp:.1f}s wall time "
+                    f"(target {expected_frames} at {fps} fps, {overrun_count} overruns)"
+                )
 
 
 @parser.wrap()
@@ -442,7 +503,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             encoder_threads=cfg.dataset.encoder_threads,
         )
 
-        if hasattr(robot, "cameras") and len(robot.cameras) > 0:
+        if (
+            not cfg.dataset.streaming_encoding
+            and hasattr(robot, "cameras")
+            and len(robot.cameras) > 0
+        ):
             dataset.start_image_writer(
                 num_processes=cfg.dataset.num_image_writer_processes,
                 num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),

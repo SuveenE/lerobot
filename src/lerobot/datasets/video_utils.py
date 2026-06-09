@@ -18,6 +18,7 @@ import glob
 import importlib
 import logging
 import queue
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 import tempfile
 import threading
@@ -732,6 +733,7 @@ class StreamingVideoEncoder:
         self._stop_events: dict[str, threading.Event] = {}
         self._video_paths: dict[str, Path] = {}
         self._dropped_frames: dict[str, int] = {}
+        self._feed_executor: ThreadPoolExecutor | None = None
         self._episode_active = False
 
     def start_episode(self, video_keys: list[str], temp_dir: Path) -> None:
@@ -775,15 +777,36 @@ class StreamingVideoEncoder:
             self._stop_events[video_key] = stop_event
             self._video_paths[video_key] = video_path
 
+        if len(video_keys) > 1:
+            self._feed_executor = ThreadPoolExecutor(max_workers=len(video_keys))
+
         self._episode_active = True
+
+    def feed_frames(self, frames: dict[str, np.ndarray]) -> None:
+        """Feed multiple camera frames, enqueueing in parallel when possible."""
+        if len(frames) == 1:
+            video_key, image = next(iter(frames.items()))
+            self.feed_frame(video_key, image)
+            return
+
+        if self._feed_executor is None:
+            for video_key, image in frames.items():
+                self.feed_frame(video_key, image)
+            return
+
+        futures = [
+            self._feed_executor.submit(self.feed_frame, video_key, image)
+            for video_key, image in frames.items()
+        ]
+        for future in futures:
+            future.result()
 
     def feed_frame(self, video_key: str, image: np.ndarray) -> None:
         """Feed a frame to the encoder for a specific camera.
 
-        A copy of the image is made before enqueueing to prevent race conditions
-        with camera drivers that may reuse buffers. If the encoder queue is full
-        (encoder can't keep up), the frame is dropped with a warning instead of
-        crashing the recording session.
+        If the encoder queue is full (encoder can't keep up), the frame is dropped
+        with a warning instead of blocking the recording loop or crashing the session.
+        The caller must not mutate ``image`` after calling this method.
 
         Args:
             video_key: The video feature key
@@ -807,7 +830,7 @@ class StreamingVideoEncoder:
             raise RuntimeError(f"Encoder thread for {video_key} is not alive")
 
         try:
-            self._frame_queues[video_key].put(image.copy(), timeout=0.1)
+            self._frame_queues[video_key].put_nowait(image)
         except queue.Full:
             self._dropped_frames[video_key] = self._dropped_frames.get(video_key, 0) + 1
             count = self._dropped_frames[video_key]
@@ -892,6 +915,10 @@ class StreamingVideoEncoder:
 
     def _cleanup(self) -> None:
         """Clean up queues and thread tracking dicts."""
+        if self._feed_executor is not None:
+            self._feed_executor.shutdown(wait=False, cancel_futures=True)
+            self._feed_executor = None
+
         for q in self._frame_queues.values():
             with contextlib.suppress(Exception):
                 while not q.empty():

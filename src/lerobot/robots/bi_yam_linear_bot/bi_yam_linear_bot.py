@@ -16,6 +16,7 @@
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import Any
 
@@ -99,6 +100,7 @@ class BiYamLinearBot(Robot):
         self._right_dofs = None
 
         self._flow_base_client = None
+        self._io_executor: ThreadPoolExecutor | None = None
 
     # ------------------------------------------------------------------
     # Feature declarations
@@ -246,6 +248,20 @@ class BiYamLinearBot(Robot):
         for cam in self.cameras.values():
             cam.connect()
 
+        io_workers = len(self.cameras) + (5 if self.config.with_linear_rail else 4)
+        self._io_executor = ThreadPoolExecutor(max_workers=max(io_workers, 4))
+
+        # Prime async camera buffers before the first record loop iteration.
+        # connect() only warms up via synchronous read(); read_latest() still has to
+        # start background threads and wait for the first frame on the first poll.
+        if self.cameras:
+            cam_futures = [
+                self._io_executor.submit(cam.read_latest) for cam in self.cameras.values()
+            ]
+            for future in cam_futures:
+                future.result()
+            logger.info("Camera background read threads warmed up")
+
         logger.info("Successfully connected to Linear Bot")
 
     @property
@@ -266,46 +282,66 @@ class BiYamLinearBot(Robot):
     # ------------------------------------------------------------------
 
     def get_observation(self) -> dict[str, Any]:
-        obs_dict: dict[str, Any] = {}
+        if self._io_executor is None:
+            raise RuntimeError(f"{self} is not connected.")
 
-        # --- arms ---
-        left_obs = self.left_arm.get_observations()
-        self._populate_arm_obs(obs_dict, side="left", arm_obs=left_obs)
+        start = time.perf_counter()
+        # Use arm-specific keys so camera names like "left"/"right" cannot overwrite RPC futures.
+        arm_futures = {
+            "left": self._io_executor.submit(self.left_arm.get_observations),
+            "right": self._io_executor.submit(self.right_arm.get_observations),
+        }
+        cam_futures = {
+            cam_key: self._io_executor.submit(cam.read_latest) for cam_key, cam in self.cameras.items()
+        }
 
-        right_obs = self.right_arm.get_observations()
-        self._populate_arm_obs(obs_dict, side="right", arm_obs=right_obs)
-
-        # --- FlowBase odometry ---
+        # FlowBase RPCs share one portal client — sequential, but run while arms/cams fetch in parallel.
+        t_base = time.perf_counter()
         odometry = self._flow_base_client.get_odometry()
         translation = odometry["translation"]
         rotation = odometry["rotation"]
+
+        if self.config.with_linear_rail:
+            rail = self._flow_base_client.get_linear_rail_state()
+        else:
+            rail = None
+
+        resolved = self._flow_base_client.get_current_command()
+        vel = resolved["velocity"]
+        base_ms = (time.perf_counter() - t_base) * 1e3
+
+        t_arms = time.perf_counter()
+        obs_dict: dict[str, Any] = {}
+        self._populate_arm_obs(obs_dict, side="left", arm_obs=arm_futures["left"].result())
+        self._populate_arm_obs(obs_dict, side="right", arm_obs=arm_futures["right"].result())
+        arms_ms = (time.perf_counter() - t_arms) * 1e3
+
         obs_dict["base.x"] = float(translation[0])
         obs_dict["base.y"] = float(translation[1])
         obs_dict["base.theta"] = float(rotation)
 
-        # --- Linear rail ---
-        if self.config.with_linear_rail:
-            rail = self._flow_base_client.get_linear_rail_state()
+        if rail is not None:
             obs_dict["rail.position"] = float(rail["position"])
             obs_dict["rail.velocity"] = float(rail["velocity"])
             obs_dict["rail.upper_limit"] = 1.0 if rail.get("upper_limit_triggered") else 0.0
             obs_dict["rail.lower_limit"] = 1.0 if rail.get("lower_limit_triggered") else 0.0
 
-        # --- Resolved command (captures joystick and/or remote input) ---
-        resolved = self._flow_base_client.get_current_command()
-        vel = resolved["velocity"]
         obs_dict["base.cmd.x.vel"] = float(vel[0])
         obs_dict["base.cmd.y.vel"] = float(vel[1])
         obs_dict["base.cmd.theta.vel"] = float(vel[2])
         if self.config.with_linear_rail:
             obs_dict["rail.cmd.vel"] = float(vel[3]) if len(vel) > 3 else 0.0
 
-        # --- cameras ---
-        for cam_key, cam in self.cameras.items():
-            start = time.perf_counter()
-            obs_dict[cam_key] = cam.async_read()
-            dt_ms = (time.perf_counter() - start) * 1e3
-            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+        t_cams = time.perf_counter()
+        for cam_key in self.cameras:
+            obs_dict[cam_key] = cam_futures[cam_key].result()
+        cams_ms = (time.perf_counter() - t_cams) * 1e3
+
+        dt_ms = (time.perf_counter() - start) * 1e3
+        logger.debug(
+            f"{self} read observation: {dt_ms:.1f}ms "
+            f"(arms={arms_ms:.0f} base={base_ms:.0f} cams={cams_ms:.0f})"
+        )
 
         return obs_dict
 
@@ -533,5 +569,9 @@ class BiYamLinearBot(Robot):
 
         for cam in self.cameras.values():
             cam.disconnect()
+
+        if self._io_executor is not None:
+            self._io_executor.shutdown(wait=False, cancel_futures=True)
+            self._io_executor = None
 
         logger.info("Disconnected from Linear Bot")
