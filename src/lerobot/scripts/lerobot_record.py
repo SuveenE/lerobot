@@ -323,15 +323,14 @@ def record_loop(
 
             # Get robot observation
             obs = robot.get_observation()
+            t_after_obs = time.perf_counter()
 
             # Applies a pipeline to the raw robot observation, default is IdentityProcessor
             obs_processed = robot_observation_processor(obs)
 
-            if policy is not None or dataset is not None:
-                observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
-
             # Get action from either policy or teleop
             if policy is not None and preprocessor is not None and postprocessor is not None:
+                observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
                 action_values = predict_action(
                     observation=observation_frame,
                     policy=policy,
@@ -365,6 +364,7 @@ def record_loop(
                     "The robot won't be at its rest position at the start of the next episode."
                 )
                 continue
+            t_after_action = time.perf_counter()
 
             # Applies a pipeline to the action, default is IdentityProcessor
             if policy is not None and act_processed_policy is not None:
@@ -375,17 +375,22 @@ def record_loop(
                 action_values = {**obs_fallback, **act_processed_teleop}
                 robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
-            # Send action to robot
+            # Send action to robot before dataset serialization so teleop stays responsive.
             # Action can eventually be clipped using `max_relative_target`,
             # so action actually sent is saved in the dataset. action = postprocessor.process(action)
             # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
             _sent_action = robot.send_action(robot_action_to_send)
+            t_after_send = time.perf_counter()
 
             # Write to dataset on a background thread so encoding does not block teleop.
             if frame_writer is not None:
+                observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
                 action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
                 frame = {**observation_frame, **action_frame, "task": single_task}
                 frame_writer.put(frame)
+                t_after_frame = time.perf_counter()
+            else:
+                t_after_frame = t_after_send
 
             if display_data:
                 log_rerun_data(observation=obs_processed, action=action_values)
@@ -395,9 +400,15 @@ def record_loop(
             if dt_s > loop_budget_s:
                 overrun_count += 1
                 if overrun_count == 1 or overrun_count % 30 == 0:
+                    obs_ms = (t_after_obs - start_loop_t) * 1e3
+                    action_ms = (t_after_action - t_after_obs) * 1e3
+                    send_ms = (t_after_send - t_after_action) * 1e3
+                    frame_ms = (t_after_frame - t_after_send) * 1e3
                     logging.warning(
                         f"Record loop overrun #{overrun_count}: {dt_s * 1e3:.1f}ms > "
-                        f"{loop_budget_s * 1e3:.1f}ms budget at {fps} fps"
+                        f"{loop_budget_s * 1e3:.1f}ms budget at {fps} fps "
+                        f"(obs={obs_ms:.0f}ms action={action_ms:.0f}ms "
+                        f"send={send_ms:.0f}ms frame={frame_ms:.0f}ms)"
                     )
             busy_wait(loop_budget_s - dt_s)
 

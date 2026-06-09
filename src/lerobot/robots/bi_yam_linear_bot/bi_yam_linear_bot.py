@@ -284,11 +284,14 @@ class BiYamLinearBot(Robot):
             cam_key: self._io_executor.submit(cam.read_latest) for cam_key, cam in self.cameras.items()
         }
 
+        t_arms = time.perf_counter()
         obs_dict: dict[str, Any] = {}
         self._populate_arm_obs(obs_dict, side="left", arm_obs=arm_futures["left"].result())
         self._populate_arm_obs(obs_dict, side="right", arm_obs=arm_futures["right"].result())
+        arms_ms = (time.perf_counter() - t_arms) * 1e3
 
         # FlowBase RPCs share one portal client — keep sequential for thread safety.
+        t_base = time.perf_counter()
         odometry = self._flow_base_client.get_odometry()
         translation = odometry["translation"]
         rotation = odometry["rotation"]
@@ -311,11 +314,18 @@ class BiYamLinearBot(Robot):
         if self.config.with_linear_rail:
             obs_dict["rail.cmd.vel"] = float(vel[3]) if len(vel) > 3 else 0.0
 
+        base_ms = (time.perf_counter() - t_base) * 1e3
+
+        t_cams = time.perf_counter()
         for cam_key in self.cameras:
             obs_dict[cam_key] = cam_futures[cam_key].result()
+        cams_ms = (time.perf_counter() - t_cams) * 1e3
 
         dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read observation: {dt_ms:.1f}ms")
+        logger.debug(
+            f"{self} read observation: {dt_ms:.1f}ms "
+            f"(arms={arms_ms:.0f} base={base_ms:.0f} cams={cams_ms:.0f})"
+        )
 
         return obs_dict
 
