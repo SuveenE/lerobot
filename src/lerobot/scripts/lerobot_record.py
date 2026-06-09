@@ -399,17 +399,16 @@ def record_loop(
             loop_budget_s = 1 / fps
             if dt_s > loop_budget_s:
                 overrun_count += 1
-                if overrun_count == 1 or overrun_count % 30 == 0:
-                    obs_ms = (t_after_obs - start_loop_t) * 1e3
-                    action_ms = (t_after_action - t_after_obs) * 1e3
-                    send_ms = (t_after_send - t_after_action) * 1e3
-                    frame_ms = (t_after_frame - t_after_send) * 1e3
-                    logging.warning(
-                        f"Record loop overrun #{overrun_count}: {dt_s * 1e3:.1f}ms > "
-                        f"{loop_budget_s * 1e3:.1f}ms budget at {fps} fps "
-                        f"(obs={obs_ms:.0f}ms action={action_ms:.0f}ms "
-                        f"send={send_ms:.0f}ms frame={frame_ms:.0f}ms)"
-                    )
+                obs_ms = (t_after_obs - start_loop_t) * 1e3
+                action_ms = (t_after_action - t_after_obs) * 1e3
+                send_ms = (t_after_send - t_after_action) * 1e3
+                frame_ms = (t_after_frame - t_after_send) * 1e3
+                logging.warning(
+                    f"Record loop overrun #{overrun_count}: {dt_s * 1e3:.1f}ms > "
+                    f"{loop_budget_s * 1e3:.1f}ms budget at {fps} fps "
+                    f"(obs={obs_ms:.0f}ms action={action_ms:.0f}ms "
+                    f"send={send_ms:.0f}ms frame={frame_ms:.0f}ms)"
+                )
             busy_wait(loop_budget_s - dt_s)
 
             timestamp = time.perf_counter() - start_episode_t
