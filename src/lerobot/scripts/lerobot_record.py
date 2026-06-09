@@ -405,12 +405,13 @@ def record_loop(
     finally:
         if frame_writer is not None:
             frame_writer.close()
-            actual_frames = dataset.episode_buffer["size"] if dataset.episode_buffer else 0
-            expected_frames = int(timestamp * fps)
-            logging.info(
-                f"Episode capture: {actual_frames} frames in {timestamp:.1f}s wall time "
-                f"(target {expected_frames} at {fps} fps, {overrun_count} overruns)"
-            )
+            if timestamp > 0:
+                actual_frames = dataset.episode_buffer["size"] if dataset.episode_buffer else 0
+                expected_frames = int(timestamp * fps)
+                logging.info(
+                    f"Episode capture: {actual_frames} frames in {timestamp:.1f}s wall time "
+                    f"(target {expected_frames} at {fps} fps, {overrun_count} overruns)"
+                )
 
 
 @parser.wrap()
