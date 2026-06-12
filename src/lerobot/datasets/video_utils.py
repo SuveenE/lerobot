@@ -733,6 +733,7 @@ class StreamingVideoEncoder:
         self._video_paths: dict[str, Path] = {}
         self._dropped_frames: dict[str, int] = {}
         self._episode_active = False
+        self._closed = False
 
     def start_episode(self, video_keys: list[str], temp_dir: Path) -> None:
         """Start encoder threads for a new episode.
@@ -887,8 +888,11 @@ class StreamingVideoEncoder:
 
     def close(self) -> None:
         """Close the encoder, canceling any in-progress episode."""
+        if self._closed:
+            return
         if self._episode_active:
             self.cancel_episode()
+        self._closed = True
 
     def _cleanup(self) -> None:
         """Clean up queues and thread tracking dicts."""
