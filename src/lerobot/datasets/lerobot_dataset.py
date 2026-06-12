@@ -834,6 +834,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Initialize streaming encoder for resumed recording
         if streaming_encoding and len(self.meta.video_keys) > 0:
+            if batch_encoding_size > 1:
+                logging.warning(
+                    "Both `streaming_encoding=True` and `batch_encoding_size>1` were set. "
+                    "These are mutually exclusive encoding strategies; batch encoding will be "
+                    "ignored because streaming already encodes each episode's video live."
+                )
+                # Streaming takes precedence: fully ignore batch encoding.
+                self.batch_encoding_size = 1
             self._streaming_encoder = StreamingVideoEncoder(
                 fps=self.meta.fps,
                 vcodec=self.vcodec,
@@ -1377,8 +1385,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # `meta.save_episode` need to be executed after encoding the videos
         self.meta.save_episode(episode_index, episode_length, episode_tasks, ep_stats, ep_metadata)
 
-        if has_video_keys and use_batched_encoding:
-            # Check if we should trigger batch encoding
+        if has_video_keys and use_batched_encoding and not use_streaming:
+            # Check if we should trigger batch encoding.
+            # Skipped when streaming is active: streaming already encodes each
+            # episode's video live (no PNG frames are written to disk), so the
+            # batch path would fail to find images and would double-process
+            # videos that streaming has already saved.
             self.episodes_since_last_encoding += 1
             if self.episodes_since_last_encoding == self.batch_encoding_size:
                 start_ep = self.num_episodes - self.batch_encoding_size
@@ -1809,6 +1821,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Initialize streaming encoder
         if streaming_encoding and len(obj.meta.video_keys) > 0:
+            if batch_encoding_size > 1:
+                logging.warning(
+                    "Both `streaming_encoding=True` and `batch_encoding_size>1` were set. "
+                    "These are mutually exclusive encoding strategies; batch encoding will be "
+                    "ignored because streaming already encodes each episode's video live."
+                )
+                # Streaming takes precedence: fully ignore batch encoding.
+                obj.batch_encoding_size = 1
             obj._streaming_encoder = StreamingVideoEncoder(
                 fps=fps,
                 vcodec=vcodec,

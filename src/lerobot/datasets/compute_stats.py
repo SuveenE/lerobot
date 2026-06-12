@@ -245,6 +245,28 @@ def sample_images(image_paths: list[str]) -> np.ndarray:
     return images
 
 
+def sample_depth_images(image_paths: list[str]) -> np.ndarray:
+    """Sample 16-bit depth maps for stats, preserving raw millimeter values.
+
+    Unlike `sample_images`, depth is loaded as float32 without RGB conversion or
+    [0, 1] rescaling, so the computed statistics reflect actual depth in mm.
+    """
+    sampled_indices = sample_indices(len(image_paths))
+
+    images = None
+    for i, idx in enumerate(sampled_indices):
+        path = image_paths[idx]
+        img = load_image_as_numpy(path, dtype=np.float32, channel_first=True)
+        img = auto_downsample_height_width(img)
+
+        if images is None:
+            images = np.empty((len(sampled_indices), *img.shape), dtype=np.float32)
+
+        images[i] = img
+
+    return images
+
+
 def _reshape_stats_by_axis(
     stats: dict[str, np.ndarray],
     axis: int | tuple[int, ...] | None,
@@ -508,8 +530,12 @@ def compute_episode_stats(
         if features[key]["dtype"] == "string":
             continue
 
+        # Single-channel (depth) maps are stored in raw millimeters, not 0-255 RGB,
+        # so they are sampled as float32 and not rescaled by 255.
+        is_depth = features[key]["dtype"] in ["image", "video"] and tuple(features[key]["shape"])[-1] == 1
+
         if features[key]["dtype"] in ["image", "video"]:
-            ep_ft_array = sample_images(data)
+            ep_ft_array = sample_depth_images(data) if is_depth else sample_images(data)
             axes_to_reduce = (0, 2, 3)
             keepdims = True
         else:
@@ -522,8 +548,9 @@ def compute_episode_stats(
         )
 
         if features[key]["dtype"] in ["image", "video"]:
+            scale = 1.0 if is_depth else 255.0
             ep_stats[key] = {
-                k: v if k == "count" else np.squeeze(v / 255.0, axis=0) for k, v in ep_stats[key].items()
+                k: v if k == "count" else np.squeeze(v / scale, axis=0) for k, v in ep_stats[key].items()
             }
 
     return ep_stats
@@ -543,8 +570,11 @@ def _validate_stat_value(value: np.ndarray, key: str, feature_key: str) -> None:
     if key == "count" and value.shape != (1,):
         raise ValueError(f"Shape of 'count' must be (1), but is {value.shape} instead.")
 
-    if "image" in feature_key and key != "count" and value.shape != (3, 1, 1):
-        raise ValueError(f"Shape of quantile '{key}' must be (3,1,1), but is {value.shape} instead.")
+    # RGB image/video stats are per-channel (3,1,1); single-channel depth maps are (1,1,1).
+    if "image" in feature_key and key != "count" and value.shape not in ((3, 1, 1), (1, 1, 1)):
+        raise ValueError(
+            f"Shape of quantile '{key}' must be (3,1,1) or (1,1,1), but is {value.shape} instead."
+        )
 
 
 def _assert_type_and_shape(stats_list: list[dict[str, dict]]):
