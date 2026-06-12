@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import atexit
+import logging
 import numbers
 import os
+import threading
 import time
 from typing import Any
 
@@ -25,6 +28,9 @@ from .constants import OBS_PREFIX, OBS_STR
 # Tracks the last time images were logged, used to rate-limit the live stream
 # independently of the (higher) control/recording fps.
 _last_image_log_t = 0.0
+
+# Guards against installing our bounded shutdown handler more than once.
+_bounded_shutdown_installed = False
 
 
 def _should_skip_images() -> bool:
@@ -103,6 +109,55 @@ def _log_image(key: str, arr: np.ndarray) -> None:
     rr.log(key, rr.Image(arr), static=True)
 
 
+def _bounded_rerun_shutdown() -> None:
+    """Flush and tear down the Rerun stream without blocking process exit forever.
+
+    Rerun installs an ``atexit`` handler (``rerun.rerun_shutdown``) that flushes the
+    recording stream at interpreter shutdown with *no timeout*. When streaming to a
+    remote/slow gRPC viewer, that flush can block indefinitely — and since it runs in
+    native (Rust) code during shutdown, SIGINT (Ctrl-C) won't interrupt it, so the
+    whole process appears to hang after recording (e.g. right after `push_to_hub`).
+
+    We run the disconnect/flush in a daemon thread and wait at most
+    ``LEROBOT_RERUN_SHUTDOWN_TIMEOUT_SEC`` (default 10s). If it doesn't finish, we
+    abandon the flush and let the process exit anyway. The leftover daemon thread and
+    native Rerun threads don't block interpreter teardown.
+    """
+    timeout_s = float(os.getenv("LEROBOT_RERUN_SHUTDOWN_TIMEOUT_SEC", "10"))
+
+    def _work() -> None:
+        try:
+            rr.disconnect()
+        except Exception as e:  # nosec B110 - best-effort cleanup at exit
+            logging.debug(f"Rerun disconnect during shutdown failed: {e}")
+        try:
+            rr.rerun_shutdown()
+        except Exception as e:  # nosec B110 - best-effort cleanup at exit
+            logging.debug(f"Rerun shutdown failed: {e}")
+
+    thread = threading.Thread(target=_work, name="rerun_teardown", daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+    if thread.is_alive():
+        logging.warning(
+            f"Rerun did not flush/disconnect within {timeout_s:.0f}s "
+            "(viewer slow or gone); abandoning flush to avoid hanging on exit."
+        )
+
+
+def _install_bounded_rerun_shutdown() -> None:
+    """Swap Rerun's unbounded atexit flush for our bounded one (idempotent)."""
+    global _bounded_shutdown_installed
+    if _bounded_shutdown_installed:
+        return
+    try:
+        rr.unregister_shutdown()
+    except Exception as e:  # nosec B110 - non-fatal, we still register our handler
+        logging.debug(f"Could not unregister Rerun's default shutdown handler: {e}")
+    atexit.register(_bounded_rerun_shutdown)
+    _bounded_shutdown_installed = True
+
+
 def init_rerun(session_name: str = "lerobot_control_loop") -> None:
     """Initializes the Rerun SDK for visualizing the control loop."""
     batch_size = os.getenv("RERUN_FLUSH_NUM_BYTES", "8000")
@@ -118,6 +173,9 @@ def init_rerun(session_name: str = "lerobot_control_loop") -> None:
     else:
         memory_limit = os.getenv("LEROBOT_RERUN_MEMORY_LIMIT", "10%")
         rr.spawn(memory_limit=memory_limit)
+
+    # Prevent Rerun's unbounded shutdown flush from hanging the process on exit.
+    _install_bounded_rerun_shutdown()
 
 
 def _is_scalar(x):
