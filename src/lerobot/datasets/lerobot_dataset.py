@@ -834,6 +834,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Initialize streaming encoder for resumed recording
         if streaming_encoding and len(self.meta.video_keys) > 0:
+            if batch_encoding_size > 1:
+                logging.warning(
+                    "Both `streaming_encoding=True` and `batch_encoding_size>1` were set. "
+                    "These are mutually exclusive encoding strategies; batch encoding will be "
+                    "ignored because streaming already encodes each episode's video live."
+                )
+                # Streaming takes precedence: fully ignore batch encoding.
+                self.batch_encoding_size = 1
             self._streaming_encoder = StreamingVideoEncoder(
                 fps=self.meta.fps,
                 vcodec=self.vcodec,
@@ -1820,6 +1828,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Initialize streaming encoder
         if streaming_encoding and len(obj.meta.video_keys) > 0:
+            if batch_encoding_size > 1:
+                logging.warning(
+                    "Both `streaming_encoding=True` and `batch_encoding_size>1` were set. "
+                    "These are mutually exclusive encoding strategies; batch encoding will be "
+                    "ignored because streaming already encodes each episode's video live."
+                )
+                # Streaming takes precedence: fully ignore batch encoding.
+                obj.batch_encoding_size = 1
             obj._streaming_encoder = StreamingVideoEncoder(
                 fps=fps,
                 vcodec=vcodec,
