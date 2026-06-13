@@ -21,12 +21,24 @@ from typing import Any
 from draccus.choice_types import ChoiceRegistry
 
 
-def is_package_available(pkg_name: str, return_version: bool = False) -> tuple[bool, str] | bool:
+def is_package_available(
+    pkg_name: str, import_name: str | None = None, return_version: bool = False
+) -> tuple[bool, str] | bool:
     """Copied from https://github.com/huggingface/transformers/blob/main/src/transformers/utils/import_utils.py
     Check if the package spec exists and grab its version to avoid importing a local directory.
     **Note:** this doesn't work for all packages.
+
+    Args:
+        pkg_name: The name of the package as installed via pip (e.g. "python-can").
+        import_name: The actual name used to import the package (e.g. "can").
+                     Defaults to pkg_name if not provided.
+        return_version: Whether to return the version string.
     """
-    package_exists = importlib.util.find_spec(pkg_name) is not None
+    if import_name is None:
+        import_name = pkg_name
+
+    # Check if the module spec exists using the import name
+    package_exists = importlib.util.find_spec(import_name) is not None
     package_version = "N/A"
     if package_exists:
         try:
@@ -37,7 +49,7 @@ def is_package_available(pkg_name: str, return_version: bool = False) -> tuple[b
             # Fallback method: Only for "torch" and versions containing "dev"
             if pkg_name == "torch":
                 try:
-                    package = importlib.import_module(pkg_name)
+                    package = importlib.import_module(import_name)
                     temp_version = getattr(package, "__version__", "N/A")
                     # Check if the version contains "dev"
                     if "dev" in temp_version:
@@ -61,8 +73,24 @@ def is_package_available(pkg_name: str, return_version: bool = False) -> tuple[b
         return package_exists
 
 
+_require_package_cache: dict[str, bool] = {}
+
+
+def require_package(pkg_name: str, extra: str, import_name: str | None = None) -> None:
+    """Raise an informative ImportError if a package required by an optional feature is missing."""
+    cache_key = import_name or pkg_name
+    if cache_key not in _require_package_cache:
+        _require_package_cache[cache_key] = is_package_available(pkg_name, import_name)
+    if not _require_package_cache[cache_key]:
+        raise ImportError(
+            f"'{pkg_name}' is required but not installed. Install it with: "
+            f"pip install 'lerobot[{extra}]' (or uv pip install 'lerobot[{extra}]')"
+        )
+
+
 _transformers_available = is_package_available("transformers")
 _peft_available = is_package_available("peft")
+_pyrealsense2_available = is_package_available("pyrealsense2")
 
 
 def make_device_from_device_class(config: ChoiceRegistry) -> Any:

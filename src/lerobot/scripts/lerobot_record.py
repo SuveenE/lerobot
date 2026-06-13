@@ -66,6 +66,7 @@ lerobot-record \
 """
 
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -569,7 +570,34 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     return dataset
 
 
+def _install_hang_diagnostics():
+    """Enable thread-stack dumps so a hang at shutdown can be diagnosed.
+
+    The teardown after recording sometimes wedges in native code (e.g. a library
+    destructor or atexit flush) where SIGINT (Ctrl-C) is ignored. faulthandler's
+    handler runs in C and walks the Python stacks directly, so it still works when
+    the interpreter is otherwise stuck. While the process is hung, run:
+
+        kill -USR1 <pid>
+
+    to print every thread's Python stack to stderr (the top frame reveals exactly
+    what is blocking). As a fallback, dump_traceback_later prints all stacks if the
+    process appears stuck for LEROBOT_HANG_DUMP_SEC seconds (0/unset = disabled).
+    """
+    import faulthandler
+    import signal
+
+    faulthandler.enable()
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+
+    dump_after = float(os.getenv("LEROBOT_HANG_DUMP_SEC", "0"))
+    if dump_after > 0:
+        faulthandler.dump_traceback_later(dump_after, repeat=True)
+
+
 def main():
+    _install_hang_diagnostics()
     register_third_party_devices()
     record()
 

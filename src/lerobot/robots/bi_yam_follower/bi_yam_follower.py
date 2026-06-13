@@ -52,9 +52,19 @@ class YamArmClient:
         logger.info(f"Successfully connected to Yam arm server at {self.host}:{self.port}")
 
     def disconnect(self):
-        """Disconnect from the arm server."""
+        """Disconnect from the arm server.
+
+        `portal.Client` runs a background socket thread (plus an OS pipe) that is only
+        torn down by `Client.close()`. Previously we just dropped the reference, which
+        leaked the thread/socket/fds on every disconnect. We close it explicitly with a
+        bounded timeout so a stuck connection can't block shutdown.
+        """
         if self._client is not None:
             logger.info(f"Disconnecting from Yam arm server at {self.host}:{self.port}")
+            try:
+                self._client.close(timeout=2.0)
+            except Exception as e:
+                logger.warning(f"Error closing Yam arm client at {self.host}:{self.port}: {e}")
             self._client = None
 
     @property
