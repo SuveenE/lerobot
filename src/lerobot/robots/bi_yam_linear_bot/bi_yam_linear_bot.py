@@ -44,8 +44,20 @@ class YamArmClient:
         logger.info(f"Successfully connected to Yam arm server at {self.host}:{self.port}")
 
     def disconnect(self):
+        """Disconnect from the arm server.
+
+        `portal.Client` runs a background socket thread (plus an OS pipe) that is only
+        torn down by `Client.close()`. Previously we just dropped the reference, which
+        leaked the thread/socket/fds on every disconnect and could wedge process
+        teardown after recording. We close it explicitly with a bounded timeout so a
+        stuck connection can't block shutdown.
+        """
         if self._client is not None:
             logger.info(f"Disconnecting from Yam arm server at {self.host}:{self.port}")
+            try:
+                self._client.close(timeout=2.0)
+            except Exception as e:
+                logger.warning(f"Error closing Yam arm client at {self.host}:{self.port}: {e}")
             self._client = None
 
     @property
@@ -524,14 +536,29 @@ class BiYamLinearBot(Robot):
     def disconnect(self):
         logger.info("Disconnecting from Linear Bot")
 
-        self.left_arm.disconnect()
-        self.right_arm.disconnect()
+        # Tear each resource down independently so a single stuck close (e.g. a
+        # wedged portal client or an unreachable FlowBase) can't block the rest
+        # of shutdown and leave the process hanging with no output.
+        for name, closer in (
+            ("left arm", self.left_arm.disconnect),
+            ("right arm", self.right_arm.disconnect),
+        ):
+            try:
+                closer()
+            except Exception as e:
+                logger.warning(f"Error disconnecting {name}: {e}")
 
         if self._flow_base_client is not None:
-            self._flow_base_client.close()
+            try:
+                self._flow_base_client.close()
+            except Exception as e:
+                logger.warning(f"Error closing FlowBase client: {e}")
             self._flow_base_client = None
 
-        for cam in self.cameras.values():
-            cam.disconnect()
+        for cam_key, cam in self.cameras.items():
+            try:
+                cam.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting camera {cam_key}: {e}")
 
         logger.info("Disconnected from Linear Bot")
