@@ -229,34 +229,46 @@ class BiYamLinearBot(Robot):
     def connect(self, calibrate: bool = True) -> None:
         logger.info("Connecting to Linear Bot")
 
-        self.left_arm.connect()
-        self.right_arm.connect()
+        # If any step below fails partway, tear down whatever already opened a
+        # `portal.Client` (each one runs a non-daemon socket thread that keeps
+        # auto-reconnecting). Leaving these dangling holds stale connections on
+        # the arm servers, which is a common cause of flaky / "arm dropped"
+        # behaviour on the next start.
+        try:
+            self.left_arm.connect()
+            self.right_arm.connect()
 
-        self._left_dofs = self.left_arm.num_dofs()
-        self._right_dofs = self.right_arm.num_dofs()
-        logger.info(f"Left arm DOFs: {self._left_dofs}, Right arm DOFs: {self._right_dofs}")
+            # First real RPCs: these block until the servers actually respond,
+            # so they double as a connection health-check.
+            self._left_dofs = self.left_arm.num_dofs()
+            self._right_dofs = self.right_arm.num_dofs()
+            logger.info(f"Left arm DOFs: {self._left_dofs}, Right arm DOFs: {self._right_dofs}")
 
-        from i2rt.flow_base.flow_base_client import FlowBaseClient
+            from i2rt.flow_base.flow_base_client import FlowBaseClient
 
-        self._flow_base_client = FlowBaseClient(
-            host=self.config.flow_base_host,
-            with_linear_rail=self.config.with_linear_rail,
-        )
-        # Stop the heartbeat thread that FlowBaseClient starts automatically.
-        # It sends zeros at 50 Hz which would override joystick input on the
-        # FlowBase controller.  We send explicit velocity commands in
-        # send_action() only when the action dict contains base keys (i.e.
-        # during policy deployment, not during teleoperation).
-        self._flow_base_client.running = False
-        if self._flow_base_client._thread.is_alive():
-            self._flow_base_client._thread.join(timeout=1.0)
-        logger.info(
-            f"Connected to FlowBase at {self.config.flow_base_host} "
-            f"(linear rail: {self.config.with_linear_rail})"
-        )
+            self._flow_base_client = FlowBaseClient(
+                host=self.config.flow_base_host,
+                with_linear_rail=self.config.with_linear_rail,
+            )
+            # Stop the heartbeat thread that FlowBaseClient starts automatically.
+            # It sends zeros at 50 Hz which would override joystick input on the
+            # FlowBase controller.  We send explicit velocity commands in
+            # send_action() only when the action dict contains base keys (i.e.
+            # during policy deployment, not during teleoperation).
+            self._flow_base_client.running = False
+            if self._flow_base_client._thread.is_alive():
+                self._flow_base_client._thread.join(timeout=1.0)
+            logger.info(
+                f"Connected to FlowBase at {self.config.flow_base_host} "
+                f"(linear rail: {self.config.with_linear_rail})"
+            )
 
-        for cam in self.cameras.values():
-            cam.connect()
+            for cam in self.cameras.values():
+                cam.connect()
+        except Exception:
+            logger.exception("Linear Bot connection failed; cleaning up partial connections")
+            self.disconnect()
+            raise
 
         logger.info("Successfully connected to Linear Bot")
 
