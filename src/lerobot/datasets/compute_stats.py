@@ -15,6 +15,7 @@
 # limitations under the License.
 import numpy as np
 
+from lerobot.datasets.depth_codec import decode_depth
 from lerobot.datasets.utils import load_image_as_numpy
 
 DEFAULT_QUANTILES = [0.01, 0.10, 0.50, 0.90, 0.99]
@@ -245,18 +246,23 @@ def sample_images(image_paths: list[str]) -> np.ndarray:
     return images
 
 
-def sample_depth_images(image_paths: list[str]) -> np.ndarray:
+def sample_depth_images(depth_data: list[str | bytes]) -> np.ndarray:
     """Sample 16-bit depth maps for stats, preserving raw millimeter values.
 
     Unlike `sample_images`, depth is loaded as float32 without RGB conversion or
     [0, 1] rescaling, so the computed statistics reflect actual depth in mm.
+
+    Accepts either PNG file paths or rvl-compressed `bytes` (zdepth) entries.
     """
-    sampled_indices = sample_indices(len(image_paths))
+    sampled_indices = sample_indices(len(depth_data))
 
     images = None
     for i, idx in enumerate(sampled_indices):
-        path = image_paths[idx]
-        img = load_image_as_numpy(path, dtype=np.float32, channel_first=True)
+        entry = depth_data[idx]
+        if isinstance(entry, (bytes, bytearray)):
+            img = decode_depth(entry).astype(np.float32)[np.newaxis, ...]  # (1, H, W)
+        else:
+            img = load_image_as_numpy(entry, dtype=np.float32, channel_first=True)
         img = auto_downsample_height_width(img)
 
         if images is None:

@@ -44,6 +44,7 @@ from lerobot.datasets.backward_compatibility import (
     BackwardCompatibilityError,
     ForwardCompatibilityError,
 )
+from lerobot.datasets.depth_codec import decode_depth, is_rvl_depth_feature
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_STR
 from lerobot.utils.utils import SuppressProgressBars, is_valid_numpy_dtype_string
 
@@ -434,6 +435,11 @@ def hf_transform_to_torch(items_dict: dict[str, list[Any]]) -> dict[str, list[to
     """
     for key in items_dict:
         first_item = items_dict[key][0]
+        if isinstance(first_item, (bytes, bytearray)):
+            # rvl-compressed depth: decompress to a 16-bit grayscale image so it goes
+            # through the same tensor conversion as PNG-backed depth maps.
+            items_dict[key] = [PILImage.fromarray(decode_depth(x)) for x in items_dict[key]]
+            first_item = items_dict[key][0]
         if isinstance(first_item, PILImage.Image):
             to_tensor = transforms.ToTensor()
             items_dict[key] = [to_tensor(img) for img in items_dict[key]]
@@ -587,6 +593,10 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
     for key, ft in features.items():
         if ft["dtype"] == "video":
             continue
+        elif is_rvl_depth_feature(ft):
+            # rvl-compressed depth is stored as raw bytes directly in the column,
+            # not as an HF Image (which would re-encode/decode PNGs).
+            hf_features[key] = datasets.Value(dtype="binary")
         elif ft["dtype"] == "image":
             hf_features[key] = datasets.Image()
         elif ft["shape"] == (1,):

@@ -23,6 +23,7 @@ import numpy as np
 import portal
 
 from lerobot.cameras.utils import make_cameras_from_configs
+from lerobot.datasets.depth_codec import RVL_ENCODING
 
 from ..robot import Robot
 from .config_bi_yam_follower import BiYamFollowerConfig
@@ -200,8 +201,8 @@ class BiYamFollower(Robot):
                 }
 
         # Depth maps are recorded as their own single-channel `image` columns
-        # (lossless 16-bit PNG in millimeters), separate from the 3-channel color
-        # `observation.images.<cam>` columns. Gated per-camera on `use_depth`.
+        # (lossless zdepth/rvl bytes in millimeters), separate from the 3-channel
+        # color `observation.images.<cam>` columns. Gated per-camera on `use_depth`.
         for cam_key, cam_cfg in self.config.cameras.items():
             if not getattr(cam_cfg, "use_depth", False):
                 continue
@@ -214,6 +215,7 @@ class BiYamFollower(Robot):
                 "dtype": "image",
                 "shape": (cam_cfg.height, cam_cfg.width, 1),
                 "names": ["height", "width", "channels"],
+                "encoding": RVL_ENCODING,
             }
 
         return features

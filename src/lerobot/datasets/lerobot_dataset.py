@@ -34,6 +34,7 @@ from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import RevisionNotFoundError
 
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
+from lerobot.datasets.depth_codec import encode_depth, is_rvl_depth_feature
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
 from lerobot.datasets.utils import (
     DEFAULT_EPISODES_PATH,
@@ -1257,6 +1258,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if self.features[key]["dtype"] == "video" and self._streaming_encoder is not None:
                 self._streaming_encoder.feed_frame(key, frame[key])
                 self.episode_buffer[key].append(None)  # Placeholder (video keys are skipped in parquet)
+            elif is_rvl_depth_feature(self.features[key]):
+                # Depth is losslessly compressed and stored as raw bytes in the parquet
+                # column, so no PNG is written to disk.
+                self.episode_buffer[key].append(encode_depth(frame[key]))
             elif self.features[key]["dtype"] in ["image", "video"]:
                 img_path = self._get_image_file_path(
                     episode_index=self.episode_buffer["episode_index"], image_key=key, frame_index=frame_index
