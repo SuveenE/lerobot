@@ -442,6 +442,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             streaming_encoding=cfg.dataset.streaming_encoding,
             encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
             encoder_threads=cfg.dataset.encoder_threads,
+            # Resuming only appends new episodes; prior frames are never read here. Skip eagerly
+            # loading/downloading the existing dataset (reading the full data/ parquet is very slow
+            # for depth datasets) and load it lazily if anything ever reads from it.
+            lazy_load=True,
         )
 
         if hasattr(robot, "cameras") and len(robot.cameras) > 0:
