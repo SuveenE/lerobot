@@ -176,7 +176,8 @@ class DatasetRecordConfig:
     # Set to 1 for immediate encoding (default behavior), or higher for batched encoding
     video_encoding_batch_size: int = 1
     # Video codec for encoding videos. Options: 'h264', 'hevc', 'libsvtav1', 'auto',
-    # or hardware-specific: 'h264_videotoolbox', 'h264_nvenc', 'h264_vaapi', 'h264_qsv'.
+    # or hardware-specific: 'h264_videotoolbox', 'h264_nvenc',
+    # VA-API (Intel/AMD iGPU, requires a system ffmpeg with VA-API): 'av1_vaapi', 'hevc_vaapi', 'h264_vaapi'.
     # Use 'auto' to auto-detect the best available hardware encoder.
     vcodec: str = "libsvtav1"
     # Enable streaming video encoding: encode frames in real-time during capture instead
