@@ -315,15 +315,24 @@ def record_loop(
         preprocessor.reset()
         postprocessor.reset()
 
-    # Per-section durations (in seconds) for the optional timing log. `_section_t`
-    # marks the start of the section currently being timed; both are reset each iteration.
-    timings: dict[str, float] = {}
+    # Accumulators for the optional end-of-loop timing summary. Rather than logging
+    # every iteration (which is very noisy), we sum/track the per-section durations
+    # and emit a single summary once the loop finishes. `_section_t` marks the start
+    # of the section currently being timed.
+    timing_sum: dict[str, float] = {}
+    timing_max: dict[str, float] = {}
+    n_iters = 0
+    n_overruns = 0
+    work_sum = 0.0
+    work_max = 0.0
     _section_t = 0.0
 
     def _record_timing(name: str) -> None:
         nonlocal _section_t
         now = time.perf_counter()
-        timings[name] = now - _section_t
+        dt = now - _section_t
+        timing_sum[name] = timing_sum.get(name, 0.0) + dt
+        timing_max[name] = max(timing_max.get(name, 0.0), dt)
         _section_t = now
 
     timestamp = 0
@@ -332,7 +341,6 @@ def record_loop(
         start_loop_t = time.perf_counter()
 
         if log_timing:
-            timings = {}
             _section_t = start_loop_t
 
         if events["exit_early"]:
@@ -429,16 +437,35 @@ def record_loop(
         dt_s = time.perf_counter() - start_loop_t
         busy_wait(1 / fps - dt_s)
 
-        # Only log when the loop work overran its target period (e.g. >33ms at
-        # 30fps), since that's when we fail to keep up with the requested fps.
-        if log_timing and dt_s > 1 / fps:
-            sections = " | ".join(f"{name}={dt * 1e3:.1f}ms" for name, dt in timings.items())
-            logging.info(
-                f"[record_loop] overrun: work={dt_s * 1e3:.1f}ms > target={1e3 / fps:.1f}ms "
-                f"({1 / dt_s:.1f} Hz) | {sections}"
-            )
+        # Accumulate stats for the end-of-loop summary. A frame is "late" (overrun)
+        # when its work took longer than the target period (e.g. >33ms at 30fps),
+        # meaning we couldn't keep up with the requested fps.
+        if log_timing:
+            n_iters += 1
+            work_sum += dt_s
+            work_max = max(work_max, dt_s)
+            if dt_s > 1 / fps:
+                n_overruns += 1
 
         timestamp = time.perf_counter() - start_episode_t
+
+    # Emit a single timing summary for the whole loop so the logs stay readable.
+    if log_timing and n_iters > 0:
+        target_ms = 1e3 / fps
+        n_on_time = n_iters - n_overruns
+        avg_work_ms = (work_sum / n_iters) * 1e3
+        logging.info(
+            f"[record_loop] timing summary over {n_iters} frames @ target {fps} fps "
+            f"({target_ms:.1f}ms): on-time={n_on_time} ({100 * n_on_time / n_iters:.1f}%), "
+            f"late={n_overruns} ({100 * n_overruns / n_iters:.1f}%) | "
+            f"work avg={avg_work_ms:.1f}ms max={work_max * 1e3:.1f}ms"
+        )
+        section_summary = " | ".join(
+            f"{name}: avg={timing_sum[name] / n_iters * 1e3:.1f}ms max={timing_max[name] * 1e3:.1f}ms"
+            for name in timing_sum
+        )
+        if section_summary:
+            logging.info(f"[record_loop] per-section: {section_summary}")
 
 
 @parser.wrap()
