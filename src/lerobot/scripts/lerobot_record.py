@@ -209,6 +209,9 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Log a per-iteration timing breakdown of each section of the record loop
+    # (observation, action, send, dataset write, etc.) to help diagnose fps issues.
+    log_timing: bool = False
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -279,6 +282,7 @@ def record_loop(
     control_time_s: int | None = None,
     single_task: str | None = None,
     display_data: bool = False,
+    log_timing: bool = False,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -309,23 +313,42 @@ def record_loop(
         preprocessor.reset()
         postprocessor.reset()
 
+    # Per-section durations (in seconds) for the optional timing log. `_section_t`
+    # marks the start of the section currently being timed; both are reset each iteration.
+    timings: dict[str, float] = {}
+    _section_t = 0.0
+
+    def _record_timing(name: str) -> None:
+        nonlocal _section_t
+        now = time.perf_counter()
+        timings[name] = now - _section_t
+        _section_t = now
+
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
+        if log_timing:
+            timings = {}
+            _section_t = start_loop_t
+
         if events["exit_early"]:
             events["exit_early"] = False
             break
 
-        # Get robot observation
+        # Get robot observation (includes reading cameras and motor states)
         obs = robot.get_observation()
+        if log_timing:
+            _record_timing("get_observation")
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
 
         if policy is not None or dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+        if log_timing:
+            _record_timing("process_observation")
 
         # Get action from either policy or teleop
         if policy is not None and preprocessor is not None and postprocessor is not None:
@@ -341,9 +364,13 @@ def record_loop(
             )
 
             act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
+            if log_timing:
+                _record_timing("predict_action")
 
         elif policy is None and isinstance(teleop, Teleoperator):
             act = teleop.get_action()
+            if log_timing:
+                _record_timing("get_action")
 
             # Applies a pipeline to the raw teleop action, default is IdentityProcessor
             act_processed_teleop = teleop_action_processor((act, obs))
@@ -354,6 +381,8 @@ def record_loop(
             keyboard_action = teleop_keyboard.get_action()
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+            if log_timing:
+                _record_timing("get_action")
             act_processed_teleop = teleop_action_processor((act, obs))
         else:
             logging.info(
@@ -370,24 +399,41 @@ def record_loop(
         else:
             action_values = act_processed_teleop
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+        if log_timing:
+            _record_timing("process_action")
 
         # Send action to robot
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         _sent_action = robot.send_action(robot_action_to_send)
+        if log_timing:
+            _record_timing("send_action")
 
-        # Write to dataset
+        # Write to dataset (with streaming encoding enabled, this includes video encoding)
         if dataset is not None:
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
             dataset.add_frame(frame)
+            if log_timing:
+                _record_timing("add_frame")
 
         if display_data:
             log_rerun_data(observation=obs_processed, action=action_values)
+            if log_timing:
+                _record_timing("display_data")
 
         dt_s = time.perf_counter() - start_loop_t
         busy_wait(1 / fps - dt_s)
+
+        # Only log when the loop work overran its target period (e.g. >33ms at
+        # 30fps), since that's when we fail to keep up with the requested fps.
+        if log_timing and dt_s > 1 / fps:
+            sections = " | ".join(f"{name}={dt * 1e3:.1f}ms" for name, dt in timings.items())
+            logging.info(
+                f"[record_loop] overrun: work={dt_s * 1e3:.1f}ms > target={1e3 / fps:.1f}ms "
+                f"({1 / dt_s:.1f} Hz) | {sections}"
+            )
 
         timestamp = time.perf_counter() - start_episode_t
 
@@ -515,6 +561,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 control_time_s=cfg.dataset.episode_time_s,
                 single_task=cfg.dataset.single_task,
                 display_data=cfg.display_data,
+                log_timing=cfg.log_timing,
             )
 
             # Execute a few seconds without recording to give time to manually reset the environment
@@ -543,6 +590,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     control_time_s=cfg.dataset.reset_time_s,
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
+                    log_timing=cfg.log_timing,
                 )
 
             if events["rerecord_episode"]:
