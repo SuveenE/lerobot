@@ -25,6 +25,7 @@ def main():
                 "mode": "follower",
                 "server_port": 5001,
                 "use_encoder_server": True,
+                "transport": "udp",
             },
             {
                 "can_channel": "can_leader_l",
@@ -32,14 +33,16 @@ def main():
                 "mode": "follower",
                 "server_port": 5002,
                 "use_encoder_server": True,
+                "transport": "udp",
             },
         ],
         setup_lines=[
-            "Right leader arm: localhost:5001",
-            "Left leader arm:  localhost:5002",
+            "Right leader arm: localhost:5001 (UDP)",
+            "Left leader arm:  localhost:5002 (UDP)",
         ],
         usage_lines=[
             "--teleop.type=bi_yam_leader",
+            "--teleop.transport=udp",
             "--teleop.left_arm_port=5002",
             "--teleop.right_arm_port=5001",
         ],
