@@ -82,9 +82,20 @@ class YamLeaderClient:
 
     def get_observations(self) -> dict[str, np.ndarray]:
         """Get current observations including joint positions, velocities, etc."""
+        return self.request_observations().result()
+
+    def request_observations(self):
+        """Fire a non-blocking observations RPC and return the portal future.
+
+        `portal.Client` calls return immediately with a future; `.result()` is what
+        blocks on the network round-trip. Exposing the future lets a caller fire
+        requests to *both* leader arms (left and right) before waiting on either, so
+        the two servers work concurrently and we pay ~one round-trip instead of two
+        back-to-back. See `BiYamLeader.get_action`.
+        """
         if self._client is None:
             raise RuntimeError("Client not connected")
-        return self._client.get_observations().result()
+        return self._client.get_observations()
 
     @staticmethod
     def gripper_from_encoder_obs(obs: dict) -> float:
@@ -244,8 +255,14 @@ class BiYamLeader(Teleoperator):
         """
         action_dict = {}
 
+        # Fire both leader RPCs first (non-blocking), then collect. This overlaps the
+        # two network round-trips instead of doing left fully before right, roughly
+        # halving the time spent waiting on the leader servers.
+        left_future = self.left_arm.request_observations()
+        right_future = self.right_arm.request_observations()
+
         # Get left arm observations
-        left_obs = self.left_arm.get_observations()
+        left_obs = left_future.result()
         left_joint_pos = left_obs["joint_pos"]
 
         # Handle gripper: either from physical gripper or teaching handle encoder
@@ -266,8 +283,8 @@ class BiYamLeader(Teleoperator):
             else:
                 action_dict[f"left_joint_{i}.pos"] = float(pos)
 
-        # Get right arm observations
-        right_obs = self.right_arm.get_observations()
+        # Get right arm observations (future was already fired above)
+        right_obs = right_future.result()
         right_joint_pos = right_obs["joint_pos"]
 
         # Handle gripper: either from physical gripper or teaching handle encoder
