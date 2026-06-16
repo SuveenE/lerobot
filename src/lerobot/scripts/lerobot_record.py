@@ -176,7 +176,8 @@ class DatasetRecordConfig:
     # Set to 1 for immediate encoding (default behavior), or higher for batched encoding
     video_encoding_batch_size: int = 1
     # Video codec for encoding videos. Options: 'h264', 'hevc', 'libsvtav1', 'auto',
-    # or hardware-specific: 'h264_videotoolbox', 'h264_nvenc', 'h264_vaapi', 'h264_qsv'.
+    # or hardware-specific: 'h264_videotoolbox', 'h264_nvenc',
+    # VA-API (Intel/AMD iGPU, requires a system ffmpeg with VA-API): 'av1_vaapi', 'hevc_vaapi', 'h264_vaapi'.
     # Use 'auto' to auto-detect the best available hardware encoder.
     vcodec: str = "libsvtav1"
     # Enable streaming video encoding: encode frames in real-time during capture instead
@@ -210,6 +211,9 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Log a per-iteration timing breakdown of each section of the record loop
+    # (observation, action, send, dataset write, etc.) to help diagnose fps issues.
+    log_timing: bool = False
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -280,6 +284,7 @@ def record_loop(
     control_time_s: int | None = None,
     single_task: str | None = None,
     display_data: bool = False,
+    log_timing: bool = False,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -310,23 +315,50 @@ def record_loop(
         preprocessor.reset()
         postprocessor.reset()
 
+    # Accumulators for the optional end-of-loop timing summary. Rather than logging
+    # every iteration (which is very noisy), we sum/track the per-section durations
+    # and emit a single summary once the loop finishes. `_section_t` marks the start
+    # of the section currently being timed.
+    timing_sum: dict[str, float] = {}
+    timing_max: dict[str, float] = {}
+    n_iters = 0
+    n_overruns = 0
+    work_sum = 0.0
+    work_max = 0.0
+    _section_t = 0.0
+
+    def _record_timing(name: str) -> None:
+        nonlocal _section_t
+        now = time.perf_counter()
+        dt = now - _section_t
+        timing_sum[name] = timing_sum.get(name, 0.0) + dt
+        timing_max[name] = max(timing_max.get(name, 0.0), dt)
+        _section_t = now
+
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
+        if log_timing:
+            _section_t = start_loop_t
+
         if events["exit_early"]:
             events["exit_early"] = False
             break
 
-        # Get robot observation
+        # Get robot observation (includes reading cameras and motor states)
         obs = robot.get_observation()
+        if log_timing:
+            _record_timing("get_observation")
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
 
         if policy is not None or dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+        if log_timing:
+            _record_timing("process_observation")
 
         # Get action from either policy or teleop
         if policy is not None and preprocessor is not None and postprocessor is not None:
@@ -342,9 +374,13 @@ def record_loop(
             )
 
             act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
+            if log_timing:
+                _record_timing("predict_action")
 
         elif policy is None and isinstance(teleop, Teleoperator):
             act = teleop.get_action()
+            if log_timing:
+                _record_timing("get_action")
 
             # Applies a pipeline to the raw teleop action, default is IdentityProcessor
             act_processed_teleop = teleop_action_processor((act, obs))
@@ -355,6 +391,8 @@ def record_loop(
             keyboard_action = teleop_keyboard.get_action()
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+            if log_timing:
+                _record_timing("get_action")
             act_processed_teleop = teleop_action_processor((act, obs))
         else:
             logging.info(
@@ -372,26 +410,62 @@ def record_loop(
             obs_fallback = robot.teleop_action_from_obs(obs)
             action_values = {**obs_fallback, **act_processed_teleop}
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+        if log_timing:
+            _record_timing("process_action")
 
         # Send action to robot
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         _sent_action = robot.send_action(robot_action_to_send)
+        if log_timing:
+            _record_timing("send_action")
 
-        # Write to dataset
+        # Write to dataset (with streaming encoding enabled, this includes video encoding)
         if dataset is not None:
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
             dataset.add_frame(frame)
+            if log_timing:
+                _record_timing("add_frame")
 
         if display_data:
             log_rerun_data(observation=obs_processed, action=action_values)
+            if log_timing:
+                _record_timing("display_data")
 
         dt_s = time.perf_counter() - start_loop_t
         busy_wait(1 / fps - dt_s)
 
+        # Accumulate stats for the end-of-loop summary. A frame is "late" (overrun)
+        # when its work took longer than the target period (e.g. >33ms at 30fps),
+        # meaning we couldn't keep up with the requested fps.
+        if log_timing:
+            n_iters += 1
+            work_sum += dt_s
+            work_max = max(work_max, dt_s)
+            if dt_s > 1 / fps:
+                n_overruns += 1
+
         timestamp = time.perf_counter() - start_episode_t
+
+    # Emit a single timing summary for the whole loop so the logs stay readable.
+    if log_timing and n_iters > 0:
+        target_ms = 1e3 / fps
+        n_on_time = n_iters - n_overruns
+        avg_work_ms = (work_sum / n_iters) * 1e3
+        logging.info(
+            f"[record_loop] timing summary over {n_iters} frames @ target {fps} fps "
+            f"({target_ms:.1f}ms): on-time={n_on_time} ({100 * n_on_time / n_iters:.1f}%), "
+            f"late={n_overruns} ({100 * n_overruns / n_iters:.1f}%) | "
+            f"work avg={avg_work_ms:.1f}ms max={work_max * 1e3:.1f}ms"
+        )
+        section_summary = " | ".join(
+            f"{name}: avg={timing_sum[name] / n_iters * 1e3:.1f}ms max={timing_max[name] * 1e3:.1f}ms"
+            for name in timing_sum
+        )
+        if section_summary:
+            logging.info(f"[record_loop] per-section: {section_summary}")
 
 
 @parser.wrap()
@@ -441,6 +515,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             streaming_encoding=cfg.dataset.streaming_encoding,
             encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
             encoder_threads=cfg.dataset.encoder_threads,
+            # Resuming only appends new episodes; prior frames are never read here. Skip eagerly
+            # loading/downloading the existing dataset (reading the full data/ parquet is very slow
+            # for depth datasets) and load it lazily if anything ever reads from it.
+            lazy_load=True,
         )
 
         if hasattr(robot, "cameras") and len(robot.cameras) > 0:
@@ -513,6 +591,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 control_time_s=cfg.dataset.episode_time_s,
                 single_task=cfg.dataset.single_task,
                 display_data=cfg.display_data,
+                log_timing=cfg.log_timing,
             )
 
             # Execute a few seconds without recording to give time to manually reset the environment
@@ -541,6 +620,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     control_time_s=cfg.dataset.reset_time_s,
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
+                    log_timing=cfg.log_timing,
                 )
 
             if events["rerecord_episode"]:

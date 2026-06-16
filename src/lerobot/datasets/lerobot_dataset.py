@@ -646,6 +646,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         streaming_encoding: bool = False,
         encoder_queue_maxsize: int = 30,
         encoder_threads: int | None = None,
+        lazy_load: bool = False,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -768,6 +769,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
             encoder_threads (int | None, optional): Number of threads per encoder instance. None lets the
                 codec auto-detect (default). Lower values reduce CPU usage per encoder. Maps to 'lp' (via svtav1-params) for
                 libsvtav1 and 'threads' for h264/hevc.
+            lazy_load (bool, optional): If True, skip eagerly loading (and potentially downloading) the
+                existing dataset's frame data into memory. Only `meta` is loaded; `hf_dataset` is loaded on
+                demand the first time a frame is actually read (see `_ensure_hf_dataset_loaded`). This is
+                used when resuming an existing dataset purely to append new episodes (recording), where the
+                prior frames are never read. Avoids reading the whole `data/` parquet (which can be huge for
+                datasets with depth columns). Defaults to False.
         """
         super().__init__()
         self.repo_id = repo_id
@@ -805,23 +812,31 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._writer_closed_for_reading = False
 
         # Load actual data
-        try:
-            if force_cache_sync:
-                raise FileNotFoundError
-            self.hf_dataset = self.load_hf_dataset()
-            # Check if cached dataset contains all requested episodes
-            if not self._check_cached_episodes_sufficient():
-                raise FileNotFoundError("Cached dataset doesn't contain all requested episodes")
-        except (AssertionError, FileNotFoundError, NotADirectoryError):
-            if is_valid_version(self.revision):
-                self.revision = get_safe_version(self.repo_id, self.revision)
-            self.download(download_videos)
-            self.hf_dataset = self.load_hf_dataset()
+        if lazy_load:
+            # Resume-to-record fast path: don't read the existing dataset's frames. Reading the full
+            # `data/` parquet here (via Dataset.from_parquet) can take many minutes for datasets with
+            # depth columns, and we never read prior frames while appending new episodes. `hf_dataset`
+            # is loaded on demand if anything ever reads from it (see `_ensure_hf_dataset_loaded`).
+            self.hf_dataset = None
+            self._lazy_loading = True
+        else:
+            try:
+                if force_cache_sync:
+                    raise FileNotFoundError
+                self.hf_dataset = self.load_hf_dataset()
+                # Check if cached dataset contains all requested episodes
+                if not self._check_cached_episodes_sufficient():
+                    raise FileNotFoundError("Cached dataset doesn't contain all requested episodes")
+            except (AssertionError, FileNotFoundError, NotADirectoryError):
+                if is_valid_version(self.revision):
+                    self.revision = get_safe_version(self.repo_id, self.revision)
+                self.download(download_videos)
+                self.hf_dataset = self.load_hf_dataset()
 
         # Create mapping from absolute indices to relative indices when only a subset of the episodes are loaded
         # Build a mapping: absolute_index -> relative_index_in_filtered_dataset
         self._absolute_to_relative_idx = None
-        if self.episodes is not None:
+        if self.episodes is not None and self.hf_dataset is not None:
             self._absolute_to_relative_idx = {
                 abs_idx.item() if isinstance(abs_idx, torch.Tensor) else abs_idx: rel_idx
                 for rel_idx, abs_idx in enumerate(self.hf_dataset["index"])
