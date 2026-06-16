@@ -70,6 +70,7 @@ class YamLeaderUDPClient:
         host: str = "localhost",
         max_obs_age_s: float = 0.1,
         watchdog_timeout_s: float = 0.5,
+        stats_log_interval_s: float = 10.0,
     ):
         """
         Args:
@@ -81,11 +82,16 @@ class YamLeaderUDPClient:
             watchdog_timeout_s: Age (seconds) of the freshest packet beyond which the
                 link is treated as dead and ``get_observations`` raises. Clamped to be
                 at least ``max_obs_age_s``.
+            stats_log_interval_s: How often (seconds) to log a stream-health summary
+                (receive rate, packet loss, average age of consumed packets). Set to
+                0 to disable periodic logging (a final summary is still logged on
+                disconnect).
         """
         self.port = port
         self.host = host
         self.max_obs_age_s = max_obs_age_s
         self.watchdog_timeout_s = max(watchdog_timeout_s, max_obs_age_s)
+        self.stats_log_interval_s = stats_log_interval_s
 
         self._sock: socket.socket | None = None
         self._server_addr: tuple[str, int] | None = None
@@ -96,6 +102,18 @@ class YamLeaderUDPClient:
         self._latest_recv_t: float = 0.0
         self._num_dofs: int | None = None
         self._last_stale_warn_t: float = 0.0
+
+        # Stream statistics (all guarded by _lock).
+        self._connect_t: float = 0.0
+        self._pkts_received: int = 0  # packets accepted as newer than the previous
+        self._pkts_lost: int = 0  # gap-inferred packets that never arrived
+        self._pkts_reordered: int = 0  # late/duplicate packets discarded on arrival
+        self._consume_count: int = 0  # get_observations() calls that returned a sample
+        self._consume_age_sum: float = 0.0  # sum of consumed-packet ages (seconds)
+        self._consume_age_max: float = 0.0  # worst consumed-packet age (seconds)
+        self._last_stats_log_t: float = 0.0
+        # Snapshot of cumulative counters at the last periodic log, for windowed deltas.
+        self._log_snapshot: tuple = (0, 0, 0, 0, 0.0)
 
         self._stop = threading.Event()
         self._first_packet = threading.Event()
@@ -114,6 +132,18 @@ class YamLeaderUDPClient:
 
         self._stop.clear()
         self._first_packet.clear()
+
+        now = time.monotonic()
+        with self._lock:
+            self._connect_t = now
+            self._last_stats_log_t = now
+            self._pkts_received = 0
+            self._pkts_lost = 0
+            self._pkts_reordered = 0
+            self._consume_count = 0
+            self._consume_age_sum = 0.0
+            self._consume_age_max = 0.0
+            self._log_snapshot = (0, 0, 0, 0, 0.0)
 
         self._recv_thread = threading.Thread(target=self._recv_loop, name=f"yam-udp-recv-{self.port}", daemon=True)
         self._heartbeat_thread = threading.Thread(
@@ -137,6 +167,15 @@ class YamLeaderUDPClient:
     def disconnect(self):
         """Stop the background threads and close the socket."""
         logger.info(f"Disconnecting from YAM leader UDP stream at {self.host}:{self.port}")
+        if self._pkts_received > 0:
+            s = self.get_stats()
+            logger.info(
+                f"YAM leader UDP {self.host}:{self.port} final stats: "
+                f"recv {s['received']} @ {s['recv_rate_hz']:.0f} Hz, "
+                f"lost {s['lost']} ({s['loss_pct']:.1f}%), reordered {s['reordered']}, "
+                f"consumed {s['consume_count']}, avg consumed age {s['avg_consumed_age_ms']:.1f} ms "
+                f"(max {s['max_consumed_age_ms']:.1f} ms)"
+            )
         self._stop.set()
         for thread in (self._recv_thread, self._heartbeat_thread):
             if thread is not None and thread.is_alive():
@@ -183,21 +222,86 @@ class YamLeaderUDPClient:
         if obs is None:
             raise RuntimeError(f"No UDP packet received yet from YAM leader server at {self.host}:{self.port}")
 
-        age = time.monotonic() - recv_t
+        now = time.monotonic()
+        age = now - recv_t
         if age > self.watchdog_timeout_s:
             raise RuntimeError(
                 f"Lost YAM leader UDP stream at {self.host}:{self.port}: latest packet is {age * 1e3:.0f} ms old "
                 f"(> watchdog {self.watchdog_timeout_s * 1e3:.0f} ms). Link down or server stopped publishing."
             )
-        if age > self.max_obs_age_s:
-            now = time.monotonic()
-            if now - self._last_stale_warn_t > _STALE_WARN_INTERVAL_S:
-                self._last_stale_warn_t = now
-                logger.warning(
-                    f"Stale YAM leader UDP stream at {self.host}:{self.port}: latest packet is {age * 1e3:.0f} ms "
-                    f"old (> {self.max_obs_age_s * 1e3:.0f} ms); serving last-known sample."
-                )
+        if age > self.max_obs_age_s and now - self._last_stale_warn_t > _STALE_WARN_INTERVAL_S:
+            self._last_stale_warn_t = now
+            logger.warning(
+                f"Stale YAM leader UDP stream at {self.host}:{self.port}: latest packet is {age * 1e3:.0f} ms "
+                f"old (> {self.max_obs_age_s * 1e3:.0f} ms); serving last-known sample."
+            )
+
+        with self._lock:
+            self._consume_count += 1
+            self._consume_age_sum += age
+            if age > self._consume_age_max:
+                self._consume_age_max = age
+        self._maybe_log_stats(now)
         return obs
+
+    def get_stats(self) -> dict:
+        """Return cumulative stream statistics since the last ``connect()``.
+
+        Keys: ``received``, ``lost``, ``reordered``, ``loss_pct``, ``recv_rate_hz``,
+        ``consume_count``, ``avg_consumed_age_ms``, ``max_consumed_age_ms``.
+
+        Note: ``avg_consumed_age_ms`` is measured on the client clock (time between
+        receiving a packet and consuming it), so it is independent of any clock skew
+        between the leader server and this host.
+        """
+        with self._lock:
+            elapsed = max(time.monotonic() - self._connect_t, 1e-9)
+            received = self._pkts_received
+            lost = self._pkts_lost
+            reordered = self._pkts_reordered
+            consume_count = self._consume_count
+            age_sum = self._consume_age_sum
+            age_max = self._consume_age_max
+        published_est = received + lost
+        return {
+            "received": received,
+            "lost": lost,
+            "reordered": reordered,
+            "loss_pct": (100.0 * lost / published_est) if published_est else 0.0,
+            "recv_rate_hz": received / elapsed,
+            "consume_count": consume_count,
+            "avg_consumed_age_ms": (1e3 * age_sum / consume_count) if consume_count else 0.0,
+            "max_consumed_age_ms": 1e3 * age_max,
+        }
+
+    def _maybe_log_stats(self, now: float) -> None:
+        """Log a windowed stream-health summary at most every ``stats_log_interval_s``."""
+        if self.stats_log_interval_s <= 0:
+            return
+        with self._lock:
+            window_s = now - self._last_stats_log_t
+            if window_s < self.stats_log_interval_s:
+                return
+            prev = self._log_snapshot
+            received, lost, reordered = self._pkts_received, self._pkts_lost, self._pkts_reordered
+            consume_count, age_sum = self._consume_count, self._consume_age_sum
+            self._last_stats_log_t = now
+            self._log_snapshot = (received, lost, reordered, consume_count, age_sum)
+
+        d_received = received - prev[0]
+        d_lost = lost - prev[1]
+        d_reordered = reordered - prev[2]
+        d_consume = consume_count - prev[3]
+        d_age_sum = age_sum - prev[4]
+        d_published = d_received + d_lost
+        rate = d_received / window_s if window_s > 0 else 0.0
+        loss_pct = (100.0 * d_lost / d_published) if d_published else 0.0
+        avg_age_ms = (1e3 * d_age_sum / d_consume) if d_consume else 0.0
+        logger.info(
+            f"YAM leader UDP {self.host}:{self.port} [{window_s:.0f}s]: "
+            f"recv {d_received} @ {rate:.0f} Hz, lost {d_lost} ({loss_pct:.1f}%), reordered {d_reordered}, "
+            f"avg consumed age {avg_age_ms:.1f} ms"
+        )
 
     def request_observations(self):
         """Return a future-like wrapper around the freshest observation.
@@ -265,7 +369,12 @@ class YamLeaderUDPClient:
                 # Keep only the newest packet; UDP can deliver out of order.
                 # Tolerate sequence wraparound by accepting a large backward jump.
                 if seq <= self._latest_seq and (self._latest_seq - seq) < (1 << 31):
+                    self._pkts_reordered += 1
                     continue
+                # Infer dropped packets from gaps in the sequence number.
+                if self._latest_seq >= 0 and seq > self._latest_seq + 1:
+                    self._pkts_lost += seq - self._latest_seq - 1
+                self._pkts_received += 1
                 self._latest_obs = obs
                 self._latest_seq = seq
                 self._latest_recv_t = time.monotonic()

@@ -53,6 +53,10 @@ class BiYamLeaderConfig(TeleoperatorConfig):
     # >= max_obs_age_s. Ignored when transport == "portal".
     watchdog_timeout_s: float = 0.5
 
+    # UDP transport only: how often (s) to log a stream-health summary (receive rate,
+    # packet loss, average age of consumed packets). 0 disables periodic logging.
+    stats_log_interval_s: float = 10.0
+
     def __post_init__(self):
         if self.transport not in TRANSPORTS:
             raise ValueError(f"transport must be one of {TRANSPORTS}, got {self.transport!r}")
