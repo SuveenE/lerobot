@@ -17,7 +17,8 @@ Expected CAN interfaces:
 
 Usage:
     python -m lerobot.scripts.setup_bi_yam_servers
-    python -m lerobot.scripts.setup_bi_yam_servers --eval  # follower arms only (no leader/teaching handles)
+    python -m lerobot.scripts.setup_bi_yam_servers --eval               # follower arms only (no leader/teaching handles)
+    python -m lerobot.scripts.setup_bi_yam_servers --transport udp      # leader arms use UDP push streaming
 
 Requirements:
     - LeRobot installed with yam support: pip install -e ".[yam]"
@@ -152,6 +153,13 @@ def main():
         action="store_true",
         help="Eval mode: only start follower arm servers (skip leader/teaching handle arms).",
     )
+    parser.add_argument(
+        "--transport",
+        choices=["portal", "udp"],
+        default="portal",
+        help="Transport for the leader arm servers: 'portal' (TCP RPC, default) or 'udp' (push streaming). "
+        "Follower servers always use portal.",
+    )
     args = parser.parse_args()
 
     eval_mode = args.eval
@@ -194,7 +202,7 @@ def main():
                     "mode": "follower",
                     "server_port": 5001,
                     "use_encoder_server": True,
-                    "transport": "udp",
+                    "transport": args.transport,
                 },
                 # Left leader arm (enhanced server with encoder support)
                 {
@@ -203,7 +211,7 @@ def main():
                     "mode": "follower",
                     "server_port": 5002,
                     "use_encoder_server": True,
-                    "transport": "udp",
+                    "transport": args.transport,
                 },
             ]
 
@@ -222,12 +230,14 @@ def main():
         print("  - Right follower arm: localhost:1234")
         print("  - Left follower arm:  localhost:1235")
         if not eval_mode:
-            print("  - Right leader arm:   localhost:5001 (UDP)")
-            print("  - Left leader arm:    localhost:5002 (UDP)")
+            transport_note = " (UDP)" if args.transport == "udp" else ""
+            print(f"  - Right leader arm:   localhost:5001{transport_note}")
+            print(f"  - Left leader arm:    localhost:5002{transport_note}")
             print("\nYou can now use lerobot-record with:")
             print("  --robot.type=bi_yam_follower")
             print("  --teleop.type=bi_yam_leader")
-            print("  --teleop.transport=udp")
+            if args.transport == "udp":
+                print("  --teleop.transport=udp")
         else:
             print("\nFollower arms ready for eval (no leader arms started)")
         print("\nPress Ctrl+C to stop all server processes")
