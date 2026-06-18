@@ -23,6 +23,7 @@ state datagrams; this client keeps only the freshest one in memory, so
 """
 
 import logging
+import select
 import socket
 import threading
 import time
@@ -115,6 +116,20 @@ class YamLeaderUDPClient:
         # Snapshot of cumulative counters at the last periodic log, for windowed deltas.
         self._log_snapshot: tuple = (0, 0, 0, 0, 0.0)
 
+        # --- Diagnostics for attributing high "consumed age" spikes ---
+        # Wall-clock of the last consume call, to measure how often the loop reads us.
+        self._last_consume_t: float = 0.0
+        # Monotonic time the recv thread last ran a loop iteration; lets us tell whether
+        # the thread was starved (didn't run) vs simply blocked waiting on no data.
+        self._last_recv_iter_t: float = 0.0
+        # Worst inter-arrival gap between two accepted packets, and the seq jump across
+        # it (a large jump => loss during the gap; ~1 => server paused/stalled).
+        self._recv_gap_max_s: float = 0.0
+        self._recv_gap_seq_jump: int = 0
+        # Windowed worst-cases, reset every periodic log so spikes don't hide forever.
+        self._consume_age_max_window: float = 0.0
+        self._recv_gap_max_window: float = 0.0
+
         self._stop = threading.Event()
         self._first_packet = threading.Event()
         self._recv_thread: threading.Thread | None = None
@@ -144,6 +159,12 @@ class YamLeaderUDPClient:
             self._consume_age_sum = 0.0
             self._consume_age_max = 0.0
             self._log_snapshot = (0, 0, 0, 0, 0.0)
+            self._last_consume_t = 0.0
+            self._last_recv_iter_t = now
+            self._recv_gap_max_s = 0.0
+            self._recv_gap_seq_jump = 0
+            self._consume_age_max_window = 0.0
+            self._recv_gap_max_window = 0.0
 
         self._recv_thread = threading.Thread(target=self._recv_loop, name=f"yam-udp-recv-{self.port}", daemon=True)
         self._heartbeat_thread = threading.Thread(
@@ -174,7 +195,8 @@ class YamLeaderUDPClient:
                 f"recv {s['received']} @ {s['recv_rate_hz']:.0f} Hz, "
                 f"lost {s['lost']} ({s['loss_pct']:.1f}%), reordered {s['reordered']}, "
                 f"consumed {s['consume_count']}, avg consumed age {s['avg_consumed_age_ms']:.1f} ms "
-                f"(max {s['max_consumed_age_ms']:.1f} ms)"
+                f"(max {s['max_consumed_age_ms']:.1f} ms), "
+                f"max recv gap {s['max_recv_gap_ms']:.1f} ms (seq_jump={s['max_recv_gap_seq_jump']})"
             )
         self._stop.set()
         for thread in (self._recv_thread, self._heartbeat_thread):
@@ -239,10 +261,54 @@ class YamLeaderUDPClient:
         with self._lock:
             self._consume_count += 1
             self._consume_age_sum += age
-            if age > self._consume_age_max:
+            if age > self._consume_age_max_window:
+                self._consume_age_max_window = age
+            is_new_max = age > self._consume_age_max
+            if is_new_max:
                 self._consume_age_max = age
+            since_last_consume = now - self._last_consume_t if self._last_consume_t else 0.0
+            self._last_consume_t = now
+            recv_idle = now - self._last_recv_iter_t
+            latest_seq = self._latest_seq
+            lost_total = self._pkts_lost
+            recv_gap_max = self._recv_gap_max_s
+            recv_gap_jump = self._recv_gap_seq_jump
+
+        # On a new worst-case age (above the freshness budget), log a one-off breakdown
+        # that attributes the spike. Logging only on new maxima is naturally self-throttling.
+        if is_new_max and age > self.max_obs_age_s:
+            socket_unread = self._socket_has_unread_data()
+            logger.warning(
+                f"YAM leader UDP {self.host}:{self.port} new max consumed age {age * 1e3:.1f} ms | "
+                f"since_last_consume={since_last_consume * 1e3:.1f} ms, "
+                f"recv_thread_idle={recv_idle * 1e3:.1f} ms, socket_unread={socket_unread}, "
+                f"latest_seq={latest_seq}, lost_total={lost_total}, "
+                f"max_recv_gap={recv_gap_max * 1e3:.1f} ms (seq_jump={recv_gap_jump}). "
+                f"Interpretation: socket_unread=True => receiver thread was starved "
+                f"(consumer held the GIL, e.g. display/encoding on the main loop); "
+                f"socket_unread=False with large since_last_consume => the consumer loop "
+                f"itself was slow; otherwise a real gap on the wire (seq_jump>>1 => burst "
+                f"loss, seq_jump~1 => server stalled/stopped publishing)."
+            )
+
         self._maybe_log_stats(now)
         return obs
+
+    def _socket_has_unread_data(self) -> bool:
+        """Return True if a datagram is already waiting unread in the socket buffer.
+
+        Probed from the consumer thread at the moment of a stale read: if data is
+        waiting here but our latest packet is old, the receiver thread didn't get a
+        chance to run (starvation), as opposed to no packet having arrived (loss/stall).
+        """
+        sock = self._sock
+        if sock is None:
+            return False
+        try:
+            readable, _, _ = select.select([sock], [], [], 0)
+            return bool(readable)
+        except (OSError, ValueError):
+            return False
 
     def get_stats(self) -> dict:
         """Return cumulative stream statistics since the last ``connect()``.
@@ -262,6 +328,8 @@ class YamLeaderUDPClient:
             consume_count = self._consume_count
             age_sum = self._consume_age_sum
             age_max = self._consume_age_max
+            recv_gap_max = self._recv_gap_max_s
+            recv_gap_jump = self._recv_gap_seq_jump
         published_est = received + lost
         return {
             "received": received,
@@ -272,6 +340,8 @@ class YamLeaderUDPClient:
             "consume_count": consume_count,
             "avg_consumed_age_ms": (1e3 * age_sum / consume_count) if consume_count else 0.0,
             "max_consumed_age_ms": 1e3 * age_max,
+            "max_recv_gap_ms": 1e3 * recv_gap_max,
+            "max_recv_gap_seq_jump": recv_gap_jump,
         }
 
     def _maybe_log_stats(self, now: float) -> None:
@@ -285,6 +355,11 @@ class YamLeaderUDPClient:
             prev = self._log_snapshot
             received, lost, reordered = self._pkts_received, self._pkts_lost, self._pkts_reordered
             consume_count, age_sum = self._consume_count, self._consume_age_sum
+            # Read and reset the windowed worst-cases so each line reflects this window.
+            age_max_window = self._consume_age_max_window
+            recv_gap_max_window = self._recv_gap_max_window
+            self._consume_age_max_window = 0.0
+            self._recv_gap_max_window = 0.0
             self._last_stats_log_t = now
             self._log_snapshot = (received, lost, reordered, consume_count, age_sum)
 
@@ -300,7 +375,8 @@ class YamLeaderUDPClient:
         logger.info(
             f"YAM leader UDP {self.host}:{self.port} [{window_s:.0f}s]: "
             f"recv {d_received} @ {rate:.0f} Hz, lost {d_lost} ({loss_pct:.1f}%), reordered {d_reordered}, "
-            f"avg consumed age {avg_age_ms:.1f} ms"
+            f"avg consumed age {avg_age_ms:.1f} ms (max {age_max_window * 1e3:.1f} ms), "
+            f"max recv gap {recv_gap_max_window * 1e3:.1f} ms"
         )
 
     def request_observations(self):
@@ -351,6 +427,9 @@ class YamLeaderUDPClient:
 
     def _recv_loop(self):
         while not self._stop.is_set():
+            # Mark that the thread is actively running an iteration. If this stops
+            # advancing while packets are waiting, the thread is being starved.
+            self._last_recv_iter_t = time.monotonic()
             try:
                 data, _ = self._sock.recvfrom(65535)
             except socket.timeout:
@@ -365,6 +444,7 @@ class YamLeaderUDPClient:
                 continue
 
             seq = obs["seq"]
+            recv_t = time.monotonic()
             with self._lock:
                 # Keep only the newest packet; UDP can deliver out of order.
                 # Tolerate sequence wraparound by accepting a large backward jump.
@@ -374,10 +454,19 @@ class YamLeaderUDPClient:
                 # Infer dropped packets from gaps in the sequence number.
                 if self._latest_seq >= 0 and seq > self._latest_seq + 1:
                     self._pkts_lost += seq - self._latest_seq - 1
+                # Track the worst inter-arrival gap (and the seq jump across it) so we
+                # can tell a long silent gap (loss/stall) from a busy-but-late stream.
+                if self._latest_recv_t > 0.0:
+                    gap = recv_t - self._latest_recv_t
+                    if gap > self._recv_gap_max_window:
+                        self._recv_gap_max_window = gap
+                    if gap > self._recv_gap_max_s:
+                        self._recv_gap_max_s = gap
+                        self._recv_gap_seq_jump = (seq - self._latest_seq) if self._latest_seq >= 0 else 1
                 self._pkts_received += 1
                 self._latest_obs = obs
                 self._latest_seq = seq
-                self._latest_recv_t = time.monotonic()
+                self._latest_recv_t = recv_t
                 if self._num_dofs is None:
                     self._num_dofs = int(obs["joint_pos"].shape[0])
 
