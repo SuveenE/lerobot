@@ -57,6 +57,18 @@ def _should_skip_images() -> bool:
     return False
 
 
+def _should_skip_actions() -> bool:
+    """Skip logging action data unless LEROBOT_RERUN_ACTIONS=1.
+
+    Each action vector is logged element-by-element (one ``rr.log`` per scalar),
+    so a multi-DoF bimanual setup floods the stream with many small messages every
+    frame. When streaming to a remote viewer (e.g. the teleop PC) this adds load
+    without much value, so actions are skipped by default. Set
+    LEROBOT_RERUN_ACTIONS=1 to log them. Recording is unaffected.
+    """
+    return os.getenv("LEROBOT_RERUN_ACTIONS", "0") == "0"
+
+
 def _is_camera_streamed(key: str) -> bool:
     """Whitelist which camera views are streamed via LEROBOT_RERUN_CAMERAS (if set).
 
@@ -242,7 +254,7 @@ def _log_rerun_data_sync(
                 elif not skip_images and _is_camera_streamed(key):
                     _log_image(key, v)
 
-    if action:
+    if action and not _should_skip_actions():
         for k, v in action.items():
             if v is None:
                 continue
