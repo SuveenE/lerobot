@@ -32,6 +32,11 @@ _last_image_log_t = 0.0
 # Guards against installing our bounded shutdown handler more than once.
 _bounded_shutdown_installed = False
 
+# Background logger that decouples rerun logging from the caller (e.g. the record
+# loop) so image serialization / socket flushes never block the control loop.
+# Created lazily by init_rerun(); None means "log synchronously".
+_async_logger: "_AsyncRerunLogger | None" = None
+
 
 def _should_skip_images() -> bool:
     """Rate-limit image logging to LEROBOT_RERUN_MAX_FPS (if set).
@@ -126,6 +131,12 @@ def _bounded_rerun_shutdown() -> None:
     timeout_s = float(os.getenv("LEROBOT_RERUN_SHUTDOWN_TIMEOUT_SEC", "10"))
 
     def _work() -> None:
+        global _async_logger
+        if _async_logger is not None:
+            # Stop the background logger first so its last rr.log calls land before
+            # we tear down the stream (and so nothing logs concurrently with disconnect).
+            _async_logger.stop()
+            _async_logger = None
         try:
             rr.disconnect()
         except Exception as e:  # nosec B110 - best-effort cleanup at exit
@@ -160,7 +171,10 @@ def _install_bounded_rerun_shutdown() -> None:
 
 def init_rerun(session_name: str = "lerobot_control_loop") -> None:
     """Initializes the Rerun SDK for visualizing the control loop."""
-    batch_size = os.getenv("RERUN_FLUSH_NUM_BYTES", "8000")
+    # Batch more bytes before flushing. 8 KB is tiny for image streaming and causes
+    # frequent (potentially blocking) flushes; a larger batch reduces flush pressure,
+    # which matters most when streaming to a remote viewer over gRPC.
+    batch_size = os.getenv("RERUN_FLUSH_NUM_BYTES", "1048576")
     os.environ["RERUN_FLUSH_NUM_BYTES"] = batch_size
     rr.init(session_name)
 
@@ -177,6 +191,12 @@ def init_rerun(session_name: str = "lerobot_control_loop") -> None:
     # Prevent Rerun's unbounded shutdown flush from hanging the process on exit.
     _install_bounded_rerun_shutdown()
 
+    # Decouple logging from the caller's hot loop unless explicitly disabled.
+    global _async_logger
+    if _async_logger is None and os.getenv("LEROBOT_RERUN_ASYNC", "1") != "0":
+        _async_logger = _AsyncRerunLogger()
+        _async_logger.start()
+
 
 def _is_scalar(x):
     return isinstance(x, (float | numbers.Real | np.integer | np.floating)) or (
@@ -184,7 +204,7 @@ def _is_scalar(x):
     )
 
 
-def log_rerun_data(
+def _log_rerun_data_sync(
     observation: dict[str, Any] | None = None,
     action: dict[str, Any] | None = None,
 ) -> None:
@@ -239,3 +259,84 @@ def log_rerun_data(
                     flat = v.flatten()
                     for i, vi in enumerate(flat):
                         rr.log(f"{key}_{i}", rr.Scalars(float(vi)))
+
+
+def _snapshot(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a shallow copy of ``data`` with numpy arrays copied.
+
+    Used before handing data to the background logger: the caller (e.g. a camera
+    driver) may reuse/overwrite its buffers on the next frame, so we copy arrays to
+    avoid logging torn or stale frames from another thread.
+    """
+    if not data:
+        return data
+    return {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in data.items()}
+
+
+class _AsyncRerunLogger:
+    """Logs observation/action to Rerun on a background thread.
+
+    The caller submits the latest snapshot and returns immediately; the worker
+    serializes and logs it. Only the most recent snapshot is kept — if the worker
+    falls behind (slow serialization or a blocking remote flush), older snapshots
+    are dropped. This keeps the live view best-effort while guaranteeing the
+    control loop (and any sibling threads, like the UDP receiver) are never
+    starved by display work.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: tuple[dict | None, dict | None] | None = None
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="rerun-logger", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def submit(self, observation: dict | None, action: dict | None) -> None:
+        """Hand the latest data to the worker without blocking. Drops any prior
+        un-logged snapshot (the live view is allowed to skip frames)."""
+        snap = (_snapshot(observation), _snapshot(action))
+        with self._lock:
+            self._pending = snap
+        self._wake.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait()
+            self._wake.clear()
+            with self._lock:
+                item = self._pending
+                self._pending = None
+            if item is None:
+                continue
+            observation, action = item
+            try:
+                _log_rerun_data_sync(observation, action)
+            except Exception as e:  # nosec B110 - display is best-effort
+                logging.debug(f"Async rerun logging failed: {e}")
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        self._wake.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+
+def log_rerun_data(
+    observation: dict[str, Any] | None = None,
+    action: dict[str, Any] | None = None,
+) -> None:
+    """Log observation/action data to Rerun for real-time visualization.
+
+    When a background logger is active (started by ``init_rerun``; the default for
+    the record/teleop loops), the data is snapshotted and handed off to a worker
+    thread so this call returns immediately and never blocks the control loop on
+    image serialization or a remote viewer flush. Set ``LEROBOT_RERUN_ASYNC=0`` to
+    force synchronous logging. See ``_log_rerun_data_sync`` for the logging details.
+    """
+    if _async_logger is not None:
+        _async_logger.submit(observation, action)
+    else:
+        _log_rerun_data_sync(observation, action)

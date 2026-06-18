@@ -926,9 +926,16 @@ class _CameraEncoderThread(threading.Thread):
                         output_stream.height = height
                         output_stream.time_base = Fraction(1, self.fps)
 
-                    # Encode frame with explicit timestamps
-                    pil_img = Image.fromarray(frame_data)
-                    video_frame = av.VideoFrame.from_image(pil_img)
+                    # Encode frame with explicit timestamps. For standard 3-channel
+                    # RGB frames, build the AV frame directly from the (contiguous)
+                    # numpy array to avoid a needless PIL round-trip per frame. Fall
+                    # back to PIL for anything else (e.g. grayscale/depth).
+                    if frame_data.ndim == 3 and frame_data.shape[2] == 3:
+                        video_frame = av.VideoFrame.from_ndarray(
+                            np.ascontiguousarray(frame_data), format="rgb24"
+                        )
+                    else:
+                        video_frame = av.VideoFrame.from_image(Image.fromarray(frame_data))
                     video_frame.pts = frame_count
                     video_frame.time_base = Fraction(1, self.fps)
                     packet = output_stream.encode(video_frame)
