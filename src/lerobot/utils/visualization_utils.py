@@ -24,10 +24,15 @@ import numpy as np
 import rerun as rr
 
 from .constants import OBS_PREFIX, OBS_STR
+from .udp_video import UDPVideoSender, get_udp_video_sender_from_env
 
 # Tracks the last time images were logged, used to rate-limit the live stream
 # independently of the (higher) control/recording fps.
 _last_image_log_t = 0.0
+
+# Optional low-latency UDP video side-channel (see udp_video.py). Created lazily
+# by init_rerun() when LEROBOT_VIDEO_UDP is set; None means "don't stream video".
+_udp_sender: "UDPVideoSender | None" = None
 
 # Guards against installing our bounded shutdown handler more than once.
 _bounded_shutdown_installed = False
@@ -55,6 +60,23 @@ def _should_skip_images() -> bool:
         return True
     _last_image_log_t = now
     return False
+
+
+def _rerun_images_enabled() -> bool:
+    """Whether camera images should be streamed to Rerun.
+
+    Acts as the switch between the Rerun (gRPC) and UDP video backends:
+    - LEROBOT_RERUN_IMAGES=1 forces images to Rerun (use with UDP to get both).
+    - LEROBOT_RERUN_IMAGES=0 forces images off for Rerun.
+    - Unset (default): images go to Rerun unless the UDP video backend is active
+      (LEROBOT_VIDEO_UDP set), in which case UDP takes over the video stream.
+
+    Scalars (joint positions, torques, ...) always go to Rerun regardless.
+    """
+    force = os.getenv("LEROBOT_RERUN_IMAGES")
+    if force is not None:
+        return force != "0"
+    return _udp_sender is None
 
 
 def _should_skip_actions() -> bool:
@@ -143,12 +165,15 @@ def _bounded_rerun_shutdown() -> None:
     timeout_s = float(os.getenv("LEROBOT_RERUN_SHUTDOWN_TIMEOUT_SEC", "10"))
 
     def _work() -> None:
-        global _async_logger
+        global _async_logger, _udp_sender
         if _async_logger is not None:
             # Stop the background logger first so its last rr.log calls land before
             # we tear down the stream (and so nothing logs concurrently with disconnect).
             _async_logger.stop()
             _async_logger = None
+        if _udp_sender is not None:
+            _udp_sender.close()
+            _udp_sender = None
         try:
             rr.disconnect()
         except Exception as e:  # nosec B110 - best-effort cleanup at exit
@@ -209,6 +234,11 @@ def init_rerun(session_name: str = "lerobot_control_loop") -> None:
         _async_logger = _AsyncRerunLogger()
         _async_logger.start()
 
+    # Optionally stream a low-latency video preview over UDP alongside Rerun.
+    global _udp_sender
+    if _udp_sender is None:
+        _udp_sender = get_udp_video_sender_from_env()
+
 
 def _is_scalar(x):
     return isinstance(x, (float | numbers.Real | np.integer | np.floating)) or (
@@ -251,8 +281,13 @@ def _log_rerun_data_sync(
                 if v.ndim == 1:
                     for i, vi in enumerate(v):
                         rr.log(f"{key}_{i}", rr.Scalars(float(vi)))
-                elif not skip_images and _is_camera_streamed(key):
-                    _log_image(key, v)
+                elif _is_camera_streamed(key):
+                    # UDP video has its own throttle and is independent of the
+                    # Rerun image rate-limit, so send it before the skip check.
+                    if _udp_sender is not None:
+                        _udp_sender.maybe_send(key, v)
+                    if not skip_images and _rerun_images_enabled():
+                        _log_image(key, v)
 
     if action and not _should_skip_actions():
         for k, v in action.items():
