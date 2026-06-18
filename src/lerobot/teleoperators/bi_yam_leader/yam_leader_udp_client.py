@@ -71,7 +71,6 @@ class YamLeaderUDPClient:
         host: str = "localhost",
         max_obs_age_s: float = 0.1,
         watchdog_timeout_s: float = 0.5,
-        stats_log_interval_s: float = 10.0,
     ):
         """
         Args:
@@ -83,16 +82,11 @@ class YamLeaderUDPClient:
             watchdog_timeout_s: Age (seconds) of the freshest packet beyond which the
                 link is treated as dead and ``get_observations`` raises. Clamped to be
                 at least ``max_obs_age_s``.
-            stats_log_interval_s: How often (seconds) to log a stream-health summary
-                (receive rate, packet loss, average age of consumed packets). Set to
-                0 to disable periodic logging (a final summary is still logged on
-                disconnect).
         """
         self.port = port
         self.host = host
         self.max_obs_age_s = max_obs_age_s
         self.watchdog_timeout_s = max(watchdog_timeout_s, max_obs_age_s)
-        self.stats_log_interval_s = stats_log_interval_s
 
         self._sock: socket.socket | None = None
         self._server_addr: tuple[str, int] | None = None
@@ -112,9 +106,6 @@ class YamLeaderUDPClient:
         self._consume_count: int = 0  # get_observations() calls that returned a sample
         self._consume_age_sum: float = 0.0  # sum of consumed-packet ages (seconds)
         self._consume_age_max: float = 0.0  # worst consumed-packet age (seconds)
-        self._last_stats_log_t: float = 0.0
-        # Snapshot of cumulative counters at the last periodic log, for windowed deltas.
-        self._log_snapshot: tuple = (0, 0, 0, 0, 0.0)
 
         # --- Diagnostics for attributing high "consumed age" spikes ---
         # Wall-clock of the last consume call, to measure how often the loop reads us.
@@ -126,9 +117,6 @@ class YamLeaderUDPClient:
         # it (a large jump => loss during the gap; ~1 => server paused/stalled).
         self._recv_gap_max_s: float = 0.0
         self._recv_gap_seq_jump: int = 0
-        # Windowed worst-cases, reset every periodic log so spikes don't hide forever.
-        self._consume_age_max_window: float = 0.0
-        self._recv_gap_max_window: float = 0.0
 
         self._stop = threading.Event()
         self._first_packet = threading.Event()
@@ -151,20 +139,16 @@ class YamLeaderUDPClient:
         now = time.monotonic()
         with self._lock:
             self._connect_t = now
-            self._last_stats_log_t = now
             self._pkts_received = 0
             self._pkts_lost = 0
             self._pkts_reordered = 0
             self._consume_count = 0
             self._consume_age_sum = 0.0
             self._consume_age_max = 0.0
-            self._log_snapshot = (0, 0, 0, 0, 0.0)
             self._last_consume_t = 0.0
             self._last_recv_iter_t = now
             self._recv_gap_max_s = 0.0
             self._recv_gap_seq_jump = 0
-            self._consume_age_max_window = 0.0
-            self._recv_gap_max_window = 0.0
 
         self._recv_thread = threading.Thread(target=self._recv_loop, name=f"yam-udp-recv-{self.port}", daemon=True)
         self._heartbeat_thread = threading.Thread(
@@ -261,8 +245,6 @@ class YamLeaderUDPClient:
         with self._lock:
             self._consume_count += 1
             self._consume_age_sum += age
-            if age > self._consume_age_max_window:
-                self._consume_age_max_window = age
             is_new_max = age > self._consume_age_max
             if is_new_max:
                 self._consume_age_max = age
@@ -291,7 +273,6 @@ class YamLeaderUDPClient:
                 f"loss, seq_jump~1 => server stalled/stopped publishing)."
             )
 
-        self._maybe_log_stats(now)
         return obs
 
     def _socket_has_unread_data(self) -> bool:
@@ -343,41 +324,6 @@ class YamLeaderUDPClient:
             "max_recv_gap_ms": 1e3 * recv_gap_max,
             "max_recv_gap_seq_jump": recv_gap_jump,
         }
-
-    def _maybe_log_stats(self, now: float) -> None:
-        """Log a windowed stream-health summary at most every ``stats_log_interval_s``."""
-        if self.stats_log_interval_s <= 0:
-            return
-        with self._lock:
-            window_s = now - self._last_stats_log_t
-            if window_s < self.stats_log_interval_s:
-                return
-            prev = self._log_snapshot
-            received, lost, reordered = self._pkts_received, self._pkts_lost, self._pkts_reordered
-            consume_count, age_sum = self._consume_count, self._consume_age_sum
-            # Read and reset the windowed worst-cases so each line reflects this window.
-            age_max_window = self._consume_age_max_window
-            recv_gap_max_window = self._recv_gap_max_window
-            self._consume_age_max_window = 0.0
-            self._recv_gap_max_window = 0.0
-            self._last_stats_log_t = now
-            self._log_snapshot = (received, lost, reordered, consume_count, age_sum)
-
-        d_received = received - prev[0]
-        d_lost = lost - prev[1]
-        d_reordered = reordered - prev[2]
-        d_consume = consume_count - prev[3]
-        d_age_sum = age_sum - prev[4]
-        d_published = d_received + d_lost
-        rate = d_received / window_s if window_s > 0 else 0.0
-        loss_pct = (100.0 * d_lost / d_published) if d_published else 0.0
-        avg_age_ms = (1e3 * d_age_sum / d_consume) if d_consume else 0.0
-        logger.info(
-            f"YAM leader UDP {self.host}:{self.port} [{window_s:.0f}s]: "
-            f"recv {d_received} @ {rate:.0f} Hz, lost {d_lost} ({loss_pct:.1f}%), reordered {d_reordered}, "
-            f"avg consumed age {avg_age_ms:.1f} ms (max {age_max_window * 1e3:.1f} ms), "
-            f"max recv gap {recv_gap_max_window * 1e3:.1f} ms"
-        )
 
     def request_observations(self):
         """Return a future-like wrapper around the freshest observation.
@@ -458,8 +404,6 @@ class YamLeaderUDPClient:
                 # can tell a long silent gap (loss/stall) from a busy-but-late stream.
                 if self._latest_recv_t > 0.0:
                     gap = recv_t - self._latest_recv_t
-                    if gap > self._recv_gap_max_window:
-                        self._recv_gap_max_window = gap
                     if gap > self._recv_gap_max_s:
                         self._recv_gap_max_s = gap
                         self._recv_gap_seq_jump = (seq - self._latest_seq) if self._latest_seq >= 0 else 1

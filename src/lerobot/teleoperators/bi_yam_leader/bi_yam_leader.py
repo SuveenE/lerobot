@@ -167,14 +167,12 @@ class BiYamLeader(Teleoperator):
                 host=config.server_host,
                 max_obs_age_s=config.max_obs_age_s,
                 watchdog_timeout_s=config.watchdog_timeout_s,
-                stats_log_interval_s=config.stats_log_interval_s,
             )
             self.right_arm = YamLeaderUDPClient(
                 port=config.right_arm_port,
                 host=config.server_host,
                 max_obs_age_s=config.max_obs_age_s,
                 watchdog_timeout_s=config.watchdog_timeout_s,
-                stats_log_interval_s=config.stats_log_interval_s,
             )
         else:
             self.left_arm = YamLeaderClient(port=config.left_arm_port, host=config.server_host)
