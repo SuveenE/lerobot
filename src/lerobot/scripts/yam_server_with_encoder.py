@@ -29,6 +29,14 @@ DEFAULT_ROBOT_PORT = 11333
 # Drop a UDP subscriber if we haven't heard a heartbeat from it for this long.
 _SUBSCRIBER_TTL_S = 3.0
 
+# Publish-loop health diagnostics: how often to print a summary while streaming, and
+# the factor of the target period beyond which a single get_observations() read is
+# flagged as a stall (the usual cause of gaps in the stream the client observes).
+_PUBLISH_STATS_INTERVAL_S = 5.0
+_STALL_WARN_FACTOR = 3.0
+# Minimum spacing between repeated slow-read warnings so a bad stretch can't spam.
+_STALL_WARN_INTERVAL_S = 1.0
+
 
 class EnhancedYamRobot(Robot):
     """
@@ -174,22 +182,81 @@ class UdpPublisherServer:
         period = 1.0 / self._publish_hz
         seq = 0
         next_t = time.monotonic()
+
+        # --- Publish-loop health accumulators (windowed; reset each summary) ---
+        # Timestamps use the integer-nanosecond clock so durations are exact.
+        win_start = time.monotonic_ns()
+        win_iters = 0  # loop iterations in this window
+        win_published = 0  # state packets actually sent (i.e. with subscribers)
+        win_overruns = 0  # iterations whose work exceeded the target period
+        win_obs_sum = 0.0  # sum of get_observations() durations (s)
+        win_obs_max = 0.0
+        win_work_sum = 0.0  # sum of full-iteration work durations (s)
+        win_work_max = 0.0
+        last_stall_warn = 0.0
+        stall_thresh = _STALL_WARN_FACTOR * period
+
         while True:
+            iter_start = time.monotonic_ns()
             self._drain_heartbeats()
             self._evict_stale()
 
+            obs_dt = 0.0
             if self._subscribers:
+                t0 = time.monotonic_ns()
                 obs = self._robot.get_observations()
+                obs_dt = (time.monotonic_ns() - t0) / 1e9
                 joint_pos = np.asarray(obs["joint_pos"])
                 gripper_pos = float(obs["gripper_pos"][0]) if "gripper_pos" in obs else None
                 io_input = float(obs["io_inputs"][0]) if "io_inputs" in obs else 0.0
                 packet = encode_state(seq, time.monotonic(), joint_pos, gripper_pos, io_input)
                 seq += 1
+                win_published += 1
                 for addr in list(self._subscribers.keys()):
                     try:
                         self._sock.sendto(packet, addr)
                     except OSError as e:
                         print(f"Warning: failed to send to {addr}: {e}")
+
+                # A single slow read stalls publishing and shows up client-side as a
+                # recv-gap with seq_jump>1. Warn immediately (throttled) when it happens.
+                now_s = time.monotonic()
+                if obs_dt > stall_thresh and now_s - last_stall_warn > _STALL_WARN_INTERVAL_S:
+                    last_stall_warn = now_s
+                    print(
+                        f"[publish-loop :{self._port}] slow get_observations(): "
+                        f"{obs_dt * 1e3:.1f} ms (> {stall_thresh * 1e3:.1f} ms = "
+                        f"{_STALL_WARN_FACTOR:.0f}x the {period * 1e3:.1f} ms target period); "
+                        f"the leader stream will gap here."
+                    )
+
+            work_dt = (time.monotonic_ns() - iter_start) / 1e9
+            win_iters += 1
+            win_obs_sum += obs_dt
+            win_obs_max = max(win_obs_max, obs_dt)
+            win_work_sum += work_dt
+            win_work_max = max(win_work_max, work_dt)
+            if work_dt > period:
+                win_overruns += 1
+
+            # Periodic health summary (only while actually streaming, to avoid idle noise).
+            win_elapsed = (time.monotonic_ns() - win_start) / 1e9
+            if win_elapsed >= _PUBLISH_STATS_INTERVAL_S:
+                if win_published > 0:
+                    actual_hz = win_published / win_elapsed
+                    avg_obs_ms = (win_obs_sum / win_iters * 1e3) if win_iters else 0.0
+                    avg_work_ms = (win_work_sum / win_iters * 1e3) if win_iters else 0.0
+                    print(
+                        f"[publish-loop :{self._port}] {win_published} pkts @ {actual_hz:.0f} Hz "
+                        f"(target {self._publish_hz:.0f}) over {win_elapsed:.0f}s, "
+                        f"subs={len(self._subscribers)} | "
+                        f"get_obs avg={avg_obs_ms:.1f}ms max={win_obs_max * 1e3:.1f}ms | "
+                        f"iter avg={avg_work_ms:.1f}ms max={win_work_max * 1e3:.1f}ms | "
+                        f"overruns(>{period * 1e3:.1f}ms)={win_overruns}"
+                    )
+                win_start = time.monotonic_ns()
+                win_iters = win_published = win_overruns = 0
+                win_obs_sum = win_obs_max = win_work_sum = win_work_max = 0.0
 
             next_t += period
             sleep_s = next_t - time.monotonic()
