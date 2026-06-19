@@ -107,6 +107,17 @@ def _is_camera_streamed(key: str) -> bool:
     return cam_name in allowed
 
 
+def _is_depth_key(key: str) -> bool:
+    """Identify depth observation keys so they can be excluded from streaming.
+
+    Depth maps are recorded as single-channel `observation.images.<cam>_depth`
+    columns. They're not useful in the live viewer (raw 16-bit millimeters) and
+    add bandwidth, so we never stream them via Rerun. Recording is unaffected.
+    """
+    last_segment = str(key).split(".")[-1].lower()
+    return last_segment.endswith("_depth") or last_segment == "depth"
+
+
 def _log_image(key: str, arr: np.ndarray) -> None:
     """Log an image to Rerun, optionally downscaling and/or JPEG-compressing.
 
@@ -281,7 +292,7 @@ def _log_rerun_data_sync(
                 if v.ndim == 1:
                     for i, vi in enumerate(v):
                         rr.log(f"{key}_{i}", rr.Scalars(float(vi)))
-                elif _is_camera_streamed(key):
+                elif not _is_depth_key(key) and _is_camera_streamed(key):
                     # UDP video has its own throttle and is independent of the
                     # Rerun image rate-limit, so send it before the skip check.
                     if _udp_sender is not None:
