@@ -530,26 +530,9 @@ class RealSenseCamera(Camera):
             self.latest_timestamp = None
             self.new_frame_event.clear()
 
-    def _default_async_read_timeout_ms(self) -> float:
-        """Computes a sensible default wait for a new frame based on the configured FPS.
-
-        When depth is enabled, the background thread only publishes a frame once
-        ``try_wait_for_frames`` returns a coherent color+depth pair. Depth
-        auto-exposure can transiently drop the synchronized frameset rate well
-        below the color FPS, so a fixed 200ms wait is too tight and causes
-        spurious timeouts. We therefore scale the wait with the frame period and
-        add headroom (more when depth is enabled).
-        """
-        base_ms = 200.0
-        if self.fps:
-            frame_period_ms = 1000.0 / self.fps
-            multiplier = 10 if self.use_depth else 5
-            return max(base_ms, multiplier * frame_period_ms)
-        return base_ms
-
     # NOTE(Steven): Missing implementation for depth for now
     @check_if_not_connected
-    def async_read(self, timeout_ms: float | None = None) -> NDArray[Any]:
+    def async_read(self, timeout_ms: float = 1000) -> NDArray[Any]:
         """
         Reads the latest available frame data (color) asynchronously.
 
@@ -559,10 +542,10 @@ class RealSenseCamera(Camera):
         It is “best effort” under high FPS.
 
         Args:
-            timeout_ms (float | None): Maximum time in milliseconds to wait for a frame
-                to become available. If None, an FPS-aware default is used (with extra
-                headroom when depth is enabled, since synchronized color+depth framesets
-                can arrive at a lower, jittery rate).
+            timeout_ms (float): Maximum time in milliseconds to wait for a frame
+                to become available. Defaults to 1000ms (1 second). The generous
+                default gives synchronized color+depth framesets (which can arrive
+                at a lower, jittery rate) room to recover without raising.
 
         Returns:
             np.ndarray:
@@ -573,9 +556,6 @@ class RealSenseCamera(Camera):
             TimeoutError: If no frame data becomes available within the specified timeout.
             RuntimeError: If the background thread died unexpectedly or another error occurs.
         """
-
-        if timeout_ms is None:
-            timeout_ms = self._default_async_read_timeout_ms()
 
         if self.thread is None or not self.thread.is_alive():
             raise RuntimeError(f"{self} read thread is not running.")
