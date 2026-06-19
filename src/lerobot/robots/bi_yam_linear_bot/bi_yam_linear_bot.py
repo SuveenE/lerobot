@@ -200,17 +200,34 @@ class BiYamLinearBot(Robot):
         `lerobot.scripts.lerobot_record` via
         `getattr(robot, "extra_dataset_features", {})`.
         """
-        if not getattr(self.config, "record_torques", False):
-            return {}
-
         features: dict[str, dict] = {}
-        for side in ("left", "right"):
-            names = list(self._build_per_arm_features(side, "eff").keys())
-            features[f"observation.{side}_torques"] = {
-                "dtype": "float32",
-                "shape": (len(names),),
-                "names": names,
+
+        if getattr(self.config, "record_torques", False):
+            for side in ("left", "right"):
+                names = list(self._build_per_arm_features(side, "eff").keys())
+                features[f"observation.{side}_torques"] = {
+                    "dtype": "float32",
+                    "shape": (len(names),),
+                    "names": names,
+                }
+
+        # Depth maps are recorded as their own single-channel `image` columns
+        # (lossless 16-bit PNG in millimeters), separate from the 3-channel color
+        # `observation.images.<cam>` columns. Gated per-camera on `use_depth`.
+        for cam_key, cam_cfg in self.config.cameras.items():
+            if not getattr(cam_cfg, "use_depth", False):
+                continue
+            if cam_cfg.height is None or cam_cfg.width is None:
+                raise ValueError(
+                    f"Camera '{cam_key}' has use_depth=True but height/width are unset; "
+                    "set them explicitly to record depth."
+                )
+            features[f"observation.images.{cam_key}_depth"] = {
+                "dtype": "image",
+                "shape": (cam_cfg.height, cam_cfg.width, 1),
+                "names": ["height", "width", "channels"],
             }
+
         return features
 
     # ------------------------------------------------------------------
@@ -328,6 +345,11 @@ class BiYamLinearBot(Robot):
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
             obs_dict[cam_key] = cam.async_read()
+            # For depth-enabled cameras, peek the depth frame captured alongside the
+            # color frame just read (no extra wait). Stored as (H, W, 1) uint16 mm.
+            if getattr(cam, "use_depth", False):
+                depth = cam.read_depth_latest()
+                obs_dict[f"{cam_key}_depth"] = depth[..., np.newaxis]
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
