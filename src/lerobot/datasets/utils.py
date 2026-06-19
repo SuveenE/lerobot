@@ -399,7 +399,16 @@ def load_image_as_numpy(
     Returns:
         np.ndarray: The image as a numpy array.
     """
-    img = PILImage.open(fpath).convert("RGB")
+    img = PILImage.open(fpath)
+    # Single-channel depth maps are stored as 16-bit ('I;16'/'I'/'F') PNGs holding raw
+    # millimeters. Load them as-is: no RGB conversion and no [0, 1] rescaling by 255.
+    if img.mode in ("I;16", "I", "F"):
+        img_array = np.array(img, dtype=dtype)  # (H, W)
+        if channel_first:  # (H, W) -> (1, H, W)
+            img_array = img_array[np.newaxis, ...]
+        return img_array
+
+    img = img.convert("RGB")
     img_array = np.array(img, dtype=dtype)
     if channel_first:  # (H, W, C) -> (C, H, W)
         img_array = np.transpose(img_array, (2, 0, 1))

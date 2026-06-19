@@ -849,6 +849,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Initialize streaming encoder for resumed recording
         if streaming_encoding and len(self.meta.video_keys) > 0:
+            if batch_encoding_size > 1:
+                logging.warning(
+                    "Both `streaming_encoding=True` and `batch_encoding_size>1` were set. "
+                    "These are mutually exclusive encoding strategies; batch encoding will be "
+                    "ignored because streaming already encodes each episode's video live."
+                )
+                # Streaming takes precedence: fully ignore batch encoding.
+                self.batch_encoding_size = 1
             self._streaming_encoder = StreamingVideoEncoder(
                 fps=self.meta.fps,
                 vcodec=self.vcodec,
@@ -1392,7 +1400,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # `meta.save_episode` need to be executed after encoding the videos
         self.meta.save_episode(episode_index, episode_length, episode_tasks, ep_stats, ep_metadata)
 
-        if has_video_keys and use_batched_encoding:
+        if has_video_keys and use_batched_encoding and not use_streaming:
+            # Streaming encoding already encodes and saves each episode's video immediately
+            # (frames are fed directly to the encoder and never written as PNGs on disk), so
+            # the batch path must be skipped to avoid re-encoding from non-existent images.
             # Check if we should trigger batch encoding
             self.episodes_since_last_encoding += 1
             if self.episodes_since_last_encoding == self.batch_encoding_size:
@@ -1402,8 +1413,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 self.episodes_since_last_encoding = 0
 
         if not episode_data:
-            # Reset episode buffer and clean up temporary images (if not already deleted during video encoding)
-            self.clear_episode_buffer(delete_images=len(self.meta.image_keys) > 0)
+            # Reset episode buffer and clean up temporary images (if not already deleted during video
+            # encoding). Only image-dtype frames are removed here; video-dtype frames may still be needed
+            # by deferred batch encoding, so they are left in place and cleaned up after encoding.
+            self.clear_episode_buffer(
+                delete_images=len(self.meta.image_keys) > 0, image_keys_only=True
+            )
 
     def _batch_save_episode_video(self, start_episode: int, end_episode: int | None = None) -> None:
         """
@@ -1705,7 +1720,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         }
         return metadata
 
-    def clear_episode_buffer(self, delete_images: bool = True) -> None:
+    def clear_episode_buffer(self, delete_images: bool = True, image_keys_only: bool = False) -> None:
         # Cancel streaming encoder if active
         if self._streaming_encoder is not None:
             self._streaming_encoder.cancel_episode()
@@ -1718,7 +1733,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
             episode_index = self.episode_buffer["episode_index"]
             if isinstance(episode_index, np.ndarray):
                 episode_index = episode_index.item() if episode_index.size == 1 else episode_index[0]
-            for cam_key in self.meta.camera_keys:
+            # When `image_keys_only` is set, only remove the temporary frames for image-dtype
+            # features (already embedded into the parquet file). Video-dtype frames must be kept
+            # because batch encoding (batch_encoding_size > 1, non-streaming) encodes them later.
+            cam_keys = self.meta.image_keys if image_keys_only else self.meta.camera_keys
+            for cam_key in cam_keys:
                 img_dir = self._get_image_file_dir(episode_index, cam_key)
                 if img_dir.is_dir():
                     shutil.rmtree(img_dir)
@@ -1824,6 +1843,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Initialize streaming encoder
         if streaming_encoding and len(obj.meta.video_keys) > 0:
+            if batch_encoding_size > 1:
+                logging.warning(
+                    "Both `streaming_encoding=True` and `batch_encoding_size>1` were set. "
+                    "These are mutually exclusive encoding strategies; batch encoding will be "
+                    "ignored because streaming already encodes each episode's video live."
+                )
+                # Streaming takes precedence: fully ignore batch encoding.
+                obj.batch_encoding_size = 1
             obj._streaming_encoder = StreamingVideoEncoder(
                 fps=fps,
                 vcodec=vcodec,
