@@ -62,7 +62,12 @@ def find_i2rt_script() -> str:
 
 
 def launch_server_process(
-    can_channel: str, gripper: str, mode: str, server_port: int, use_encoder_server: bool = False
+    can_channel: str,
+    gripper: str,
+    mode: str,
+    server_port: int,
+    use_encoder_server: bool = False,
+    transport: str = "portal",
 ):
     """Launch a single server process for a Yam arm."""
     if use_encoder_server:
@@ -90,8 +95,15 @@ def launch_server_process(
         str(server_port),
     ]
 
+    # The UDP transport is only implemented by the enhanced encoder server.
+    if transport != "portal":
+        if not use_encoder_server:
+            print(f"Error: transport='{transport}' requires the encoder server (use_encoder_server=True)")
+            sys.exit(1)
+        cmd += ["--transport", transport]
+
     server_type = "Enhanced (Encoder)" if use_encoder_server else "Standard"
-    print(f"Starting [{server_type}]: {' '.join(cmd)}")
+    print(f"Starting [{server_type}, transport={transport}]: {' '.join(cmd)}")
 
     try:
         return subprocess.Popen(cmd)

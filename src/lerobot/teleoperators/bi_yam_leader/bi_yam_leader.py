@@ -22,6 +22,7 @@ import portal
 
 from ..teleoperator import Teleoperator
 from .config_bi_yam_leader import BiYamLeaderConfig
+from .yam_leader_udp_client import YamLeaderUDPClient
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +159,24 @@ class BiYamLeader(Teleoperator):
         super().__init__(config)
         self.config = config
 
-        # Create clients for left and right leader arms
-        self.left_arm = YamLeaderClient(port=config.left_arm_port, host=config.server_host)
-        self.right_arm = YamLeaderClient(port=config.right_arm_port, host=config.server_host)
+        # Create clients for left and right leader arms. Both transports expose the
+        # same interface, so the rest of this class is transport-agnostic.
+        if config.transport == "udp":
+            self.left_arm = YamLeaderUDPClient(
+                port=config.left_arm_port,
+                host=config.server_host,
+                max_obs_age_s=config.max_obs_age_s,
+                watchdog_timeout_s=config.watchdog_timeout_s,
+            )
+            self.right_arm = YamLeaderUDPClient(
+                port=config.right_arm_port,
+                host=config.server_host,
+                max_obs_age_s=config.max_obs_age_s,
+                watchdog_timeout_s=config.watchdog_timeout_s,
+            )
+        else:
+            self.left_arm = YamLeaderClient(port=config.left_arm_port, host=config.server_host)
+            self.right_arm = YamLeaderClient(port=config.right_arm_port, host=config.server_host)
 
         # Store number of DOFs (will be set after connection)
         self._left_dofs = None

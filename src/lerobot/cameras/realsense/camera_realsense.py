@@ -586,7 +586,7 @@ class RealSenseCamera(Camera):
         return frame
 
     @check_if_not_connected
-    def async_read(self, timeout_ms: float = 200) -> NDArray[Any]:
+    def async_read(self, timeout_ms: float = 1000) -> NDArray[Any]:
         """
         Reads the latest available frame data (color) asynchronously.
 
@@ -597,7 +597,9 @@ class RealSenseCamera(Camera):
 
         Args:
             timeout_ms (float): Maximum time in milliseconds to wait for a frame
-                to become available. Defaults to 200ms (0.2 seconds).
+                to become available. Defaults to 1000ms (1 second). The generous
+                default gives synchronized color+depth framesets (which can arrive
+                at a lower, jittery rate) room to recover without raising.
 
         Returns:
             np.ndarray:
