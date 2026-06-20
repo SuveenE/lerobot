@@ -478,6 +478,28 @@ class BiYamLinearBot(Robot):
     # Reset / homing
     # ------------------------------------------------------------------
 
+    def reset_odometry(self, events: dict | None = None) -> None:
+        """Zero the FlowBase odometry so the next episode starts at the origin.
+
+        The FlowBase controller integrates wheel odometry continuously for the
+        lifetime of its process and never resets on its own, so without this
+        every episode would start at whatever pose the base drifted to during
+        the previous episode + reset window. The recorder calls this just
+        before each recorded episode so `base.x` / `base.y` / `base.theta`
+        always begin at 0.
+
+        `events` is accepted (and ignored) so this can be used as a drop-in
+        per-episode hook alongside `move_to_initial_position`.
+        """
+        if self._flow_base_client is None:
+            logger.warning("Cannot reset odometry: FlowBase client not connected")
+            return
+        try:
+            self._flow_base_client.reset_odometry()
+            logger.info("FlowBase odometry reset to origin")
+        except Exception as e:
+            logger.warning(f"Failed to reset FlowBase odometry: {e}")
+
     def _initial_arm_target(self, dofs: int) -> np.ndarray:
         """Home joint vector for one arm: all joints at 0.0, gripper open (1.0).
 

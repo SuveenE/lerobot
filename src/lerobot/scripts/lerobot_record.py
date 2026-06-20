@@ -579,6 +579,15 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+
+            # Robots that maintain their own running odometry (e.g. the
+            # FlowBase mobile base) expose `reset_odometry`. Zero it here so
+            # every recorded episode starts at the origin instead of wherever
+            # the base drifted during the previous episode + reset window.
+            reset_odometry = getattr(robot, "reset_odometry", None)
+            if callable(reset_odometry):
+                reset_odometry(events=events)
+
             record_loop(
                 robot=robot,
                 events=events,
