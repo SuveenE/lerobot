@@ -229,10 +229,15 @@ def init_rerun(session_name: str = "lerobot_control_loop") -> None:
     # Stream to a Rerun viewer running on another machine in the network.
     # Start the viewer there with `rerun --port 9876` and set e.g.
     # LEROBOT_RERUN_CONNECT="rerun+http://192.168.1.50:9876/proxy".
+    #
+    # Set LEROBOT_RERUN_SPAWN=0 to suppress launching a local Rerun viewer when no
+    # remote is configured. Combined with LEROBOT_VIDEO_UDP this gives a pure UDP
+    # video preview with no Rerun viewer at all (scalar logs are simply dropped).
     remote = os.getenv("LEROBOT_RERUN_CONNECT")
+    spawn = os.getenv("LEROBOT_RERUN_SPAWN", "1") != "0"
     if remote:
         rr.connect_grpc(url=remote)
-    else:
+    elif spawn:
         memory_limit = os.getenv("LEROBOT_RERUN_MEMORY_LIMIT", "10%")
         rr.spawn(memory_limit=memory_limit)
 
