@@ -18,6 +18,11 @@ from dataclasses import dataclass
 
 from ..config import TeleoperatorConfig
 
+# Supported leader-state transports. Kept as a module constant (not a typing.Literal
+# on the field) because the draccus CLI parser used by lerobot has no decoder for
+# Literal types.
+TRANSPORTS = ("portal", "udp")
+
 
 @TeleoperatorConfig.register_subclass("bi_yam_leader")
 @dataclass
@@ -31,4 +36,24 @@ class BiYamLeaderConfig(TeleoperatorConfig):
 
     # Server host (usually localhost for local setup)
     server_host: str = "localhost"
+
+    # Network transport for reading leader arm state. One of TRANSPORTS:
+    # - "portal": TCP request/response RPC (default, blocks on a round-trip per frame)
+    # - "udp": leader servers push state datagrams; client reads the freshest sample
+    #   locally with no per-frame round-trip. Lower latency, no delivery guarantee.
+    transport: str = "portal"
+
+    # UDP transport only: age (s) of the freshest packet beyond which the stream is
+    # considered "stale". Past this we keep serving the last-known sample but log a
+    # throttled warning. Ignored when transport == "portal".
+    max_obs_age_s: float = 0.1
+
+    # UDP transport only: age (s) of the freshest packet beyond which the link is
+    # treated as dead and get_observations() raises (watchdog hard-fail). Must be
+    # >= max_obs_age_s. Ignored when transport == "portal".
+    watchdog_timeout_s: float = 0.5
+
+    def __post_init__(self):
+        if self.transport not in TRANSPORTS:
+            raise ValueError(f"transport must be one of {TRANSPORTS}, got {self.transport!r}")
 

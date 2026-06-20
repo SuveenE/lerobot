@@ -325,20 +325,23 @@ def record_loop(
     n_overruns = 0
     work_sum = 0.0
     work_max = 0.0
-    _section_t = 0.0
+    # Timestamps are kept as integer nanoseconds (time.perf_counter_ns) so interval
+    # subtractions are exact; we convert to float seconds only for the small resulting
+    # durations, where double precision is more than enough.
+    _section_t = 0
 
     def _record_timing(name: str) -> None:
         nonlocal _section_t
-        now = time.perf_counter()
-        dt = now - _section_t
+        now = time.perf_counter_ns()
+        dt = (now - _section_t) / 1e9
         timing_sum[name] = timing_sum.get(name, 0.0) + dt
         timing_max[name] = max(timing_max.get(name, 0.0), dt)
         _section_t = now
 
     timestamp = 0
-    start_episode_t = time.perf_counter()
+    start_episode_t = time.perf_counter_ns()
     while timestamp < control_time_s:
-        start_loop_t = time.perf_counter()
+        start_loop_t = time.perf_counter_ns()
 
         if log_timing:
             _section_t = start_loop_t
@@ -434,7 +437,7 @@ def record_loop(
             if log_timing:
                 _record_timing("display_data")
 
-        dt_s = time.perf_counter() - start_loop_t
+        dt_s = (time.perf_counter_ns() - start_loop_t) / 1e9
         busy_wait(1 / fps - dt_s)
 
         # Accumulate stats for the end-of-loop summary. A frame is "late" (overrun)
@@ -447,7 +450,7 @@ def record_loop(
             if dt_s > 1 / fps:
                 n_overruns += 1
 
-        timestamp = time.perf_counter() - start_episode_t
+        timestamp = (time.perf_counter_ns() - start_episode_t) / 1e9
 
     # Emit a single timing summary for the whole loop so the logs stay readable.
     if log_timing and n_iters > 0:
