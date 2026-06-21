@@ -111,6 +111,10 @@ class BiYamLinearBot(Robot):
         self._right_dofs = None
 
         self._flow_base_client = None
+        # Linear-rail motor rad <-> linear meter conversion factor, captured from
+        # the FlowBase controller's homing calibration. Used to expose the rail
+        # in meters / m/s instead of motor rad / rad/s. None until connected.
+        self._meters_per_rad: float | None = None
 
     # ------------------------------------------------------------------
     # Feature declarations
@@ -143,6 +147,9 @@ class BiYamLinearBot(Robot):
 
     @property
     def _base_obs_ft(self) -> dict[str, type]:
+        # Units: base.x/base.y in m, base.theta in rad (the only angular state),
+        # rail.position in m, rail.velocity in m/s, base.cmd.*.vel in m/s
+        # (theta in rad/s), rail.cmd.vel in m/s.
         ft: dict[str, type] = {
             "base.x": float,
             "base.y": float,
@@ -166,6 +173,8 @@ class BiYamLinearBot(Robot):
 
     @property
     def _base_action_ft(self) -> dict[str, type]:
+        # Units: base.x.vel/base.y.vel in m/s, base.theta.vel in rad/s,
+        # rail.vel in m/s.
         ft: dict[str, type] = {
             "base.x.vel": float,
             "base.y.vel": float,
@@ -275,6 +284,24 @@ class BiYamLinearBot(Robot):
             self._flow_base_client.running = False
             if self._flow_base_client._thread.is_alive():
                 self._flow_base_client._thread.join(timeout=1.0)
+
+            # Cache the rail's meters_per_rad calibration so we can report and
+            # command the rail in linear units (m / m/s). The controller derives
+            # it during startup homing; it's constant for the session.
+            if self.config.with_linear_rail:
+                try:
+                    rail_state = self._flow_base_client.get_linear_rail_state()
+                    self._meters_per_rad = rail_state.get("meters_per_rad")
+                    if self._meters_per_rad is None:
+                        logger.warning(
+                            "FlowBase rail is not calibrated (meters_per_rad is None); "
+                            "rail observations/commands will fall back to motor rad units."
+                        )
+                    else:
+                        logger.info(f"Linear rail meters_per_rad = {self._meters_per_rad:.6f}")
+                except Exception:
+                    logger.exception("Failed to read linear rail calibration; rail units may be wrong")
+
             logger.info(
                 f"Connected to FlowBase at {self.config.flow_base_host} "
                 f"(linear rail: {self.config.with_linear_rail})"
@@ -325,10 +352,20 @@ class BiYamLinearBot(Robot):
         obs_dict["base.theta"] = float(rotation)
 
         # --- Linear rail ---
+        # The controller exposes both motor-space (rad / rad/s) and calibrated
+        # linear-space (m / m/s) values. We record the linear ones so the rail
+        # matches the rest of the metric state space; only base.theta stays rad.
         if self.config.with_linear_rail:
             rail = self._flow_base_client.get_linear_rail_state()
-            obs_dict["rail.position"] = float(rail["position"])
-            obs_dict["rail.velocity"] = float(rail["velocity"])
+            mpr = rail.get("meters_per_rad")
+            if mpr is not None:
+                self._meters_per_rad = mpr
+            pos_linear = rail.get("position_linear")
+            vel_linear = rail.get("velocity_linear")
+            # Fall back to motor units only if the rail is uncalibrated (linear
+            # fields are None); in normal operation homing has already run.
+            obs_dict["rail.position"] = float(pos_linear) if pos_linear is not None else float(rail["position"])
+            obs_dict["rail.velocity"] = float(vel_linear) if vel_linear is not None else float(rail["velocity"])
             obs_dict["rail.upper_limit"] = 1.0 if rail.get("upper_limit_triggered") else 0.0
             obs_dict["rail.lower_limit"] = 1.0 if rail.get("lower_limit_triggered") else 0.0
 
@@ -339,7 +376,15 @@ class BiYamLinearBot(Robot):
         obs_dict["base.cmd.y.vel"] = float(vel[1])
         obs_dict["base.cmd.theta.vel"] = float(vel[2])
         if self.config.with_linear_rail:
-            obs_dict["rail.cmd.vel"] = float(vel[3]) if len(vel) > 3 else 0.0
+            # The resolved command rail velocity is in motor rad/s; convert to
+            # m/s so it matches the m/s rail.velocity observation and action,
+            # then cap it so the recorded action stays within ±rail_max_vel_mps.
+            rail_cmd_radps = float(vel[3]) if len(vel) > 3 else 0.0
+            rail_cmd_mps = (
+                rail_cmd_radps * self._meters_per_rad if self._meters_per_rad is not None else rail_cmd_radps
+            )
+            cap = self.config.rail_max_vel_mps
+            obs_dict["rail.cmd.vel"] = float(np.clip(rail_cmd_mps, -cap, cap))
 
         # --- cameras ---
         for cam_key, cam in self.cameras.items():
@@ -457,9 +502,17 @@ class BiYamLinearBot(Robot):
             base_vel_norm = base_vel / np.where(base_max != 0, base_max, 1.0)
 
             if self.config.with_linear_rail:
-                rail_vel = action.get("rail.vel", 0.0)
+                # Policy outputs rail.vel in m/s. The server expects a normalised
+                # [-1, 1] command that it scales by lift_max_vel (rad/s), so we go
+                # m/s -> motor rad/s (via meters_per_rad) -> normalised.
+                rail_vel_mps = action.get("rail.vel", 0.0)
+                # Cap the policy's rail command to ±rail_max_vel_mps (m/s).
+                cap = self.config.rail_max_vel_mps
+                rail_vel_mps = float(np.clip(rail_vel_mps, -cap, cap))
                 rail_max = self.config.rail_max_vel if self.config.rail_max_vel != 0 else 1.0
-                rail_vel_norm = rail_vel / rail_max
+                # m/s -> motor rad/s (fall back to raw value if uncalibrated).
+                rail_vel_radps = rail_vel_mps / self._meters_per_rad if self._meters_per_rad else rail_vel_mps
+                rail_vel_norm = rail_vel_radps / rail_max
                 vel_cmd = np.concatenate([base_vel_norm, [rail_vel_norm]])
             else:
                 vel_cmd = base_vel_norm

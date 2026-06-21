@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
 
 from lerobot.cameras import CameraConfig
@@ -40,8 +41,17 @@ class BiYamLinearBotConfig(RobotConfig):
     # FlowBase controller velocity limits – must match the values used by the
     # running flow_base_controller so that policy outputs (physical velocities)
     # are correctly normalised to the [-1, 1] range the controller expects.
-    base_max_vel: tuple[float, float, float] = (0.4, 0.4, 1.5)
+    # Base limits align with FlowBaseClient DEFAULT_MAX_VEL_{X,Y,THETA}.
+    base_max_vel: tuple[float, float, float] = (0.5, 0.5, math.pi / 2)
+    # Rail normalisation scale in motor rad/s — must match the server's
+    # lift_max_vel. The robot records/commands the rail in m/s (converted via
+    # the controller's meters_per_rad calibration); this value only sets the
+    # rad/s span the server maps the normalised [-1, 1] command onto.
     rail_max_vel: float = 7.0
+    # Linear rail speed cap in m/s (mirrors FlowBaseClient DEFAULT_MAX_VEL_Z).
+    # Bounds both the recorded rail command and policy rail output so the rail
+    # action space stays within ±this, like base_max_vel does for the base.
+    rail_max_vel_mps: float = 0.5
 
     # Optional: Maximum relative target for arm safety
     left_arm_max_relative_target: float | dict[str, float] | None = None
