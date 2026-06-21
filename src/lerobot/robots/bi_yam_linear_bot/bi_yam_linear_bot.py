@@ -288,19 +288,31 @@ class BiYamLinearBot(Robot):
             # Cache the rail's meters_per_rad calibration so we can report and
             # command the rail in linear units (m / m/s). The controller derives
             # it during startup homing; it's constant for the session.
+            #
+            # We fail hard if the rail is enabled but uncalibrated: recording would
+            # otherwise silently fall back to motor rad under the rail.* keys while
+            # claiming meters, producing a dataset with mislabeled units. Better to
+            # stop now than to discover the corruption after a recording session.
             if self.config.with_linear_rail:
                 try:
                     rail_state = self._flow_base_client.get_linear_rail_state()
-                    self._meters_per_rad = rail_state.get("meters_per_rad")
-                    if self._meters_per_rad is None:
-                        logger.warning(
-                            "FlowBase rail is not calibrated (meters_per_rad is None); "
-                            "rail observations/commands will fall back to motor rad units."
-                        )
-                    else:
-                        logger.info(f"Linear rail meters_per_rad = {self._meters_per_rad:.6f}")
-                except Exception:
-                    logger.exception("Failed to read linear rail calibration; rail units may be wrong")
+                except Exception as e:
+                    raise RuntimeError(
+                        "Failed to read linear rail calibration from the FlowBase controller; "
+                        "cannot record the rail in meters. Check that the flow_base_controller "
+                        "is running and reachable."
+                    ) from e
+
+                self._meters_per_rad = rail_state.get("meters_per_rad")
+                if self._meters_per_rad is None:
+                    raise RuntimeError(
+                        "FlowBase linear rail is not calibrated (meters_per_rad is None). "
+                        "Restart the flow_base_controller so its startup limit-switch homing "
+                        "can calibrate the rail, or run with --robot.with_linear_rail=false. "
+                        "Recording would otherwise save rail.position/velocity in motor rad "
+                        "while labeling them as meters."
+                    )
+                logger.info(f"Linear rail meters_per_rad = {self._meters_per_rad:.6f}")
 
             logger.info(
                 f"Connected to FlowBase at {self.config.flow_base_host} "
@@ -376,13 +388,11 @@ class BiYamLinearBot(Robot):
         obs_dict["base.cmd.y.vel"] = float(vel[1])
         obs_dict["base.cmd.theta.vel"] = float(vel[2])
         if self.config.with_linear_rail:
-            # The resolved command rail velocity is in motor rad/s; convert to
-            # m/s so it matches the m/s rail.velocity observation and action,
-            # then cap it so the recorded action stays within ±rail_max_vel_mps.
-            rail_cmd_radps = float(vel[3]) if len(vel) > 3 else 0.0
-            rail_cmd_mps = (
-                rail_cmd_radps * self._meters_per_rad if self._meters_per_rad is not None else rail_cmd_radps
-            )
+            # The resolved command rail velocity is already in m/s: the controller
+            # scales the gamepad by lift_max_vel_ms and passes remote commands
+            # through unchanged. Cap it so the recorded action stays within
+            # ±rail_max_vel_mps, matching the m/s rail.velocity observation.
+            rail_cmd_mps = float(vel[3]) if len(vel) > 3 else 0.0
             cap = self.config.rail_max_vel_mps
             obs_dict["rail.cmd.vel"] = float(np.clip(rail_cmd_mps, -cap, cap))
 
@@ -494,26 +504,24 @@ class BiYamLinearBot(Robot):
                 action.get("base.theta.vel", 0.0),
             ])
 
-            # Policy outputs are physical velocities (m/s, rad/s) recorded
-            # from get_current_command, but the FlowBase controller expects
-            # normalised [-1, 1] commands and scales internally by max_vel /
-            # lift_max_vel.  Divide here to avoid double-scaling.
+            # Base policy outputs are physical velocities (m/s, rad/s) recorded
+            # from get_current_command, but the FlowBase controller expects the
+            # base axes as normalised [-1, 1] commands that it scales internally
+            # by max_vel. Divide here to avoid double-scaling. (The rail is sent
+            # in physical m/s instead; see below.)
             base_max = np.array(self.config.base_max_vel)
             base_vel_norm = base_vel / np.where(base_max != 0, base_max, 1.0)
 
             if self.config.with_linear_rail:
-                # Policy outputs rail.vel in m/s. The server expects a normalised
-                # [-1, 1] command that it scales by lift_max_vel (rad/s), so we go
-                # m/s -> motor rad/s (via meters_per_rad) -> normalised.
+                # The controller takes the rail command in physical m/s and converts
+                # it to motor rad/s server-side via meters_per_rad, so we send
+                # rail.vel straight through after capping at ±rail_max_vel_mps. Note
+                # the mixed command vector: base axes are normalised, the rail is
+                # physical m/s.
                 rail_vel_mps = action.get("rail.vel", 0.0)
-                # Cap the policy's rail command to ±rail_max_vel_mps (m/s).
                 cap = self.config.rail_max_vel_mps
                 rail_vel_mps = float(np.clip(rail_vel_mps, -cap, cap))
-                rail_max = self.config.rail_max_vel if self.config.rail_max_vel != 0 else 1.0
-                # m/s -> motor rad/s (fall back to raw value if uncalibrated).
-                rail_vel_radps = rail_vel_mps / self._meters_per_rad if self._meters_per_rad else rail_vel_mps
-                rail_vel_norm = rail_vel_radps / rail_max
-                vel_cmd = np.concatenate([base_vel_norm, [rail_vel_norm]])
+                vel_cmd = np.concatenate([base_vel_norm, [rail_vel_mps]])
             else:
                 vel_cmd = base_vel_norm
 

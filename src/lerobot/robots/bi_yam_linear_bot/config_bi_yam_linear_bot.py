@@ -43,10 +43,10 @@ class BiYamLinearBotConfig(RobotConfig):
     # are correctly normalised to the [-1, 1] range the controller expects.
     # Base limits align with FlowBaseClient DEFAULT_MAX_VEL_{X,Y,THETA}.
     base_max_vel: tuple[float, float, float] = (0.5, 0.5, math.pi / 2)
-    # Rail normalisation scale in motor rad/s — must match the server's
-    # lift_max_vel. The robot records/commands the rail in m/s (converted via
-    # the controller's meters_per_rad calibration); this value only sets the
-    # rad/s span the server maps the normalised [-1, 1] command onto.
+    # Deprecated / unused: the rail is now commanded end-to-end in physical m/s
+    # (the controller converts m/s -> motor rad/s via its meters_per_rad
+    # calibration), so this rad/s normalisation scale is no longer applied by the
+    # robot. Kept only for backward compatibility with existing configs/CLIs.
     rail_max_vel: float = 7.0
     # Linear rail speed cap in m/s (mirrors FlowBaseClient DEFAULT_MAX_VEL_Z).
     # Bounds both the recorded rail command and policy rail output so the rail
