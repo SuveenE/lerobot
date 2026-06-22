@@ -53,6 +53,23 @@ class BiYamLinearBotConfig(RobotConfig):
     # action space stays within ±this, like base_max_vel does for the base.
     rail_max_vel_mps: float = 0.5
 
+    # Target linear-rail height (meters, in the same calibrated `rail.position`
+    # space recorded in the dataset) that the rail is driven to at the start of
+    # every recorded episode via `move_to_initial_height()`. None disables the
+    # behaviour entirely (rail is left wherever the operator parked it). The
+    # move is an absolute closed-loop seek, so it works whether the rail needs
+    # to go up or down to reach the target.
+    rail_initial_height_m: float | None = None
+    # Closed-loop parameters for the start-of-episode rail height move. The
+    # commanded velocity is `clip(kp * (target - position), ±max_speed)` in m/s,
+    # mirroring the `move_linear_rail_to` controller in flow_base_client.py.
+    rail_move_kp: float = 1.0
+    rail_move_max_speed_mps: float = 0.05
+    rail_move_tolerance_m: float = 0.005
+    # Safety timeout (s): give up the height move if it hasn't converged, so a
+    # stuck/obstructed rail can't block the recording loop indefinitely.
+    rail_move_timeout_s: float = 30.0
+
     # Optional: Maximum relative target for arm safety
     left_arm_max_relative_target: float | dict[str, float] | None = None
     right_arm_max_relative_target: float | dict[str, float] | None = None

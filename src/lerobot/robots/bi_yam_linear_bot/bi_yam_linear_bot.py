@@ -561,6 +561,98 @@ class BiYamLinearBot(Robot):
         except Exception as e:
             logger.warning(f"Failed to reset FlowBase odometry: {e}")
 
+    def _send_rail_velocity(self, vel_mps: float) -> None:
+        """Command the linear rail at `vel_mps` (m/s, +up) leaving the base still.
+
+        The FlowBaseClient heartbeat thread is stopped in `connect()` (so it
+        can't spam zeros over joystick input), which means
+        `FlowBaseClient.set_linear_rail_velocity` -- which only mutates the dict
+        the heartbeat reads -- would never actually be sent. So, exactly like
+        `send_action`, we push a full 4-DOF command straight through the portal
+        RPC client: base axes are normalised (0 here = stationary) and the rail
+        is physical m/s, capped at ±rail_max_vel_mps.
+        """
+        cap = self.config.rail_max_vel_mps
+        vel_mps = float(np.clip(vel_mps, -cap, cap))
+        vel_cmd = np.array([0.0, 0.0, 0.0, vel_mps])
+        self._flow_base_client.client.set_target_velocity(
+            {"target_velocity": vel_cmd, "frame": "local"}
+        ).result()
+
+    def _rail_position_m(self, rail_state: dict[str, Any]) -> float:
+        """Current rail height in meters, falling back to motor rad if uncalibrated."""
+        pos_linear = rail_state.get("position_linear")
+        return float(pos_linear) if pos_linear is not None else float(rail_state["position"])
+
+    def move_to_initial_height(self, events: dict | None = None) -> None:
+        """Drive the linear rail to `config.rail_initial_height_m` (absolute, m).
+
+        Called at the start of every recorded episode (alongside
+        `reset_odometry`) so each episode begins at the same working height.
+        The move is a closed-loop P-controller on rail velocity -- identical in
+        spirit to `move_linear_rail_to` in flow_base_client.py -- so it converges
+        from either direction and stops on limit switches.
+
+        SAFETY: the rail seeks an absolute height and may descend. The intended
+        workflow is that the operator parks the base somewhere the arms can
+        safely lower during the preceding reset window (where the arms are also
+        homed by `move_to_initial_position`); the rail then descends here when
+        the next episode starts. The move aborts cleanly on `events["exit_early"]`
+        (the keyboard right-arrow) and on a wall-clock timeout.
+
+        No-op when the rail is disabled or `rail_initial_height_m` is unset.
+        """
+        if not self.config.with_linear_rail or self.config.rail_initial_height_m is None:
+            return
+        if self._flow_base_client is None:
+            logger.warning("Cannot move rail to initial height: FlowBase client not connected")
+            return
+
+        target = float(self.config.rail_initial_height_m)
+        kp = self.config.rail_move_kp
+        max_speed = self.config.rail_move_max_speed_mps
+        tolerance = self.config.rail_move_tolerance_m
+        timeout = self.config.rail_move_timeout_s
+
+        def _should_exit() -> bool:
+            return events is not None and events.get("exit_early", False)
+
+        logger.info(f"Moving linear rail to initial height {target:.4f} m")
+        start_t = time.perf_counter()
+        try:
+            while not _should_exit():
+                rail_state = self._flow_base_client.get_linear_rail_state()
+                pos = self._rail_position_m(rail_state)
+                error = target - pos
+                if abs(error) < tolerance:
+                    break
+                if rail_state.get("upper_limit_triggered") and error > 0:
+                    logger.warning("Rail hit upper limit during height move; stopping.")
+                    break
+                if rail_state.get("lower_limit_triggered") and error < 0:
+                    logger.warning("Rail hit lower limit during height move; stopping.")
+                    break
+                if time.perf_counter() - start_t > timeout:
+                    logger.warning(
+                        f"Rail height move timed out after {timeout:.0f}s at {pos:.4f} m "
+                        f"(target {target:.4f} m); continuing."
+                    )
+                    break
+                self._send_rail_velocity(kp * error)
+                time.sleep(0.05)
+        finally:
+            # Always stop the rail, even on abort / exception, so it can't keep
+            # creeping into the recorded episode.
+            try:
+                self._send_rail_velocity(0.0)
+            except Exception as e:
+                logger.warning(f"Failed to stop rail after height move: {e}")
+            time.sleep(0.2)
+
+        # Consume the exit flag so an abort here doesn't leak into the episode.
+        if events is not None and events.get("exit_early", False):
+            events["exit_early"] = False
+
     def _initial_arm_target(self, dofs: int) -> np.ndarray:
         """Home joint vector for one arm: all joints at 0.0, gripper open (1.0).
 

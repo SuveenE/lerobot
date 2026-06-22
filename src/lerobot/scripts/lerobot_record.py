@@ -588,6 +588,16 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             if callable(reset_odometry):
                 reset_odometry(events=events)
 
+            # Robots with a height axis (e.g. the Linear Bot's lift rail) expose
+            # `move_to_initial_height` to drive to a fixed working height before
+            # every episode. This runs after the reset window where the operator
+            # parks the base somewhere the arms can safely lower (and the arms
+            # are homed via `move_to_initial_position`), so the rail can descend
+            # to its start height here without colliding.
+            move_to_initial_height = getattr(robot, "move_to_initial_height", None)
+            if callable(move_to_initial_height):
+                move_to_initial_height(events=events)
+
             record_loop(
                 robot=robot,
                 events=events,
