@@ -9,10 +9,11 @@ the teaching handle.
 Based on i2rt's minimum_gello.py but with encoder support.
 """
 
+import copy
 import socket
 import time
 from dataclasses import dataclass
-from typing import Dict, Literal
+from typing import Dict, Literal, Optional
 
 import numpy as np
 import portal
@@ -46,10 +47,27 @@ class EnhancedYamRobot(Robot):
     to provide gripper control information.
     """
 
-    def __init__(self, robot: MotorChainRobot, is_teaching_handle: bool = False):
+    def __init__(
+        self,
+        robot: MotorChainRobot,
+        is_teaching_handle: bool = False,
+        hold_button_index: int = 1,
+    ):
         self._robot = robot
         self._motor_chain = robot.motor_chain
         self._is_teaching_handle = is_teaching_handle
+
+        # --- Clutch / hold-in-place button (toggle) ---
+        # When the teaching-handle button is pressed, we lock the leader arm at its
+        # current pose (commanding it with the arm's default kp/kd instead of the
+        # backdrivable gravity-comp it normally streams in) and freeze the published
+        # observation to that snapshot. Because the follower simply tracks the
+        # leader's streamed pose, freezing the leader pose parks the follower too.
+        # Pressing the button again releases the lock back to gravity comp.
+        self._hold_button_index = hold_button_index
+        self._prev_button_pressed = False
+        self._hold_active = False
+        self._held_obs: Optional[Dict[str, np.ndarray]] = None
 
     def num_dofs(self) -> int:
         """Get the number of joints in the robot."""
@@ -113,8 +131,66 @@ class EnhancedYamRobot(Robot):
                 # Provide defaults
                 obs["gripper_pos"] = np.array([1.0])
                 obs["io_inputs"] = np.array([0.0])
-        
+
+            obs = self._apply_clutch(obs)
+
         return obs
+
+    def _apply_clutch(self, obs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """Toggle a hold/clutch on the teaching-handle button.
+
+        Edge-triggered on button press: each press flips the lock state. While
+        locked, the leader arm is held at the snapshot pose and this returns the
+        frozen snapshot observation so the follower parks in place; while
+        unlocked, the live observation is returned unchanged.
+        """
+        io = obs.get("io_inputs")
+        try:
+            pressed = bool(float(io[self._hold_button_index]) > 0.5)
+        except (TypeError, IndexError, ValueError):
+            # Button state unavailable this cycle; don't change lock state.
+            return self._held_obs if (self._hold_active and self._held_obs is not None) else obs
+
+        rising_edge = pressed and not self._prev_button_pressed
+        self._prev_button_pressed = pressed
+
+        if rising_edge:
+            self._hold_active = not self._hold_active
+            if self._hold_active:
+                self._enter_hold(obs)
+            else:
+                self._exit_hold()
+
+        if self._hold_active and self._held_obs is not None:
+            return self._held_obs
+        return obs
+
+    def _enter_hold(self, obs: Dict[str, np.ndarray]) -> None:
+        """Lock the leader arm at its current pose and latch the snapshot obs."""
+        n = self._robot.num_dofs()
+        hold_pos = np.asarray(obs["joint_pos"], dtype=float)[:n]
+        # command_joint_pos uses the arm's default kp/kd -> firm position hold
+        # (plus the gravity comp that's always applied in the control loop).
+        self._robot.command_joint_pos(hold_pos)
+        self._held_obs = copy.deepcopy(obs)
+        print("[clutch] HOLD engaged: leader locked, follower will park in place. Press button again to release.")
+
+    def _exit_hold(self) -> None:
+        """Release the leader back to backdrivable gravity-comp mode."""
+        n = self._robot.num_dofs()
+        cur = np.asarray(self._robot.get_joint_pos(), dtype=float)[:n]
+        # kp=kd=0 -> zero stiffness command; the control loop keeps applying
+        # gravity compensation, so the arm is backdrivable again (no jump).
+        self._robot.command_joint_state(
+            {
+                "pos": cur,
+                "vel": np.zeros(n),
+                "kp": np.zeros(n),
+                "kd": np.zeros(n),
+            }
+        )
+        self._held_obs = None
+        print("[clutch] HOLD released: leader back to gravity comp, teleop resumed.")
 
 
 class ServerRobot:
@@ -282,6 +358,11 @@ class Args:
     transport: Literal["portal", "udp"] = "portal"
     # UDP transport only: how often to publish observations.
     publish_hz: float = 200.0
+    # Teaching-handle only: which encoder button toggles the hold/clutch.
+    # The clutch is evaluated server-side from the full io_inputs list, so any
+    # index works regardless of what the UDP wire forwards.
+    # 0 = top button, 1 = second/bottom (user-programmable) button.
+    hold_button_index: int = 1
 
 
 def main(args: Args) -> None:
@@ -293,7 +374,11 @@ def main(args: Args) -> None:
     base_robot = get_yam_robot(channel=args.can_channel, gripper_type=gripper_type)
 
     # Wrap it with encoder support
-    robot = EnhancedYamRobot(base_robot, is_teaching_handle=is_teaching_handle)
+    robot = EnhancedYamRobot(
+        base_robot,
+        is_teaching_handle=is_teaching_handle,
+        hold_button_index=args.hold_button_index,
+    )
 
     # Start the server with the requested transport
     if args.transport == "udp":
