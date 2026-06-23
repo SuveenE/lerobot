@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import threading
 import time
 from functools import cached_property
 from typing import Any
@@ -629,10 +630,30 @@ class BiYamLinearBot(Robot):
         def _should_exit() -> bool:
             return events is not None and events.get("exit_early", False)
 
+        # Why a background sender thread: the FlowBase controller invalidates a
+        # remote command after 0.2s (TimeoutRemoteCommand) and falls back to the
+        # gamepad / zero, stopping the rail. Our control loop does two blocking
+        # RPCs per iteration (get_linear_rail_state + set_target_velocity), and
+        # whenever a cycle stretches past that window the rail stop-starts --
+        # which is the shaking. Calibration never stutters because it re-applies
+        # the motor velocity in-process every ~50ms. We reproduce that here: a
+        # 50Hz sender keeps the controller's command fresh from a shared target,
+        # while the (slower) main loop only updates that target. `_rail_cmd_vel`
+        # is a single float; assignment is atomic under the GIL so no lock needed.
+        self._rail_cmd_vel = 0.0
+        sender_stop = threading.Event()
+
+        def _sender() -> None:
+            while not sender_stop.is_set():
+                try:
+                    self._send_rail_velocity(self._rail_cmd_vel)
+                except Exception as e:
+                    logger.debug(f"Rail velocity resend failed: {e}")
+                time.sleep(0.02)
+
         # Slew-rate limit the commanded velocity so the rail eases in/out instead
-        # of stepping straight to the speed cap (which is what makes it jerky).
-        # `prev_vel` is the last command we sent; we let it change by at most
-        # `max_accel * dt` toward the new desired velocity each control step.
+        # of stepping straight to the speed cap. `prev_vel` is the last target we
+        # published; it changes by at most `max_accel * dt` per control step.
         prev_vel = 0.0
         last_cmd_t = time.perf_counter()
 
@@ -643,13 +664,15 @@ class BiYamLinearBot(Robot):
             last_cmd_t = now
             max_dv = max_accel * dt
             prev_vel += float(np.clip(desired - prev_vel, -max_dv, max_dv))
-            self._send_rail_velocity(prev_vel)
+            self._rail_cmd_vel = prev_vel
             return prev_vel
 
         logger.info(
             f"Moving linear rail to initial height {target:.4f} m "
             f"(speed cap {max_speed:.4f} m/s, accel {max_accel:.4f} m/s^2)"
         )
+        sender = threading.Thread(target=_sender, name="rail-height-sender", daemon=True)
+        sender.start()
         start_t = time.perf_counter()
         try:
             while not _should_exit():
@@ -673,17 +696,23 @@ class BiYamLinearBot(Robot):
                 # P-controller velocity, speed-capped, then acceleration-limited.
                 desired = float(np.clip(kp * error, -max_speed, max_speed))
                 _ramp_toward(desired)
-                time.sleep(0.05)
+                time.sleep(0.02)
         finally:
-            # Smoothly ramp the rail down to a stop rather than slamming the
-            # velocity to zero (the abrupt stop is itself a source of jerk). The
-            # ramp is bounded so a comms failure can't trap us here, and we
-            # always issue a final hard zero so the rail can't keep creeping.
+            # Smoothly ramp the published target down to a stop (the sender keeps
+            # transmitting it the whole time), then stop the sender and issue a
+            # final hard zero so the rail can't keep creeping. Bounded so a comms
+            # failure can't trap us here.
             try:
                 ramp_start = time.perf_counter()
                 while abs(prev_vel) > 1e-4 and time.perf_counter() - ramp_start < 2.0:
                     _ramp_toward(0.0)
-                    time.sleep(0.05)
+                    time.sleep(0.02)
+                self._rail_cmd_vel = 0.0
+            except Exception as e:
+                logger.warning(f"Failed to ramp rail to a stop after height move: {e}")
+            sender_stop.set()
+            sender.join(timeout=1.0)
+            try:
                 self._send_rail_velocity(0.0)
             except Exception as e:
                 logger.warning(f"Failed to stop rail after height move: {e}")
