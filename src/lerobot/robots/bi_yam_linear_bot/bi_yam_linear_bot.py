@@ -610,14 +610,46 @@ class BiYamLinearBot(Robot):
 
         target = float(self.config.rail_initial_height_m)
         kp = self.config.rail_move_kp
-        max_speed = self.config.rail_move_max_speed_mps
+        max_accel = self.config.rail_move_max_accel_mps2
         tolerance = self.config.rail_move_tolerance_m
         timeout = self.config.rail_move_timeout_s
+
+        # Match the rail's startup calibration/homing speed: that routine drives
+        # the motor at a constant `rail_move_motor_speed_rad_s` (rad/s), which we
+        # convert to linear m/s via the meters_per_rad calibration so the height
+        # move travels at the same physical speed. Fall back to the static m/s
+        # cap if the calibration factor isn't available yet, and always bound by
+        # the rail's hard m/s cap.
+        if self._meters_per_rad is not None:
+            max_speed = abs(self.config.rail_move_motor_speed_rad_s * self._meters_per_rad)
+        else:
+            max_speed = self.config.rail_move_max_speed_mps
+        max_speed = min(max_speed, self.config.rail_max_vel_mps)
 
         def _should_exit() -> bool:
             return events is not None and events.get("exit_early", False)
 
-        logger.info(f"Moving linear rail to initial height {target:.4f} m")
+        # Slew-rate limit the commanded velocity so the rail eases in/out instead
+        # of stepping straight to the speed cap (which is what makes it jerky).
+        # `prev_vel` is the last command we sent; we let it change by at most
+        # `max_accel * dt` toward the new desired velocity each control step.
+        prev_vel = 0.0
+        last_cmd_t = time.perf_counter()
+
+        def _ramp_toward(desired: float) -> float:
+            nonlocal prev_vel, last_cmd_t
+            now = time.perf_counter()
+            dt = now - last_cmd_t
+            last_cmd_t = now
+            max_dv = max_accel * dt
+            prev_vel += float(np.clip(desired - prev_vel, -max_dv, max_dv))
+            self._send_rail_velocity(prev_vel)
+            return prev_vel
+
+        logger.info(
+            f"Moving linear rail to initial height {target:.4f} m "
+            f"(speed cap {max_speed:.4f} m/s, accel {max_accel:.4f} m/s^2)"
+        )
         start_t = time.perf_counter()
         try:
             while not _should_exit():
@@ -638,12 +670,20 @@ class BiYamLinearBot(Robot):
                         f"(target {target:.4f} m); continuing."
                     )
                     break
-                self._send_rail_velocity(kp * error)
+                # P-controller velocity, speed-capped, then acceleration-limited.
+                desired = float(np.clip(kp * error, -max_speed, max_speed))
+                _ramp_toward(desired)
                 time.sleep(0.05)
         finally:
-            # Always stop the rail, even on abort / exception, so it can't keep
-            # creeping into the recorded episode.
+            # Smoothly ramp the rail down to a stop rather than slamming the
+            # velocity to zero (the abrupt stop is itself a source of jerk). The
+            # ramp is bounded so a comms failure can't trap us here, and we
+            # always issue a final hard zero so the rail can't keep creeping.
             try:
+                ramp_start = time.perf_counter()
+                while abs(prev_vel) > 1e-4 and time.perf_counter() - ramp_start < 2.0:
+                    _ramp_toward(0.0)
+                    time.sleep(0.05)
                 self._send_rail_velocity(0.0)
             except Exception as e:
                 logger.warning(f"Failed to stop rail after height move: {e}")

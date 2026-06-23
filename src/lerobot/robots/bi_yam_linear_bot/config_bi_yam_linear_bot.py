@@ -64,8 +64,22 @@ class BiYamLinearBotConfig(RobotConfig):
     # commanded velocity is `clip(kp * (target - position), ±max_speed)` in m/s,
     # mirroring the `move_linear_rail_to` controller in flow_base_client.py.
     rail_move_kp: float = 1.0
-    rail_move_max_speed_mps: float = 0.05
+    # Top speed of the height move is matched to the rail's startup
+    # calibration/homing speed: `linear_rail_controller.py` drives the motor at
+    # a constant `rail_speed * HOMING_SPEED_RATIO = 14.0 * 0.5 = 7.0 rad/s`. At
+    # runtime we convert that to linear m/s via the rail's meters_per_rad
+    # calibration so the height move travels at the same physical speed as
+    # calibration. `rail_move_max_speed_mps` is only the fallback used when
+    # meters_per_rad isn't known yet; the result is always bounded by
+    # rail_max_vel_mps.
+    rail_move_motor_speed_rad_s: float = 7.0
+    rail_move_max_speed_mps: float = 0.5
     rail_move_tolerance_m: float = 0.005
+    # Acceleration cap (m/s^2) for the height move: the commanded rail velocity
+    # is slew-rate limited to change by at most `max_accel * dt` per control
+    # step. This is what keeps the move smooth -- without it the velocity steps
+    # straight from 0 to the speed cap (and back to 0), which feels jerky.
+    rail_move_max_accel_mps2: float = 0.25
     # Safety timeout (s): give up the height move if it hasn't converged, so a
     # stuck/obstructed rail can't block the recording loop indefinitely.
     rail_move_timeout_s: float = 30.0
