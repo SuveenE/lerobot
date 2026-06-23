@@ -116,6 +116,13 @@ class BiYamLinearBot(Robot):
         # the FlowBase controller's homing calibration. Used to expose the rail
         # in meters / m/s instead of motor rad / rad/s. None until connected.
         self._meters_per_rad: float | None = None
+        # Resolved rail speed cap in m/s (single source of truth). If the config
+        # leaves rail_max_vel_mps as None we inherit the controller's cap at
+        # connect time; an explicit config value overrides it. Use this everywhere
+        # instead of self.config.rail_max_vel_mps so all clip sites agree.
+        self._rail_max_vel_mps: float = (
+            config.rail_max_vel_mps if config.rail_max_vel_mps is not None else 0.5
+        )
 
     # ------------------------------------------------------------------
     # Feature declarations
@@ -315,6 +322,25 @@ class BiYamLinearBot(Robot):
                     )
                 logger.info(f"Linear rail meters_per_rad = {self._meters_per_rad:.6f}")
 
+                # Resolve the rail speed cap from a single source of truth. Unless
+                # the config explicitly overrides it, inherit the controller's cap
+                # (its --rail-max-vel flag, reported as `max_vel_mps`) so the
+                # gamepad scaling, motor cap, recorded action, and policy-send path
+                # all follow one value. Fall back to 0.5 if an older controller
+                # doesn't report a cap.
+                if self.config.rail_max_vel_mps is not None:
+                    self._rail_max_vel_mps = float(self.config.rail_max_vel_mps)
+                    logger.info(
+                        f"Rail speed cap: {self._rail_max_vel_mps:.3f} m/s (config override)"
+                    )
+                else:
+                    controller_cap = rail_state.get("max_vel_mps")
+                    self._rail_max_vel_mps = float(controller_cap) if controller_cap is not None else 0.5
+                    logger.info(
+                        f"Rail speed cap: {self._rail_max_vel_mps:.3f} m/s "
+                        f"(inherited from flow_base_controller)"
+                    )
+
             logger.info(
                 f"Connected to FlowBase at {self.config.flow_base_host} "
                 f"(linear rail: {self.config.with_linear_rail})"
@@ -394,7 +420,7 @@ class BiYamLinearBot(Robot):
             # through unchanged. Cap it so the recorded action stays within
             # ±rail_max_vel_mps, matching the m/s rail.velocity observation.
             rail_cmd_mps = float(vel[3]) if len(vel) > 3 else 0.0
-            cap = self.config.rail_max_vel_mps
+            cap = self._rail_max_vel_mps
             obs_dict["rail.cmd.vel"] = float(np.clip(rail_cmd_mps, -cap, cap))
 
         # --- cameras ---
@@ -520,7 +546,7 @@ class BiYamLinearBot(Robot):
                 # the mixed command vector: base axes are normalised, the rail is
                 # physical m/s.
                 rail_vel_mps = action.get("rail.vel", 0.0)
-                cap = self.config.rail_max_vel_mps
+                cap = self._rail_max_vel_mps
                 rail_vel_mps = float(np.clip(rail_vel_mps, -cap, cap))
                 vel_cmd = np.concatenate([base_vel_norm, [rail_vel_mps]])
             else:
@@ -573,7 +599,7 @@ class BiYamLinearBot(Robot):
         RPC client: base axes are normalised (0 here = stationary) and the rail
         is physical m/s, capped at ±rail_max_vel_mps.
         """
-        cap = self.config.rail_max_vel_mps
+        cap = self._rail_max_vel_mps
         vel_mps = float(np.clip(vel_mps, -cap, cap))
         vel_cmd = np.array([0.0, 0.0, 0.0, vel_mps])
         self._flow_base_client.client.set_target_velocity(
@@ -625,7 +651,7 @@ class BiYamLinearBot(Robot):
             max_speed = abs(self.config.rail_move_motor_speed_rad_s * self._meters_per_rad)
         else:
             max_speed = self.config.rail_move_max_speed_mps
-        max_speed = min(max_speed, self.config.rail_max_vel_mps)
+        max_speed = min(max_speed, self._rail_max_vel_mps)
 
         def _should_exit() -> bool:
             return events is not None and events.get("exit_early", False)

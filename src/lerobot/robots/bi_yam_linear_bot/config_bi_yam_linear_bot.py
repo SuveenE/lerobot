@@ -48,10 +48,18 @@ class BiYamLinearBotConfig(RobotConfig):
     # calibration), so this rad/s normalisation scale is no longer applied by the
     # robot. Kept only for backward compatibility with existing configs/CLIs.
     rail_max_vel: float = 7.0
-    # Linear rail speed cap in m/s (mirrors FlowBaseClient DEFAULT_MAX_VEL_Z).
-    # Bounds both the recorded rail command and policy rail output so the rail
-    # action space stays within ±this, like base_max_vel does for the base.
-    rail_max_vel_mps: float = 0.5
+    # Linear rail speed cap in m/s. Bounds both the recorded rail command and the
+    # policy rail output so the rail action space stays within ±this, like
+    # base_max_vel does for the base.
+    #
+    # SINGLE SOURCE OF TRUTH: leave this as None (the default) to inherit the cap
+    # from the running flow_base_controller (its --rail-max-vel flag, surfaced via
+    # the rail state's `max_vel_mps`). That way the rail speed is configured in
+    # exactly one place and the gamepad scaling, motor cap, recorded action, and
+    # policy-send path all agree. Set an explicit float only to OVERRIDE the
+    # controller's value (rarely needed). Falls back to 0.5 if the controller does
+    # not report a cap (older controller).
+    rail_max_vel_mps: float | None = None
 
     # Target linear-rail height (meters, in the same calibrated `rail.position`
     # space recorded in the dataset) that the rail is driven to at the start of
