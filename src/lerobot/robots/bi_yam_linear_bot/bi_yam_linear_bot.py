@@ -630,42 +630,45 @@ class BiYamLinearBot(Robot):
         def _should_exit() -> bool:
             return events is not None and events.get("exit_early", False)
 
-        # Why a background sender thread: the FlowBase controller invalidates a
-        # remote command after 0.2s (TimeoutRemoteCommand) and falls back to the
-        # gamepad / zero, stopping the rail. Our control loop does two blocking
-        # RPCs per iteration (get_linear_rail_state + set_target_velocity), and
-        # whenever a cycle stretches past that window the rail stop-starts --
-        # which is the shaking. Calibration never stutters because it re-applies
-        # the motor velocity in-process every ~50ms. We reproduce that here: a
-        # 50Hz sender keeps the controller's command fresh from a shared target,
-        # while the (slower) main loop only updates that target. `_rail_cmd_vel`
-        # is a single float; assignment is atomic under the GIL so no lock needed.
-        self._rail_cmd_vel = 0.0
+        # Why a background sender thread, and why it owns the ramp:
+        #
+        # 1) The FlowBase controller invalidates a remote command after 0.2s
+        #    (TimeoutRemoteCommand) and falls back to gamepad/zero, stopping the
+        #    rail. So the command must be re-transmitted continuously.
+        # 2) The rail motor runs in velocity mode with no onboard acceleration
+        #    limiting, so smoothness depends entirely on how finely and how
+        #    evenly we step the commanded velocity.
+        #
+        # The main loop is slow and jittery (two blocking RPCs per iteration), so
+        # ramping there produced a coarse, irregular velocity staircase -- the
+        # jerk. Instead the main loop only publishes a *setpoint*
+        # (`self._rail_target_vel`); a steady ~100Hz sender thread ramps the
+        # actual command toward that setpoint with small, regular increments and
+        # keeps re-transmitting it. Floats are written/read atomically under the
+        # GIL, so no lock is needed.
+        self._rail_target_vel = 0.0  # setpoint, written by the main loop
+        self._rail_cur_vel = 0.0  # actual ramped command, owned by the sender
         sender_stop = threading.Event()
+        SENDER_PERIOD = 0.01  # 100Hz: fine, regular ramp steps (max_accel * dt)
 
         def _sender() -> None:
+            prev_vel = 0.0
+            last_t = time.perf_counter()
             while not sender_stop.is_set():
+                now = time.perf_counter()
+                dt = now - last_t
+                last_t = now
+                # Slew-rate limit toward the setpoint so the rail eases in/out
+                # instead of stepping to the speed cap. Regular dt here (unlike
+                # the RPC-bound main loop) keeps the increments uniform.
+                max_dv = max_accel * dt
+                prev_vel += float(np.clip(self._rail_target_vel - prev_vel, -max_dv, max_dv))
+                self._rail_cur_vel = prev_vel
                 try:
-                    self._send_rail_velocity(self._rail_cmd_vel)
+                    self._send_rail_velocity(prev_vel)
                 except Exception as e:
                     logger.debug(f"Rail velocity resend failed: {e}")
-                time.sleep(0.02)
-
-        # Slew-rate limit the commanded velocity so the rail eases in/out instead
-        # of stepping straight to the speed cap. `prev_vel` is the last target we
-        # published; it changes by at most `max_accel * dt` per control step.
-        prev_vel = 0.0
-        last_cmd_t = time.perf_counter()
-
-        def _ramp_toward(desired: float) -> float:
-            nonlocal prev_vel, last_cmd_t
-            now = time.perf_counter()
-            dt = now - last_cmd_t
-            last_cmd_t = now
-            max_dv = max_accel * dt
-            prev_vel += float(np.clip(desired - prev_vel, -max_dv, max_dv))
-            self._rail_cmd_vel = prev_vel
-            return prev_vel
+                time.sleep(SENDER_PERIOD)
 
         logger.info(
             f"Moving linear rail to initial height {target:.4f} m "
@@ -693,21 +696,21 @@ class BiYamLinearBot(Robot):
                         f"(target {target:.4f} m); continuing."
                     )
                     break
-                # P-controller velocity, speed-capped, then acceleration-limited.
-                desired = float(np.clip(kp * error, -max_speed, max_speed))
-                _ramp_toward(desired)
+                # P-controller velocity, speed-capped. The sender applies the
+                # acceleration limit; this only sets the setpoint. The P term
+                # naturally eases the setpoint toward 0 as the rail approaches.
+                self._rail_target_vel = float(np.clip(kp * error, -max_speed, max_speed))
                 time.sleep(0.02)
         finally:
-            # Smoothly ramp the published target down to a stop (the sender keeps
-            # transmitting it the whole time), then stop the sender and issue a
+            # Ask the sender to ramp the command down to a stop (it keeps
+            # transmitting the whole time), then stop the sender and issue a
             # final hard zero so the rail can't keep creeping. Bounded so a comms
             # failure can't trap us here.
             try:
+                self._rail_target_vel = 0.0
                 ramp_start = time.perf_counter()
-                while abs(prev_vel) > 1e-4 and time.perf_counter() - ramp_start < 2.0:
-                    _ramp_toward(0.0)
+                while abs(self._rail_cur_vel) > 1e-4 and time.perf_counter() - ramp_start < 2.0:
                     time.sleep(0.02)
-                self._rail_cmd_vel = 0.0
             except Exception as e:
                 logger.warning(f"Failed to ramp rail to a stop after height move: {e}")
             sender_stop.set()
