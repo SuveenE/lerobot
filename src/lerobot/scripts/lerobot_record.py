@@ -578,8 +578,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     with VideoEncodingManager(dataset):
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-            log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-
             # Robots that maintain their own running odometry (e.g. the
             # FlowBase mobile base) expose `reset_odometry`. Zero it here so
             # every recorded episode starts at the origin instead of wherever
@@ -597,6 +595,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             move_to_initial_height = getattr(robot, "move_to_initial_height", None)
             if callable(move_to_initial_height):
                 move_to_initial_height(events=events)
+
+            # Announced only after the pre-episode moves (odometry reset + rail
+            # height seek) settle, so the cue lines up with the actual start of
+            # recording rather than the setup that precedes it.
+            log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
 
             record_loop(
                 robot=robot,
