@@ -99,6 +99,11 @@ placo-dep = ["placo>=0.9.6,<0.10.0"]
 transformers-dep = ["transformers>=4.53.0,<5.0.0"]
 grpcio-dep = ["grpcio==1.73.1", "protobuf==6.31.0"] # TODO: Bumb dependency (compatible with wandb)
 
+# Depth
+# Lossless RVL depth-map compression (`--dataset.depth_codec=rvl`). Bundled as the
+# `rvlcodec` git submodule; building it requires a Rust toolchain. See [tool.uv.sources].
+depth = ["rvlcodec"]
+
 # Motors
 feetech = ["feetech-servo-sdk>=1.0.0,<2.0.0"]
 dynamixel = ["dynamixel-sdk>=3.7.31,<3.9.0"]
@@ -193,6 +198,10 @@ lerobot-imgtransform-viz="lerobot.scripts.lerobot_imgtransform_viz:main"
 lerobot-edit-dataset="lerobot.scripts.lerobot_edit_dataset:main"
 
 # ---------------- Tool Configurations ----------------
+[tool.uv.sources]
+# RVL depth codec lives in the bundled git submodule at ./rvlcodec.
+rvlcodec = { path = "rvlcodec" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

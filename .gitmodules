@@ -1,3 +1,6 @@
 [submodule "i2rt"]
 	path = i2rt
 	url = https://github.com/SuveenE/i2rt.git
+[submodule "rvlcodec"]
+	path = rvlcodec
+	url = https://github.com/cortexairobot/rvlcodec.git

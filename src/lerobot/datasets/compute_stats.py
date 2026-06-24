@@ -267,6 +267,29 @@ def sample_depth_images(image_paths: list[str]) -> np.ndarray:
     return images
 
 
+def sample_depth_rvl(frames: list[bytes]) -> np.ndarray:
+    """Sample RVL-compressed depth frames for stats, preserving raw mm values.
+
+    Mirrors `sample_depth_images` but decodes the RVL binary blobs instead of
+    loading PNGs from disk. Returns float32 frames shaped (N, 1, H, W).
+    """
+    from lerobot.datasets.depth_codec import decode_depth_rvl
+
+    sampled_indices = sample_indices(len(frames))
+
+    images = None
+    for i, idx in enumerate(sampled_indices):
+        img = decode_depth_rvl(frames[idx]).astype(np.float32)[np.newaxis, ...]  # (1, H, W)
+        img = auto_downsample_height_width(img)
+
+        if images is None:
+            images = np.empty((len(sampled_indices), *img.shape), dtype=np.float32)
+
+        images[i] = img
+
+    return images
+
+
 def _reshape_stats_by_axis(
     stats: dict[str, np.ndarray],
     axis: int | tuple[int, ...] | None,
@@ -530,12 +553,20 @@ def compute_episode_stats(
         if features[key]["dtype"] == "string":
             continue
 
+        dtype = features[key]["dtype"]
         # Single-channel (depth) maps are stored in raw millimeters, not 0-255 RGB,
         # so they are sampled as float32 and not rescaled by 255.
-        is_depth = features[key]["dtype"] in ["image", "video"] and tuple(features[key]["shape"])[-1] == 1
+        is_depth_rvl = dtype == "depth_rvl"
+        is_depth_image = dtype in ["image", "video"] and tuple(features[key]["shape"])[-1] == 1
+        is_depth = is_depth_rvl or is_depth_image
 
-        if features[key]["dtype"] in ["image", "video"]:
-            ep_ft_array = sample_depth_images(data) if is_depth else sample_images(data)
+        if dtype in ["image", "video", "depth_rvl"]:
+            if is_depth_rvl:
+                ep_ft_array = sample_depth_rvl(data)
+            elif is_depth_image:
+                ep_ft_array = sample_depth_images(data)
+            else:
+                ep_ft_array = sample_images(data)
             axes_to_reduce = (0, 2, 3)
             keepdims = True
         else:
@@ -547,7 +578,7 @@ def compute_episode_stats(
             ep_ft_array, axis=axes_to_reduce, keepdims=keepdims, quantile_list=quantile_list
         )
 
-        if features[key]["dtype"] in ["image", "video"]:
+        if dtype in ["image", "video", "depth_rvl"]:
             scale = 1.0 if is_depth else 255.0
             ep_stats[key] = {
                 k: v if k == "count" else np.squeeze(v / scale, axis=0) for k, v in ep_stats[key].items()

@@ -437,6 +437,15 @@ def hf_transform_to_torch(items_dict: dict[str, list[Any]]) -> dict[str, list[to
         if isinstance(first_item, PILImage.Image):
             to_tensor = transforms.ToTensor()
             items_dict[key] = [to_tensor(img) for img in items_dict[key]]
+        elif isinstance(first_item, (bytes, bytearray)):
+            # RVL-compressed depth frames (the only binary columns). Decode to a
+            # channel-first (1, H, W) float32 tensor of raw depth in millimeters.
+            from lerobot.datasets.depth_codec import decode_depth_rvl
+
+            items_dict[key] = [
+                torch.from_numpy(decode_depth_rvl(x).astype(np.float32)[np.newaxis, ...])
+                for x in items_dict[key]
+            ]
         elif first_item is None:
             pass
         else:
@@ -589,6 +598,9 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
             continue
         elif ft["dtype"] == "image":
             hf_features[key] = datasets.Image()
+        elif ft["dtype"] == "depth_rvl":
+            # RVL-compressed depth frames are stored as opaque binary blobs.
+            hf_features[key] = datasets.Value("binary")
         elif ft["shape"] == (1,):
             hf_features[key] = datasets.Value(dtype=ft["dtype"])
         elif len(ft["shape"]) == 1:
@@ -698,7 +710,7 @@ def build_dataset_frame(
             continue
         elif ft["dtype"] == "float32" and len(ft["shape"]) == 1:
             frame[key] = np.array([values[name] for name in ft["names"]], dtype=np.float32)
-        elif ft["dtype"] in ["image", "video"]:
+        elif ft["dtype"] in ["image", "video", "depth_rvl"]:
             frame[key] = values[key.removeprefix(f"{prefix}.images.")]
 
     return frame
@@ -724,7 +736,7 @@ def dataset_to_policy_features(features: dict[str, dict]) -> dict[str, PolicyFea
     policy_features = {}
     for key, ft in features.items():
         shape = ft["shape"]
-        if ft["dtype"] in ["image", "video"]:
+        if ft["dtype"] in ["image", "video", "depth_rvl"]:
             type = FeatureType.VISUAL
             if len(shape) != 3:
                 raise ValueError(f"Number of dimensions of {key} != 3 (shape={shape})")
@@ -775,7 +787,7 @@ def combine_feature_dicts(*dicts: dict) -> dict:
             dtype = value.get("dtype")
             shape = value.get("shape")
             is_vector = (
-                dtype not in ("image", "video", "string")
+                dtype not in ("image", "video", "depth_rvl", "string")
                 and isinstance(shape, tuple)
                 and len(shape) == 1
                 and "names" in value
@@ -1058,7 +1070,7 @@ def validate_feature_dtype_and_shape(
     expected_shape = feature["shape"]
     if is_valid_numpy_dtype_string(expected_dtype):
         return validate_feature_numpy_array(name, expected_dtype, expected_shape, value)
-    elif expected_dtype in ["image", "video"]:
+    elif expected_dtype in ["image", "video", "depth_rvl"]:
         return validate_feature_image_or_video(name, expected_shape, value)
     elif expected_dtype == "string":
         return validate_feature_string(name, value)

@@ -31,6 +31,8 @@ lerobot-record \
     --display_data=true
     # <- Optional: specify video codec (auto, h264, hevc, libsvtav1). Default is libsvtav1. \
     # --dataset.vcodec=h264 \
+    # <- Optional: store depth maps losslessly with the RVL codec instead of 16-bit PNGs. \
+    # --dataset.depth_codec=rvl \
     # <- Teleop optional if you want to teleoperate to record or in between episodes with a policy \
     # --teleop.type=so100_leader \
     # --teleop.port=/dev/tty.usbmodem58760431551 \
@@ -80,6 +82,7 @@ from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # no
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.datasets.depth_codec import convert_depth_features_to_rvl
 from lerobot.datasets.image_writer import safe_stop_image_writer
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
@@ -191,10 +194,17 @@ class DatasetRecordConfig:
     encoder_threads: int | None = None
     # Rename map for the observation to override the image and state keys
     rename_map: dict[str, str] = field(default_factory=dict)
+    # Codec used to store single-channel depth maps. 'png' keeps the default lossless
+    # 16-bit PNG-per-frame storage. 'rvl' compresses each depth frame losslessly with the
+    # RVL codec (https://github.com/cortexairobot/rvlcodec) and stores it as a binary column
+    # in the dataset parquet. Requires the optional `rvlcodec` package to be installed.
+    depth_codec: str = "png"
 
     def __post_init__(self):
         if self.single_task is None:
             raise ValueError("You need to provide a task as argument in `single_task`.")
+        if self.depth_codec not in ("png", "rvl"):
+            raise ValueError(f"`depth_codec` must be one of 'png' or 'rvl', got '{self.depth_codec}'.")
 
 
 @dataclass
@@ -508,6 +518,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         dataset_features,
         getattr(robot, "extra_dataset_features", {}) or {},
     )
+
+    # When requested, store single-channel depth maps with the RVL codec (a lossless,
+    # compact binary column) instead of the default 16-bit PNG-per-frame `image` storage.
+    if cfg.dataset.depth_codec == "rvl":
+        dataset_features = convert_depth_features_to_rvl(dataset_features)
 
     if cfg.resume:
         dataset = LeRobotDataset(

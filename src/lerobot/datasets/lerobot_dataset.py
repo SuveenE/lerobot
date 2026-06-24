@@ -34,6 +34,7 @@ from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import RevisionNotFoundError
 
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
+from lerobot.datasets.depth_codec import encode_depth_rvl
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
 from lerobot.datasets.utils import (
     DEFAULT_EPISODES_PATH,
@@ -1269,7 +1270,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
                     f"An element of the frame is not in the features. '{key}' not in '{self.features.keys()}'."
                 )
 
-            if self.features[key]["dtype"] == "video" and self._streaming_encoder is not None:
+            if self.features[key]["dtype"] == "depth_rvl":
+                # Compress the depth frame with the RVL codec and store the bytes
+                # directly in the parquet (no per-frame file on disk).
+                self.episode_buffer[key].append(encode_depth_rvl(frame[key]))
+            elif self.features[key]["dtype"] == "video" and self._streaming_encoder is not None:
                 self._streaming_encoder.feed_frame(key, frame[key])
                 self.episode_buffer[key].append(None)  # Placeholder (video keys are skipped in parquet)
             elif self.features[key]["dtype"] in ["image", "video"]:
@@ -1322,7 +1327,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
         for key, ft in self.features.items():
             # index, episode_index, task_index are already processed above, and image and video
             # are processed separately by storing image path and frame info as meta data
-            if key in ["index", "episode_index", "task_index"] or ft["dtype"] in ["image", "video"]:
+            if key in ["index", "episode_index", "task_index"] or ft["dtype"] in [
+                "image",
+                "video",
+                "depth_rvl",
+            ]:
+                # depth_rvl values are variable-length compressed bytes kept as a
+                # python list, written to parquet as a binary column (not stacked).
                 continue
             episode_buffer[key] = np.stack(episode_buffer[key])
 
