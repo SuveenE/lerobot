@@ -1,6 +1,6 @@
 [submodule "i2rt"]
 	path = i2rt
-	url = https://github.com/i2rt-robotics/i2rt.git
+	url = https://github.com/SuveenE/i2rt.git
 [submodule "gello_software"]
 	path = gello_software
 	url = https://github.com/SuveenE/gello_software.git
