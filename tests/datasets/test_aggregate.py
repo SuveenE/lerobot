@@ -14,12 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pandas as pd
 import torch
 
-from lerobot.datasets.aggregate import aggregate_datasets
+from lerobot.datasets.aggregate import aggregate_data, aggregate_datasets
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.utils import DEFAULT_DATA_PATH
 from tests.fixtures.constants import DUMMY_REPO_ID
 
 
@@ -227,6 +230,52 @@ def assert_video_timestamps_within_bounds(aggr_ds):
                 raise AssertionError(
                     f"Failed to verify timestamps for episode {ep_idx}, {vid_key}: {e}"
                 ) from e
+
+
+def test_aggregate_data_discovers_data_files_not_listed_in_episode_metadata(tmp_path):
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "destination"
+    tasks = pd.DataFrame({"task_index": [0]}, index=["pick up object"])
+
+    for file_idx, episode_idx in [(0, 0), (1, 1), (6, 2)]:
+        path = source_root / DEFAULT_DATA_PATH.format(chunk_index=0, file_index=file_idx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "episode_index": [episode_idx],
+                "index": [episode_idx],
+                "task_index": [0],
+                "timestamp": [0.0],
+                "frame_index": [0],
+            }
+        ).to_parquet(path)
+
+    src_meta = SimpleNamespace(
+        root=source_root,
+        episodes=pd.DataFrame({"data/chunk_index": [0], "data/file_index": [0]}),
+        tasks=tasks,
+    )
+    dst_meta = SimpleNamespace(
+        repo_id="dummy/aggr",
+        root=destination_root,
+        info={"total_episodes": 0, "total_frames": 0},
+        tasks=tasks,
+        image_keys=[],
+        features={
+            "action": {"dtype": "float32", "shape": (1,), "names": None},
+            "malformed_optional_feature": "float32",
+        },
+    )
+
+    _, data_file_map = aggregate_data(
+        src_meta,
+        dst_meta,
+        data_idx={"chunk": 0, "file": 0},
+        data_files_size_in_mb=100,
+        chunk_size=100,
+    )
+
+    assert set(data_file_map) == {(0, 0), (0, 1), (0, 6)}
 
 
 def test_aggregate_datasets(tmp_path, lerobot_dataset_factory):
