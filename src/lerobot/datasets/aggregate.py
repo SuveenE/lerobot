@@ -20,6 +20,7 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 import tqdm
 
 from lerobot.datasets.compute_stats import aggregate_stats
@@ -41,6 +42,12 @@ from lerobot.datasets.utils import (
     write_tasks,
 )
 from lerobot.datasets.video_utils import concatenate_video_files, get_video_duration_in_s
+
+
+def read_parquet_dataframe(path: Path) -> pd.DataFrame:
+    """Read parquet while preserving Arrow-backed nested/list dtypes."""
+    table = pq.read_table(path)
+    return table.to_pandas(types_mapper=pd.ArrowDtype)
 
 
 def validate_all_metadata(all_metadata: list[LeRobotDatasetMetadata]):
@@ -419,7 +426,7 @@ def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_si
         src_path = src_meta.root / DEFAULT_DATA_PATH.format(
             chunk_index=src_chunk_idx, file_index=src_file_idx
         )
-        df = pd.read_parquet(src_path)
+        df = read_parquet_dataframe(src_path)
         df = update_data_df(df, src_meta, dst_meta)
 
         data_idx, dst_data_pair = append_or_create_parquet_file(
@@ -465,7 +472,7 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_file_map, videos_idx):
     chunk_file_ids = sorted(chunk_file_ids)
     for chunk_idx, file_idx in chunk_file_ids:
         src_path = src_meta.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
-        df = pd.read_parquet(src_path)
+        df = read_parquet_dataframe(src_path)
         df = update_meta_data(
             df,
             dst_meta,
@@ -487,7 +494,7 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_file_map, videos_idx):
         dst_path = dst_meta.root / DEFAULT_EPISODES_PATH.format(
             chunk_index=dst_meta_pair[0], file_index=dst_meta_pair[1]
         )
-        dst_df = pd.read_parquet(dst_path)
+        dst_df = read_parquet_dataframe(dst_path)
         mask = dst_df["episode_index"].isin(df["episode_index"])
         dst_df.loc[mask, "meta/episodes/chunk_index"] = dst_meta_pair[0]
         dst_df.loc[mask, "meta/episodes/file_index"] = dst_meta_pair[1]
@@ -551,7 +558,7 @@ def append_or_create_parquet_file(
         target_path = new_path
     else:
         target_pair = (idx["chunk"], idx["file"])
-        existing_df = pd.read_parquet(dst_path)
+        existing_df = read_parquet_dataframe(dst_path)
         final_df = pd.concat([existing_df, df], ignore_index=True)
         target_path = dst_path
 
