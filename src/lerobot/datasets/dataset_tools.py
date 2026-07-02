@@ -70,11 +70,19 @@ def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> d
     file_idx = ep_meta["meta/episodes/file_index"]
 
     parquet_path = src_dataset.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
-    df = pd.read_parquet(parquet_path)
+    # Episode stats columns can contain nested list types (e.g. list<double>) that
+    # default pandas parquet deserialization cannot represent.
+    table = pq.read_table(parquet_path)
+    df = table.to_pandas(types_mapper=pd.ArrowDtype)
 
     episode_row = df[df["episode_index"] == episode_idx].iloc[0]
 
-    return episode_row.to_dict()
+    episode_dict = episode_row.to_dict()
+    for key, value in episode_dict.items():
+        if isinstance(value, list):
+            episode_dict[key] = np.array(value)
+
+    return episode_dict
 
 
 def delete_episodes(
