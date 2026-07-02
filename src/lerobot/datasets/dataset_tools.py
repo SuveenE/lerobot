@@ -656,6 +656,12 @@ def _copy_and_reindex_data(
         if new_task_idx is not None:
             task_mapping[old_task_idx] = new_task_idx
 
+    def _remap_episode_indices(series: pd.Series) -> pd.Series:
+        return series.map(lambda value: episode_mapping[int(value)])
+
+    def _remap_task_indices(series: pd.Series) -> pd.Series:
+        return series.map(lambda value: task_mapping.get(int(value), int(value)))
+
     for src_path in tqdm(sorted(file_to_episodes.keys()), desc="Processing data files"):
         df = pd.read_parquet(src_dataset.root / src_path)
 
@@ -663,9 +669,9 @@ def _copy_and_reindex_data(
         episodes_to_keep = file_to_episodes[src_path]
 
         if all_episodes_in_file == episodes_to_keep:
-            df["episode_index"] = df["episode_index"].replace(episode_mapping)
+            df["episode_index"] = _remap_episode_indices(df["episode_index"])
             df["index"] = range(global_index, global_index + len(df))
-            df["task_index"] = df["task_index"].replace(task_mapping)
+            df["task_index"] = _remap_task_indices(df["task_index"])
 
             first_ep_old_idx = min(episodes_to_keep)
             src_ep = src_dataset.meta.episodes[first_ep_old_idx]
@@ -678,9 +684,9 @@ def _copy_and_reindex_data(
             if len(df) == 0:
                 continue
 
-            df["episode_index"] = df["episode_index"].replace(episode_mapping)
+            df["episode_index"] = _remap_episode_indices(df["episode_index"])
             df["index"] = range(global_index, global_index + len(df))
-            df["task_index"] = df["task_index"].replace(task_mapping)
+            df["task_index"] = _remap_task_indices(df["task_index"])
 
             first_ep_old_idx = min(episodes_to_keep)
             src_ep = src_dataset.meta.episodes[first_ep_old_idx]
@@ -695,6 +701,17 @@ def _copy_and_reindex_data(
         for ep_old_idx in episodes_to_keep:
             ep_new_idx = episode_mapping[ep_old_idx]
             ep_df = df[df["episode_index"] == ep_new_idx]
+            if ep_df.empty:
+                available_episodes = sorted(int(ep_idx) for ep_idx in df["episode_index"].unique())
+                raise ValueError(
+                    f"No rows found after reindexing episode {ep_old_idx} -> {ep_new_idx} "
+                    f"in {src_path}. Available episodes: {available_episodes}"
+                )
+            if ep_df["index"].isna().any():
+                raise ValueError(
+                    f"NaN index values found after reindexing episode {ep_old_idx} -> {ep_new_idx} "
+                    f"in {src_path}"
+                )
             episode_data_metadata[ep_new_idx] = {
                 "data/chunk_index": chunk_idx,
                 "data/file_index": file_idx,
