@@ -20,6 +20,7 @@ This module provides utilities for:
 - Deleting episodes from datasets
 - Splitting datasets into multiple smaller datasets
 - Adding/removing features from datasets
+- Renaming task labels in datasets
 - Merging datasets (wrapper around aggregate functionality)
 """
 
@@ -69,19 +70,11 @@ def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> d
     file_idx = ep_meta["meta/episodes/file_index"]
 
     parquet_path = src_dataset.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
-    # Use pyarrow to read parquet files with nested list types that pandas can't handle directly
-    table = pq.read_table(parquet_path)
-    df = table.to_pandas(types_mapper=pd.ArrowDtype)
+    df = pd.read_parquet(parquet_path)
 
     episode_row = df[df["episode_index"] == episode_idx].iloc[0]
 
-    # Convert the row to dict and convert list values to numpy arrays for compatibility with aggregate_stats
-    episode_dict = episode_row.to_dict()
-    for key, value in episode_dict.items():
-        if isinstance(value, list):
-            episode_dict[key] = np.array(value)
-    
-    return episode_dict
+    return episode_row.to_dict()
 
 
 def delete_episodes(
@@ -276,6 +269,142 @@ def merge_datasets(
     )
 
     return merged_dataset
+
+
+def rename_tasks(
+    dataset: LeRobotDataset,
+    task_mapping: dict[str, str],
+    episode_indices: list[int] | None = None,
+    output_dir: str | Path | None = None,
+    repo_id: str | None = None,
+) -> LeRobotDataset:
+    """Rename task labels in a dataset, optionally for a subset of episodes.
+
+    Args:
+        dataset: Source dataset.
+        task_mapping: Mapping from old task names to new task names.
+        episode_indices: Episodes to relabel. If None, relabel every episode whose
+            task matches a key in ``task_mapping``.
+        output_dir: Directory for the modified dataset. Defaults to ``HF_LEROBOT_HOME / repo_id``.
+        repo_id: Repository ID for the modified dataset. Defaults to ``{dataset.repo_id}_modified``.
+    """
+    if not task_mapping:
+        raise ValueError("task_mapping must be a non-empty dict")
+
+    missing_tasks = [task for task in task_mapping if task not in dataset.meta.tasks.index]
+    if missing_tasks:
+        raise ValueError(f"Unknown source tasks: {missing_tasks}")
+
+    if episode_indices is not None:
+        valid_indices = set(range(dataset.meta.total_episodes))
+        invalid = set(episode_indices) - valid_indices
+        if invalid:
+            raise ValueError(f"Invalid episode indices: {invalid}")
+        target_episodes = set(episode_indices)
+    else:
+        target_episodes = None
+
+    if repo_id is None:
+        repo_id = f"{dataset.repo_id}_modified"
+    output_dir = Path(output_dir) if output_dir is not None else HF_LEROBOT_HOME / repo_id
+
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    shutil.copytree(dataset.root, output_dir)
+
+    new_dataset = LeRobotDataset(
+        repo_id=repo_id,
+        root=output_dir,
+        image_transforms=dataset.image_transforms,
+        delta_timestamps=dataset.delta_timestamps,
+        tolerance_s=dataset.tolerance_s,
+    )
+    meta = new_dataset.meta
+
+    if meta.episodes is None:
+        meta.episodes = load_episodes(meta.root)
+
+    tasks = meta.tasks.copy()
+    task_index_mapping: dict[int, int] = {}
+
+    for old_task, new_task in task_mapping.items():
+        old_task_idx = int(tasks.loc[old_task].task_index)
+        if new_task in tasks.index:
+            new_task_idx = int(tasks.loc[new_task].task_index)
+        else:
+            new_task_idx = int(tasks["task_index"].max()) + 1 if len(tasks) > 0 else 0
+            tasks.loc[new_task] = new_task_idx
+        task_index_mapping[old_task_idx] = new_task_idx
+
+    if target_episodes is None:
+        rename_index = {
+            old_task: new_task for old_task, new_task in task_mapping.items() if old_task != new_task
+        }
+        if rename_index:
+            tasks = tasks.rename(index=rename_index)
+    else:
+        used_old_tasks: set[str] = set()
+        for ep_idx in range(meta.total_episodes):
+            if ep_idx in target_episodes:
+                continue
+            ep_tasks = meta.episodes[ep_idx]["tasks"]
+            if isinstance(ep_tasks, np.ndarray):
+                ep_task_list = ep_tasks.tolist()
+            else:
+                ep_task_list = list(ep_tasks)
+            used_old_tasks.update(str(task) for task in ep_task_list)
+        for old_task in task_mapping:
+            if old_task not in used_old_tasks and old_task in tasks.index:
+                tasks = tasks.drop(index=old_task)
+
+    write_tasks(tasks, meta.root)
+    meta.tasks = tasks
+
+    def _rename_episode_tasks(episode_tasks):
+        if isinstance(episode_tasks, np.ndarray):
+            episode_tasks = episode_tasks.tolist()
+        return [task_mapping.get(str(task), str(task)) for task in episode_tasks]
+
+    episodes_dir = meta.root / "meta/episodes"
+    if episodes_dir.exists():
+        for ep_path in sorted(episodes_dir.rglob("*.parquet")):
+            df = pd.read_parquet(ep_path)
+            if "tasks" not in df.columns:
+                continue
+            mask = pd.Series(True, index=df.index) if target_episodes is None else df["episode_index"].isin(
+                list(target_episodes)
+            )
+            if not mask.any():
+                continue
+            df.loc[mask, "tasks"] = df.loc[mask, "tasks"].apply(_rename_episode_tasks)
+            df.to_parquet(ep_path)
+
+    needs_task_index_update = any(old != new for old, new in task_index_mapping.items())
+    if needs_task_index_update and target_episodes is not None:
+        data_dir = meta.root / DATA_DIR
+        if data_dir.exists():
+            for data_path in sorted(data_dir.rglob("*.parquet")):
+                df = pd.read_parquet(data_path)
+                if "task_index" not in df.columns:
+                    continue
+                mask = df["episode_index"].isin(list(target_episodes))
+                if not mask.any():
+                    continue
+                for old_idx, new_idx in task_index_mapping.items():
+                    if old_idx == new_idx:
+                        continue
+                    row_mask = mask & (df["task_index"] == old_idx)
+                    if row_mask.any():
+                        df.loc[row_mask, "task_index"] = new_idx
+                _write_parquet(df, data_path, meta)
+
+    meta.info["total_tasks"] = len(meta.tasks)
+    write_info(meta.info, meta.root)
+    meta.episodes = load_episodes(meta.root)
+
+    affected = len(target_episodes) if target_episodes is not None else meta.total_episodes
+    logging.info("Renamed tasks for %s episodes using %d mappings", affected, len(task_mapping))
+    return new_dataset
 
 
 def modify_features(
