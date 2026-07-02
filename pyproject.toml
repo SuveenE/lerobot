@@ -174,8 +174,11 @@ all = [
 [project.scripts]
 lerobot-calibrate="lerobot.scripts.lerobot_calibrate:main"
 lerobot-find-cameras="lerobot.scripts.lerobot_find_cameras:main"
+lerobot-reset-cameras="lerobot.scripts.lerobot_reset_cameras:main"
+lerobot-udp-video-viewer="lerobot.scripts.lerobot_udp_video_viewer:main"
 lerobot-overlay-camera="lerobot.scripts.lerobot_overlay_camera:main"
 lerobot-live-cameras="lerobot.scripts.lerobot_live_cameras:main"
+lerobot-test-encoding="lerobot.scripts.lerobot_test_encoding:main"
 lerobot-find-port="lerobot.scripts.lerobot_find_port:main"
 lerobot-record="lerobot.scripts.lerobot_record:main"
 lerobot-replay="lerobot.scripts.lerobot_replay:main"

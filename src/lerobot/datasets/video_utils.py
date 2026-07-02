@@ -17,8 +17,10 @@ import contextlib
 import glob
 import importlib
 import logging
+import os
 import queue
 import shutil
+import subprocess
 import tempfile
 import threading
 import warnings
@@ -39,16 +41,32 @@ from PIL import Image
 
 # List of hardware encoders to probe for auto-selection. Availability depends on the platform and FFmpeg build.
 # Determines the order of preference for auto-selection when vcodec="auto" is used.
+# These are driven directly through PyAV's bundled FFmpeg (libavcodec).
 HW_ENCODERS = [
     "h264_videotoolbox",  # macOS
     "hevc_videotoolbox",  # macOS
     "h264_nvenc",  # NVIDIA GPU
     "hevc_nvenc",  # NVIDIA GPU
-    "h264_vaapi",  # Linux Intel/AMD
+    "h264_vaapi",  # Linux Intel/AMD (usually absent from PyAV's bundled FFmpeg, see VAAPI_ENCODERS)
     "h264_qsv",  # Intel Quick Sync
 ]
 
-VALID_VIDEO_CODECS = {"h264", "hevc", "libsvtav1", "auto"} | set(HW_ENCODERS)
+# VAAPI encoders are driven through a *system* `ffmpeg` binary in a subprocess rather than PyAV.
+# PyAV's bundled FFmpeg is built for portability and typically lacks VAAPI/QSV, and even when present,
+# VAAPI encoding requires a hardware frames context + `hwupload` that PyAV does not expose conveniently.
+# Preference order used during `vcodec="auto"` resolution (AV1 first: smallest files, native to LeRobot datasets).
+VAAPI_ENCODERS = [
+    "av1_vaapi",  # Intel Xe / Arc (e.g. Meteor Lake) AV1 hardware encode
+    "hevc_vaapi",
+    "h264_vaapi",
+]
+
+VALID_VIDEO_CODECS = {"h264", "hevc", "libsvtav1", "auto"} | set(HW_ENCODERS) | set(VAAPI_ENCODERS)
+
+
+def is_vaapi_codec(vcodec: str) -> bool:
+    """Whether a codec should be encoded through the system-ffmpeg VAAPI subprocess path."""
+    return vcodec.endswith("_vaapi")
 
 
 def _get_codec_options(
@@ -86,16 +104,74 @@ def _get_codec_options(
     return options
 
 
+def _can_open_encoder(codec_name: str) -> bool:
+    """Return True only if the encoder can actually be *opened* (not just registered).
+
+    A codec being registered in FFmpeg does not mean it can run: e.g. `h264_nvenc` is
+    present in many builds but fails at `avcodec_open2` when the NVIDIA driver / `libcuda.so.1`
+    is missing. We verify by opening the encoder on a tiny dummy frame so that `auto`
+    selection never picks an encoder that would crash mid-recording.
+    """
+    try:
+        ctx = av.CodecContext.create(codec_name, "w")
+        ctx.width = 64
+        ctx.height = 64
+        ctx.pix_fmt = "yuv420p"
+        ctx.time_base = Fraction(1, 30)
+        ctx.encode(av.VideoFrame(64, 64, "yuv420p"))
+        ctx.close()
+        return True
+    except Exception:
+        return False
+
+
 def detect_available_hw_encoders() -> list[str]:
-    """Probe PyAV/FFmpeg for available hardware video encoders."""
+    """Probe PyAV/FFmpeg for hardware video encoders that can actually be opened."""
     available = []
     for codec_name in HW_ENCODERS:
-        try:
-            av.codec.Codec(codec_name, "w")
+        if _can_open_encoder(codec_name):
             available.append(codec_name)
-        except Exception:  # nosec B110
-            pass  # nosec B110
     return available
+
+
+def _resolve_ffmpeg_binary() -> str:
+    """Locate a system `ffmpeg` binary for the VAAPI subprocess encoding path."""
+    binary = os.environ.get("LEROBOT_FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if binary is None:
+        raise RuntimeError(
+            "VAAPI hardware encoding needs a system 'ffmpeg' binary with VAAPI support, but none was "
+            "found on PATH. Install one (e.g. 'sudo apt install ffmpeg') or set the LEROBOT_FFMPEG_BINARY "
+            "environment variable to its path. Note: PyAV's bundled FFmpeg does not include VAAPI."
+        )
+    return binary
+
+
+def _vaapi_device() -> str:
+    """VA-API render node. Override via LEROBOT_VAAPI_DEVICE (default: /dev/dri/renderD128)."""
+    return os.environ.get("LEROBOT_VAAPI_DEVICE", "/dev/dri/renderD128")
+
+
+def detect_vaapi_encoders() -> list[str]:
+    """Probe a system `ffmpeg` binary for usable VAAPI encoders.
+
+    Returns the subset of `VAAPI_ENCODERS` the system ffmpeg advertises, but only if a
+    VA-API render device is actually present. This is a best-effort heuristic for `auto`
+    selection; explicit `vcodec=av1_vaapi` is the reliable way to request hardware AV1.
+    """
+    binary = os.environ.get("LEROBOT_FFMPEG_BINARY") or shutil.which("ffmpeg")
+    if binary is None or not Path(_vaapi_device()).exists():
+        return []
+    try:
+        result = subprocess.run(
+            [binary, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:  # nosec B110
+        return []
+    return [name for name in VAAPI_ENCODERS if name in result.stdout]
 
 
 def resolve_vcodec(vcodec: str) -> str:
@@ -109,6 +185,12 @@ def resolve_vcodec(vcodec: str) -> str:
     for encoder in HW_ENCODERS:
         if encoder in available:
             logging.info(f"Auto-selected video codec: {encoder}")
+            return encoder
+    # No PyAV-native HW encoder; try VA-API (Intel/AMD iGPU) via the system ffmpeg subprocess path.
+    vaapi_available = detect_vaapi_encoders()
+    for encoder in VAAPI_ENCODERS:
+        if encoder in vaapi_available:
+            logging.info(f"Auto-selected VAAPI video codec (via system ffmpeg): {encoder}")
             return encoder
     logging.info("No hardware encoder available, falling back to software encoder 'libsvtav1'")
     return "libsvtav1"
@@ -381,6 +463,159 @@ def decode_video_frames_torchcodec(
     return closest_frames
 
 
+def _build_vaapi_ffmpeg_cmd(
+    vcodec: str,
+    width: int,
+    height: int,
+    fps: int,
+    video_path: Path,
+    g: int | None = 2,
+    crf: int | None = 30,
+    encoder_threads: int | None = None,
+) -> list[str]:
+    """Build the system-ffmpeg argv to encode raw RGB frames (stdin) via VA-API.
+
+    Frames are piped in as packed `rgb24`; ffmpeg converts to `nv12` and uploads to the GPU
+    (`format=nv12,hwupload`) before handing off to the VA-API encoder. `crf` selects a constant
+    quantizer via `-rc_mode CQP`. The quality option differs per codec: `av1_vaapi` has no `-qp`
+    option and instead reads `-global_quality` (qindex on a 0-255 scale, default 25), whereas
+    `h264_vaapi`/`hevc_vaapi` take `-qp`. Note the VA-API qindex/qp scales differ from the
+    software-AV1 `crf` scale, so the value may need tuning for your quality/size target.
+    """
+    cmd = [
+        _resolve_ffmpeg_binary(),
+        "-y",
+        "-loglevel",
+        "error",
+        "-vaapi_device",
+        _vaapi_device(),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(fps),
+        "-i",
+        "pipe:0",
+        "-vf",
+        "format=nv12,hwupload",
+        "-c:v",
+        vcodec,
+    ]
+    if crf is not None:
+        cmd += ["-rc_mode", "CQP"]
+        # av1_vaapi exposes no `qp` option; its constant-quality value comes from `global_quality`.
+        if vcodec == "av1_vaapi":
+            cmd += ["-global_quality", str(crf)]
+        else:
+            cmd += ["-qp", str(crf)]
+    if g is not None:
+        cmd += ["-g", str(g)]
+    if encoder_threads is not None:
+        cmd += ["-threads", str(encoder_threads)]
+    cmd += ["-an", str(video_path)]
+    return cmd
+
+
+class _VaapiSubprocessEncoder:
+    """Encode raw RGB frames to a video file via a system ffmpeg with VA-API hardware acceleration.
+
+    One instance per output file. Frames (HWC uint8 RGB numpy arrays) are written to the ffmpeg
+    process stdin; ffmpeg performs the `nv12` conversion, GPU upload and hardware encode. This is
+    used instead of the PyAV path for `*_vaapi` codecs because PyAV's bundled FFmpeg typically lacks
+    VA-API and does not expose the hardware frames/upload plumbing VA-API encoders require.
+    """
+
+    def __init__(
+        self,
+        video_path: Path,
+        fps: int,
+        vcodec: str,
+        width: int,
+        height: int,
+        g: int | None = None,
+        crf: int | None = None,
+        encoder_threads: int | None = None,
+    ):
+        self.video_path = Path(video_path)
+        self.video_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = _build_vaapi_ffmpeg_cmd(
+            vcodec=vcodec,
+            width=width,
+            height=height,
+            fps=fps,
+            video_path=self.video_path,
+            g=g,
+            crf=crf,
+            encoder_threads=encoder_threads,
+        )
+        # stderr is captured to a temp file (not a PIPE) to avoid deadlocking if ffmpeg
+        # fills the pipe buffer while we are busy writing frames to stdin.
+        self._stderr = tempfile.TemporaryFile()
+        self._proc: subprocess.Popen | None = subprocess.Popen(  # noqa: S603
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=self._stderr,
+        )
+
+    def write(self, frame_hwc_rgb_uint8: np.ndarray) -> None:
+        if self._proc is None or self._proc.stdin is None:
+            raise RuntimeError("VAAPI encoder process is not running.")
+        frame = np.ascontiguousarray(frame_hwc_rgb_uint8, dtype=np.uint8)
+        try:
+            self._proc.stdin.write(frame.tobytes())
+        except BrokenPipeError as e:
+            raise RuntimeError(self._format_error()) from e
+
+    def close(self) -> None:
+        """Flush, wait for ffmpeg to finish, and raise if encoding failed."""
+        if self._proc is None:
+            return
+        try:
+            if self._proc.stdin is not None:
+                with contextlib.suppress(BrokenPipeError):
+                    self._proc.stdin.close()
+            returncode = self._proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
+            self._stderr.close()
+            self._proc = None
+            raise RuntimeError("VAAPI ffmpeg encoder timed out while finalizing the video.") from None
+        self._proc = None
+        if returncode != 0:
+            err = self._format_error(returncode)
+            self._stderr.close()
+            raise RuntimeError(err)
+        self._stderr.close()
+
+    def abort(self) -> None:
+        """Best-effort teardown without raising (used on the error path)."""
+        if self._proc is not None:
+            with contextlib.suppress(Exception):
+                if self._proc.stdin is not None:
+                    self._proc.stdin.close()
+                self._proc.kill()
+                self._proc.wait(timeout=5)
+            self._proc = None
+        with contextlib.suppress(Exception):
+            self._stderr.close()
+
+    def _format_error(self, returncode: int | None = None) -> str:
+        msg = "VAAPI ffmpeg encoding failed"
+        if returncode is not None:
+            msg += f" (exit code {returncode})"
+        with contextlib.suppress(Exception):
+            self._stderr.seek(0)
+            err = self._stderr.read().decode("utf-8", errors="replace").strip()
+            if err:
+                msg += f": {err}"
+        return msg
+
+
 def encode_video_frames(
     imgs_dir: Path | str,
     video_path: Path | str,
@@ -426,6 +661,35 @@ def encode_video_frames(
     with Image.open(input_list[0]) as dummy_image:
         width, height = dummy_image.size
 
+    # Set logging level
+    if log_level is not None:
+        # "While less efficient, it is generally preferable to modify logging with Python's logging"
+        logging.getLogger("libav").setLevel(log_level)
+
+    # VA-API codecs are encoded through a system ffmpeg subprocess (see _VaapiSubprocessEncoder).
+    if is_vaapi_codec(vcodec):
+        encoder = _VaapiSubprocessEncoder(
+            video_path=video_path,
+            fps=fps,
+            vcodec=vcodec,
+            width=width,
+            height=height,
+            g=g,
+            crf=crf,
+            encoder_threads=encoder_threads,
+        )
+        try:
+            for input_data in input_list:
+                with Image.open(input_data) as input_image:
+                    encoder.write(np.asarray(input_image.convert("RGB")))
+            encoder.close()
+        except Exception:
+            encoder.abort()
+            raise
+        if not video_path.exists():
+            raise OSError(f"Video encoding did not work. File not found: {video_path}.")
+        return
+
     # Define video codec options
     video_options = _get_codec_options(vcodec, g, crf, preset)
 
@@ -443,11 +707,6 @@ def encode_video_frames(
                 video_options["svtav1-params"] = lp_param
         else:
             video_options["threads"] = str(encoder_threads)
-
-    # Set logging level
-    if log_level is not None:
-        # "While less efficient, it is generally preferable to modify logging with Python's logging"
-        logging.getLogger("libav").setLevel(log_level)
 
     # Create and open output file (overwrite by default)
     with av.open(str(video_path), "w") as output:
@@ -602,6 +861,8 @@ class _CameraEncoderThread(threading.Thread):
 
         container = None
         output_stream = None
+        vaapi_encoder = None
+        use_vaapi = is_vaapi_codec(self.vcodec)
         stats_tracker = RunningQuantileStats()
         frame_count = 0
 
@@ -628,35 +889,58 @@ class _CameraEncoderThread(threading.Thread):
                     if frame_data.dtype != np.uint8:
                         frame_data = (frame_data * 255).astype(np.uint8)
 
-                # Open container on first frame (to get width/height)
-                if container is None:
-                    height, width = frame_data.shape[:2]
-                    video_options = _get_codec_options(self.vcodec, self.g, self.crf, self.preset)
-                    if self.encoder_threads is not None:
-                        if self.vcodec == "libsvtav1":
-                            lp_param = f"lp={self.encoder_threads}"
-                            if "svtav1-params" in video_options:
-                                video_options["svtav1-params"] += f":{lp_param}"
+                if use_vaapi:
+                    # Encode through a system ffmpeg subprocess (VA-API hardware path).
+                    if vaapi_encoder is None:
+                        height, width = frame_data.shape[:2]
+                        vaapi_encoder = _VaapiSubprocessEncoder(
+                            video_path=self.video_path,
+                            fps=self.fps,
+                            vcodec=self.vcodec,
+                            width=width,
+                            height=height,
+                            g=self.g,
+                            crf=self.crf,
+                            encoder_threads=self.encoder_threads,
+                        )
+                    vaapi_encoder.write(frame_data)
+                else:
+                    # Open container on first frame (to get width/height)
+                    if container is None:
+                        height, width = frame_data.shape[:2]
+                        video_options = _get_codec_options(self.vcodec, self.g, self.crf, self.preset)
+                        if self.encoder_threads is not None:
+                            if self.vcodec == "libsvtav1":
+                                lp_param = f"lp={self.encoder_threads}"
+                                if "svtav1-params" in video_options:
+                                    video_options["svtav1-params"] += f":{lp_param}"
+                                else:
+                                    video_options["svtav1-params"] = lp_param
                             else:
-                                video_options["svtav1-params"] = lp_param
-                        else:
-                            video_options["threads"] = str(self.encoder_threads)
-                    Path(self.video_path).parent.mkdir(parents=True, exist_ok=True)
-                    container = av.open(str(self.video_path), "w")
-                    output_stream = container.add_stream(self.vcodec, self.fps, options=video_options)
-                    output_stream.pix_fmt = self.pix_fmt
-                    output_stream.width = width
-                    output_stream.height = height
-                    output_stream.time_base = Fraction(1, self.fps)
+                                video_options["threads"] = str(self.encoder_threads)
+                        Path(self.video_path).parent.mkdir(parents=True, exist_ok=True)
+                        container = av.open(str(self.video_path), "w")
+                        output_stream = container.add_stream(self.vcodec, self.fps, options=video_options)
+                        output_stream.pix_fmt = self.pix_fmt
+                        output_stream.width = width
+                        output_stream.height = height
+                        output_stream.time_base = Fraction(1, self.fps)
 
-                # Encode frame with explicit timestamps
-                pil_img = Image.fromarray(frame_data)
-                video_frame = av.VideoFrame.from_image(pil_img)
-                video_frame.pts = frame_count
-                video_frame.time_base = Fraction(1, self.fps)
-                packet = output_stream.encode(video_frame)
-                if packet:
-                    container.mux(packet)
+                    # Encode frame with explicit timestamps. For standard 3-channel
+                    # RGB frames, build the AV frame directly from the (contiguous)
+                    # numpy array to avoid a needless PIL round-trip per frame. Fall
+                    # back to PIL for anything else (e.g. grayscale/depth).
+                    if frame_data.ndim == 3 and frame_data.shape[2] == 3:
+                        video_frame = av.VideoFrame.from_ndarray(
+                            np.ascontiguousarray(frame_data), format="rgb24"
+                        )
+                    else:
+                        video_frame = av.VideoFrame.from_image(Image.fromarray(frame_data))
+                    video_frame.pts = frame_count
+                    video_frame.time_base = Fraction(1, self.fps)
+                    packet = output_stream.encode(video_frame)
+                    if packet:
+                        container.mux(packet)
 
                 # Update stats with downsampled frame (per-channel stats like compute_episode_stats)
                 img_chw = frame_data.transpose(2, 0, 1)  # HWC -> CHW
@@ -669,13 +953,17 @@ class _CameraEncoderThread(threading.Thread):
                 frame_count += 1
 
             # Flush encoder
-            if output_stream is not None:
-                packet = output_stream.encode()
-                if packet:
-                    container.mux(packet)
+            if use_vaapi:
+                if vaapi_encoder is not None:
+                    vaapi_encoder.close()
+            else:
+                if output_stream is not None:
+                    packet = output_stream.encode()
+                    if packet:
+                        container.mux(packet)
 
-            if container is not None:
-                container.close()
+                if container is not None:
+                    container.close()
 
             av.logging.restore_default_callback()
 
@@ -691,6 +979,8 @@ class _CameraEncoderThread(threading.Thread):
             if container is not None:
                 with contextlib.suppress(Exception):
                     container.close()
+            if vaapi_encoder is not None:
+                vaapi_encoder.abort()
             self.result_queue.put(("error", str(e)))
 
 
@@ -816,7 +1106,8 @@ class StreamingVideoEncoder:
             if count == 1 or count % 10 == 0:
                 logging.warning(
                     f"Encoder queue full for {video_key}, dropped {count} frame(s). "
-                    f"Consider using vcodec='auto' for hardware encoding or increasing encoder_queue_maxsize."
+                    f"Consider a hardware encoder (e.g. vcodec='av1_vaapi' on Intel/AMD iGPUs, or "
+                    f"vcodec='auto') or increasing encoder_queue_maxsize."
                 )
 
     def finish_episode(self) -> dict[str, tuple[Path, dict | None]]:

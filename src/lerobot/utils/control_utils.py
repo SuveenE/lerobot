@@ -18,6 +18,8 @@
 
 
 import logging
+import select
+import sys
 import threading
 import traceback
 from contextlib import nullcontext
@@ -152,24 +154,35 @@ def init_keyboard_listener():
     print("  's' + Enter: Stop recording completely")
 
     def input_listener():
+        # IMPORTANT: do not sit in a blocking `input()`/`fgets()` read. A blocking
+        # buffered read holds the libc stdin FILE lock (`_IO_stdfile_0_lock`) the
+        # whole time it waits for a line. At interpreter shutdown glibc's atexit
+        # `_IO_flush_all()` tries to lock every stdio stream (including stdin), so a
+        # thread parked in `input()` deadlocks the whole process exit (it hangs after
+        # "Exiting" with no further output). Poll the raw fd with `select` instead:
+        # `select` does not take the FILE lock, and the loop exits promptly once
+        # `stop_recording` is set, so the thread terminates cleanly before exit.
         try:
             while not events["stop_recording"]:
-                try:
-                    user_input = input().strip().lower()
-                    if user_input == 'n':
-                        print("Next/forward command received. Exiting loop...")
-                        events["exit_early"] = True
-                    elif user_input == 'b':
-                        print("Back command received. Exiting loop and re-record episode...")
-                        events["rerecord_episode"] = True
-                        events["exit_early"] = True
-                    elif user_input == 's':
-                        print("Stop command received. Stopping data recording...")
-                        events["stop_recording"] = True
-                        events["exit_early"] = True
-                except EOFError:
-                    # Handle case where input is not available (e.g., piped input)
+                ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+                if not ready:
+                    continue
+                line = sys.stdin.readline()
+                if line == "":
+                    # EOF (e.g. stdin closed or piped input exhausted).
                     break
+                user_input = line.strip().lower()
+                if user_input == 'n':
+                    print("Next/forward command received. Exiting loop...")
+                    events["exit_early"] = True
+                elif user_input == 'b':
+                    print("Back command received. Exiting loop and re-record episode...")
+                    events["rerecord_episode"] = True
+                    events["exit_early"] = True
+                elif user_input == 's':
+                    print("Stop command received. Stopping data recording...")
+                    events["stop_recording"] = True
+                    events["exit_early"] = True
         except Exception as e:
             logging.debug(f"Input listener error: {e}")
 

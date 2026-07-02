@@ -22,6 +22,7 @@ import portal
 
 from ..teleoperator import Teleoperator
 from .config_bi_yam_leader import BiYamLeaderConfig
+from .yam_leader_udp_client import YamLeaderUDPClient
 
 logger = logging.getLogger(__name__)
 
@@ -82,30 +83,54 @@ class YamLeaderClient:
 
     def get_observations(self) -> dict[str, np.ndarray]:
         """Get current observations including joint positions, velocities, etc."""
+        return self.request_observations().result()
+
+    def request_observations(self):
+        """Fire a non-blocking observations RPC and return the portal future.
+
+        `portal.Client` calls return immediately with a future; `.result()` is what
+        blocks on the network round-trip. Exposing the future lets a caller fire
+        requests to *both* leader arms (left and right) before waiting on either, so
+        the two servers work concurrently and we pay ~one round-trip instead of two
+        back-to-back. See `BiYamLeader.get_action`.
+        """
         if self._client is None:
             raise RuntimeError("Client not connected")
-        return self._client.get_observations().result()
+        return self._client.get_observations()
 
-    def get_gripper_from_encoder(self) -> float:
+    @staticmethod
+    def gripper_from_encoder_obs(obs: dict) -> float:
+        """
+        Derive gripper state from teaching handle encoder button in an observation dict.
+        Returns a value between 0 (closed) and 1 (open).
+        Falls back to 1.0 (open) if not available.
+        """
+        try:
+            if "io_inputs" in obs:
+                # Button pressed = closed gripper (0), not pressed = open (1)
+                return 0.0 if obs["io_inputs"][0] > 0.5 else 1.0
+            return 1.0
+        except Exception:
+            return 1.0
+
+    def get_gripper_from_encoder(self, obs: dict | None = None) -> float:
         """
         Try to get gripper state from teaching handle encoder button.
         Returns a value between 0 (closed) and 1 (open).
         Falls back to 1.0 (open) if not available.
+
+        Args:
+            obs: Optional pre-fetched observations. When provided, avoids an extra RPC call.
         """
+        if obs is not None:
+            return self.gripper_from_encoder_obs(obs)
+
         if self._client is None:
             raise RuntimeError("Client not connected")
         try:
-            # Try to get encoder state if the server exposes it
-            # This requires custom method in the i2rt server
-            obs = self._client.get_observations().result()
-            # Check if encoder button data is available in observations
-            # The encoder button state might be in io_inputs or similar field
-            if "io_inputs" in obs:
-                # Button pressed = closed gripper (0), not pressed = open (1)
-                return 0.0 if obs["io_inputs"][0] > 0.5 else 1.0
-            return 1.0  # Default to open if no encoder data
+            return self.gripper_from_encoder_obs(self._client.get_observations().result())
         except Exception:
-            return 1.0  # Default to open on any error
+            return 1.0
 
 
 class BiYamLeader(Teleoperator):
@@ -134,9 +159,24 @@ class BiYamLeader(Teleoperator):
         super().__init__(config)
         self.config = config
 
-        # Create clients for left and right leader arms
-        self.left_arm = YamLeaderClient(port=config.left_arm_port, host=config.server_host)
-        self.right_arm = YamLeaderClient(port=config.right_arm_port, host=config.server_host)
+        # Create clients for left and right leader arms. Both transports expose the
+        # same interface, so the rest of this class is transport-agnostic.
+        if config.transport == "udp":
+            self.left_arm = YamLeaderUDPClient(
+                port=config.left_arm_port,
+                host=config.server_host,
+                max_obs_age_s=config.max_obs_age_s,
+                watchdog_timeout_s=config.watchdog_timeout_s,
+            )
+            self.right_arm = YamLeaderUDPClient(
+                port=config.right_arm_port,
+                host=config.server_host,
+                max_obs_age_s=config.max_obs_age_s,
+                watchdog_timeout_s=config.watchdog_timeout_s,
+            )
+        else:
+            self.left_arm = YamLeaderClient(port=config.left_arm_port, host=config.server_host)
+            self.right_arm = YamLeaderClient(port=config.right_arm_port, host=config.server_host)
 
         # Store number of DOFs (will be set after connection)
         self._left_dofs = None
@@ -231,8 +271,14 @@ class BiYamLeader(Teleoperator):
         """
         action_dict = {}
 
+        # Fire both leader RPCs first (non-blocking), then collect. This overlaps the
+        # two network round-trips instead of doing left fully before right, roughly
+        # halving the time spent waiting on the leader servers.
+        left_future = self.left_arm.request_observations()
+        right_future = self.right_arm.request_observations()
+
         # Get left arm observations
-        left_obs = self.left_arm.get_observations()
+        left_obs = left_future.result()
         left_joint_pos = left_obs["joint_pos"]
 
         # Handle gripper: either from physical gripper or teaching handle encoder
@@ -240,8 +286,8 @@ class BiYamLeader(Teleoperator):
         if left_has_gripper:
             left_joint_pos = np.concatenate([left_joint_pos, left_obs["gripper_pos"]])
         else:
-            # Teaching handle: try to get gripper from encoder button
-            left_gripper = self.left_arm.get_gripper_from_encoder()
+            # Teaching handle: derive gripper from encoder button in the same obs
+            left_gripper = self.left_arm.get_gripper_from_encoder(left_obs)
             left_joint_pos = np.concatenate([left_joint_pos, [left_gripper]])
             left_has_gripper = True
 
@@ -253,8 +299,8 @@ class BiYamLeader(Teleoperator):
             else:
                 action_dict[f"left_joint_{i}.pos"] = float(pos)
 
-        # Get right arm observations
-        right_obs = self.right_arm.get_observations()
+        # Get right arm observations (future was already fired above)
+        right_obs = right_future.result()
         right_joint_pos = right_obs["joint_pos"]
 
         # Handle gripper: either from physical gripper or teaching handle encoder
@@ -262,8 +308,8 @@ class BiYamLeader(Teleoperator):
         if right_has_gripper:
             right_joint_pos = np.concatenate([right_joint_pos, right_obs["gripper_pos"]])
         else:
-            # Teaching handle: try to get gripper from encoder button
-            right_gripper = self.right_arm.get_gripper_from_encoder()
+            # Teaching handle: derive gripper from encoder button in the same obs
+            right_gripper = self.right_arm.get_gripper_from_encoder(right_obs)
             right_joint_pos = np.concatenate([right_joint_pos, [right_gripper]])
             right_has_gripper = True
 

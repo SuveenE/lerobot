@@ -102,6 +102,7 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     bi_so100_follower,
     bi_yam_follower,
+    bi_yam_linear_bot,
     hope_jr,
     koch_follower,
     make_robot_from_config,
@@ -175,7 +176,8 @@ class DatasetRecordConfig:
     # Set to 1 for immediate encoding (default behavior), or higher for batched encoding
     video_encoding_batch_size: int = 1
     # Video codec for encoding videos. Options: 'h264', 'hevc', 'libsvtav1', 'auto',
-    # or hardware-specific: 'h264_videotoolbox', 'h264_nvenc', 'h264_vaapi', 'h264_qsv'.
+    # or hardware-specific: 'h264_videotoolbox', 'h264_nvenc',
+    # VA-API (Intel/AMD iGPU, requires a system ffmpeg with VA-API): 'av1_vaapi', 'hevc_vaapi', 'h264_vaapi'.
     # Use 'auto' to auto-detect the best available hardware encoder.
     vcodec: str = "libsvtav1"
     # Enable streaming video encoding: encode frames in real-time during capture instead
@@ -323,20 +325,23 @@ def record_loop(
     n_overruns = 0
     work_sum = 0.0
     work_max = 0.0
-    _section_t = 0.0
+    # Timestamps are kept as integer nanoseconds (time.perf_counter_ns) so interval
+    # subtractions are exact; we convert to float seconds only for the small resulting
+    # durations, where double precision is more than enough.
+    _section_t = 0
 
     def _record_timing(name: str) -> None:
         nonlocal _section_t
-        now = time.perf_counter()
-        dt = now - _section_t
+        now = time.perf_counter_ns()
+        dt = (now - _section_t) / 1e9
         timing_sum[name] = timing_sum.get(name, 0.0) + dt
         timing_max[name] = max(timing_max.get(name, 0.0), dt)
         _section_t = now
 
     timestamp = 0
-    start_episode_t = time.perf_counter()
+    start_episode_t = time.perf_counter_ns()
     while timestamp < control_time_s:
-        start_loop_t = time.perf_counter()
+        start_loop_t = time.perf_counter_ns()
 
         if log_timing:
             _section_t = start_loop_t
@@ -405,7 +410,8 @@ def record_loop(
             action_values = act_processed_policy
             robot_action_to_send = robot_action_processor((act_processed_policy, obs))
         else:
-            action_values = act_processed_teleop
+            obs_fallback = robot.teleop_action_from_obs(obs)
+            action_values = {**obs_fallback, **act_processed_teleop}
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
         if log_timing:
             _record_timing("process_action")
@@ -431,7 +437,7 @@ def record_loop(
             if log_timing:
                 _record_timing("display_data")
 
-        dt_s = time.perf_counter() - start_loop_t
+        dt_s = (time.perf_counter_ns() - start_loop_t) / 1e9
         busy_wait(1 / fps - dt_s)
 
         # Accumulate stats for the end-of-loop summary. A frame is "late" (overrun)
@@ -444,7 +450,7 @@ def record_loop(
             if dt_s > 1 / fps:
                 n_overruns += 1
 
-        timestamp = time.perf_counter() - start_episode_t
+        timestamp = (time.perf_counter_ns() - start_episode_t) / 1e9
 
     # Emit a single timing summary for the whole loop so the logs stay readable.
     if log_timing and n_iters > 0:
@@ -572,7 +578,29 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     with VideoEncodingManager(dataset):
         recorded_episodes = 0
         while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+            # Robots that maintain their own running odometry (e.g. the
+            # FlowBase mobile base) expose `reset_odometry`. Zero it here so
+            # every recorded episode starts at the origin instead of wherever
+            # the base drifted during the previous episode + reset window.
+            reset_odometry = getattr(robot, "reset_odometry", None)
+            if callable(reset_odometry):
+                reset_odometry(events=events)
+
+            # Robots with a height axis (e.g. the Linear Bot's lift rail) expose
+            # `move_to_initial_height` to drive to a fixed working height before
+            # every episode. This runs after the reset window where the operator
+            # parks the base somewhere the arms can safely lower (and the arms
+            # are homed via `move_to_initial_position`), so the rail can descend
+            # to its start height here without colliding.
+            move_to_initial_height = getattr(robot, "move_to_initial_height", None)
+            if callable(move_to_initial_height):
+                move_to_initial_height(events=events)
+
+            # Announced only after the pre-episode moves (odometry reset + rail
+            # height seek) settle, so the cue lines up with the actual start of
+            # recording rather than the setup that precedes it.
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+
             record_loop(
                 robot=robot,
                 events=events,

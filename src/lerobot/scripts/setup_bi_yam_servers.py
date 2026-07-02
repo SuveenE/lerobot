@@ -17,7 +17,8 @@ Expected CAN interfaces:
 
 Usage:
     python -m lerobot.scripts.setup_bi_yam_servers
-    python -m lerobot.scripts.setup_bi_yam_servers --eval  # follower arms only (no leader/teaching handles)
+    python -m lerobot.scripts.setup_bi_yam_servers --eval               # follower arms only (no leader/teaching handles)
+    python -m lerobot.scripts.setup_bi_yam_servers --transport udp      # leader arms use UDP push streaming
 
 Requirements:
     - LeRobot installed with yam support: pip install -e ".[yam]"
@@ -95,7 +96,7 @@ def find_i2rt_script():
     )
 
 
-def launch_server_process(can_channel, gripper, mode, server_port, use_encoder_server=False):
+def launch_server_process(can_channel, gripper, mode, server_port, use_encoder_server=False, transport="portal"):
     """Launch a single server process for a Yam arm."""
     if use_encoder_server:
         # Use enhanced server with encoder support for teaching handles
@@ -126,8 +127,15 @@ def launch_server_process(can_channel, gripper, mode, server_port, use_encoder_s
         str(server_port),
     ]
 
+    # The UDP transport is only implemented by the enhanced encoder server.
+    if transport != "portal":
+        if not use_encoder_server:
+            print(f"Error: transport='{transport}' requires the encoder server (use_encoder_server=True)")
+            sys.exit(1)
+        cmd += ["--transport", transport]
+
     server_type = "Enhanced (Encoder)" if use_encoder_server else "Standard"
-    print(f"Starting [{server_type}]: {' '.join(cmd)}")
+    print(f"Starting [{server_type}, transport={transport}]: {' '.join(cmd)}")
 
     try:
         process = subprocess.Popen(cmd)
@@ -144,6 +152,13 @@ def main():
         "--eval",
         action="store_true",
         help="Eval mode: only start follower arm servers (skip leader/teaching handle arms).",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["portal", "udp"],
+        default="portal",
+        help="Transport for the leader arm servers: 'portal' (TCP RPC, default) or 'udp' (push streaming). "
+        "Follower servers always use portal.",
     )
     args = parser.parse_args()
 
@@ -187,6 +202,7 @@ def main():
                     "mode": "follower",
                     "server_port": 5001,
                     "use_encoder_server": True,
+                    "transport": args.transport,
                 },
                 # Left leader arm (enhanced server with encoder support)
                 {
@@ -195,6 +211,7 @@ def main():
                     "mode": "follower",
                     "server_port": 5002,
                     "use_encoder_server": True,
+                    "transport": args.transport,
                 },
             ]
 
@@ -213,11 +230,14 @@ def main():
         print("  - Right follower arm: localhost:1234")
         print("  - Left follower arm:  localhost:1235")
         if not eval_mode:
-            print("  - Right leader arm:   localhost:5001")
-            print("  - Left leader arm:    localhost:5002")
+            transport_note = " (UDP)" if args.transport == "udp" else ""
+            print(f"  - Right leader arm:   localhost:5001{transport_note}")
+            print(f"  - Left leader arm:    localhost:5002{transport_note}")
             print("\nYou can now use lerobot-record with:")
             print("  --robot.type=bi_yam_follower")
             print("  --teleop.type=bi_yam_leader")
+            if args.transport == "udp":
+                print("  --teleop.transport=udp")
         else:
             print("\nFollower arms ready for eval (no leader arms started)")
         print("\nPress Ctrl+C to stop all server processes")
