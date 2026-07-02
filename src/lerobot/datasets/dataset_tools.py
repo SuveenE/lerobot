@@ -65,7 +65,7 @@ def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> d
     Returns:
         dict containing episode metadata and stats
     """
-    ep_meta = src_dataset.meta.episodes[episode_idx]
+    ep_meta = _episode_metadata_by_index(src_dataset.meta, episode_idx)
     chunk_idx = ep_meta["meta/episodes/chunk_index"]
     file_idx = ep_meta["meta/episodes/file_index"]
 
@@ -83,6 +83,22 @@ def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> d
             episode_dict[key] = np.array(value)
 
     return episode_dict
+
+
+def _episode_metadata_by_index(meta: LeRobotDatasetMetadata, episode_idx: int) -> dict:
+    """Return episode metadata by episode_index, not row position."""
+    if meta.episodes is None:
+        meta.episodes = load_episodes(meta.root)
+
+    cache = getattr(meta, "_dataset_tools_episode_index_cache", None)
+    if cache is None:
+        cache = {int(ep["episode_index"]): ep for ep in meta.episodes}
+        setattr(meta, "_dataset_tools_episode_index_cache", cache)
+
+    try:
+        return cache[int(episode_idx)]
+    except KeyError as exc:
+        raise IndexError(f"Episode index {episode_idx} not found in metadata") from exc
 
 
 def delete_episodes(
@@ -631,7 +647,13 @@ def _copy_and_reindex_data(
 
     file_to_episodes: dict[Path, set[int]] = {}
     for old_idx in episode_mapping:
-        file_path = src_dataset.meta.get_data_file_path(old_idx)
+        src_episode = _episode_metadata_by_index(src_dataset.meta, old_idx)
+        file_path = Path(
+            DEFAULT_DATA_PATH.format(
+                chunk_index=src_episode["data/chunk_index"],
+                file_index=src_episode["data/file_index"],
+            )
+        )
         if file_path not in file_to_episodes:
             file_to_episodes[file_path] = set()
         file_to_episodes[file_path].add(old_idx)
@@ -674,7 +696,7 @@ def _copy_and_reindex_data(
             df["task_index"] = _remap_task_indices(df["task_index"])
 
             first_ep_old_idx = min(episodes_to_keep)
-            src_ep = src_dataset.meta.episodes[first_ep_old_idx]
+            src_ep = _episode_metadata_by_index(src_dataset.meta, first_ep_old_idx)
             chunk_idx = src_ep["data/chunk_index"]
             file_idx = src_ep["data/file_index"]
         else:
@@ -689,7 +711,7 @@ def _copy_and_reindex_data(
             df["task_index"] = _remap_task_indices(df["task_index"])
 
             first_ep_old_idx = min(episodes_to_keep)
-            src_ep = src_dataset.meta.episodes[first_ep_old_idx]
+            src_ep = _episode_metadata_by_index(src_dataset.meta, first_ep_old_idx)
             chunk_idx = src_ep["data/chunk_index"]
             file_idx = src_ep["data/file_index"]
 
@@ -865,7 +887,7 @@ def _copy_and_reindex_videos(
 
         file_to_episodes: dict[tuple[int, int], list[int]] = {}
         for old_idx in episode_mapping:
-            src_ep = src_dataset.meta.episodes[old_idx]
+            src_ep = _episode_metadata_by_index(src_dataset.meta, old_idx)
             chunk_idx = src_ep[f"videos/{video_key}/chunk_index"]
             file_idx = src_ep[f"videos/{video_key}/file_index"]
             file_key = (chunk_idx, file_idx)
@@ -877,10 +899,10 @@ def _copy_and_reindex_videos(
             sorted(file_to_episodes.items()), desc=f"Processing {video_key} video files"
         ):
             all_episodes_in_file = [
-                ep_idx
-                for ep_idx in range(src_dataset.meta.total_episodes)
-                if src_dataset.meta.episodes[ep_idx].get(f"videos/{video_key}/chunk_index") == src_chunk_idx
-                and src_dataset.meta.episodes[ep_idx].get(f"videos/{video_key}/file_index") == src_file_idx
+                int(ep["episode_index"])
+                for ep in src_dataset.meta.episodes
+                if ep.get(f"videos/{video_key}/chunk_index") == src_chunk_idx
+                and ep.get(f"videos/{video_key}/file_index") == src_file_idx
             ]
 
             episodes_to_keep_set = set(episodes_in_file)
@@ -899,7 +921,7 @@ def _copy_and_reindex_videos(
 
                 for old_idx in episodes_in_file:
                     new_idx = episode_mapping[old_idx]
-                    src_ep = src_dataset.meta.episodes[old_idx]
+                    src_ep = _episode_metadata_by_index(src_dataset.meta, old_idx)
                     episodes_video_metadata[new_idx][f"videos/{video_key}/chunk_index"] = src_chunk_idx
                     episodes_video_metadata[new_idx][f"videos/{video_key}/file_index"] = src_file_idx
                     episodes_video_metadata[new_idx][f"videos/{video_key}/from_timestamp"] = src_ep[
@@ -914,7 +936,7 @@ def _copy_and_reindex_videos(
                 episodes_to_keep_ranges: list[tuple[float, float]] = []
 
                 for old_idx in sorted_keep_episodes:
-                    src_ep = src_dataset.meta.episodes[old_idx]
+                    src_ep = _episode_metadata_by_index(src_dataset.meta, old_idx)
                     from_ts = src_ep[f"videos/{video_key}/from_timestamp"]
                     to_ts = src_ep[f"videos/{video_key}/to_timestamp"]
                     episodes_to_keep_ranges.append((from_ts, to_ts))
@@ -945,7 +967,7 @@ def _copy_and_reindex_videos(
                 cumulative_ts = 0.0
                 for old_idx in sorted_keep_episodes:
                     new_idx = episode_mapping[old_idx]
-                    src_ep = src_dataset.meta.episodes[old_idx]
+                    src_ep = _episode_metadata_by_index(src_dataset.meta, old_idx)
                     ep_length = src_ep["length"]
                     ep_duration = ep_length / src_dataset.meta.fps
 
@@ -990,7 +1012,7 @@ def _copy_and_reindex_episodes_metadata(
     ):
         src_episode_full = _load_episode_with_stats(src_dataset, old_idx)
 
-        src_episode = src_dataset.meta.episodes[old_idx]
+        src_episode = _episode_metadata_by_index(src_dataset.meta, old_idx)
 
         episode_meta = data_metadata[new_idx].copy()
 
