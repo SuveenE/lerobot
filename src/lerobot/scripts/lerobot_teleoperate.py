@@ -80,6 +80,7 @@ from lerobot.robots import (  # noqa: F401
 from lerobot.teleoperators import (  # noqa: F401
     Teleoperator,
     TeleoperatorConfig,
+    bi_gello_yam_leader,
     bi_so100_leader,
     gamepad,
     homunculus,
