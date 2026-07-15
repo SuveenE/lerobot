@@ -64,6 +64,37 @@ class PolicyServerConfig:
         default=DEFAULT_OBS_QUEUE_TIMEOUT, metadata={"help": "Timeout for observation queue in seconds"}
     )
 
+    # Optional joint-frame conversion applied around the policy call:
+    #   state_model = joint_signs * state_robot + joint_offsets       (preprocessor input)
+    #   action_robot = (action_model - joint_offsets) * joint_signs   (postprocessor output)
+    # Use for the LeRobot v3.0 -> v2.1 SO-100/101 calibration shift required by
+    # MolmoAct2 (and other policies trained on pre-PR777 datasets). Mirrors the
+    # reference impl in https://github.com/irenegracekp/molmoact2-so101 and the
+    # official docs at https://huggingface.co/docs/lerobot/backwardcomp.
+    # Defaults are empty lists, meaning the identity transform is applied (i.e.
+    # no behavior change). For SO-100/101 + MolmoAct2 pass:
+    #   --joint_signs='[1,-1,1,1,1,1]' --joint_offsets='[0,90,90,0,0,0]'
+    joint_signs: list[float] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Per-joint sign multiplier (+/-1) for the robot<->model frame "
+                "conversion applied around the policy call. Empty list disables "
+                "the conversion. Length must match state/action dim."
+            )
+        },
+    )
+    joint_offsets: list[float] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "Per-joint offset (degrees) for the robot<->model frame "
+                "conversion applied around the policy call. Empty list disables "
+                "the conversion. Length must match state/action dim."
+            )
+        },
+    )
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.port < 1 or self.port > 65535:
@@ -77,6 +108,22 @@ class PolicyServerConfig:
 
         if self.obs_queue_timeout < 0:
             raise ValueError(f"obs_queue_timeout must be non-negative, got {self.obs_queue_timeout}")
+
+        # joint_signs and joint_offsets must either both be empty (disabled) or
+        # both be the same non-zero length. Sign values are restricted to +/-1
+        # to match the molmoact2-so101 reference and avoid silent scaling bugs.
+        if bool(self.joint_signs) != bool(self.joint_offsets):
+            raise ValueError(
+                "joint_signs and joint_offsets must either both be empty or "
+                "both be non-empty with matching lengths."
+            )
+        if self.joint_signs and len(self.joint_signs) != len(self.joint_offsets):
+            raise ValueError(
+                f"joint_signs (len {len(self.joint_signs)}) and joint_offsets "
+                f"(len {len(self.joint_offsets)}) must have the same length."
+            )
+        if any(s not in (-1.0, 1.0) for s in self.joint_signs):
+            raise ValueError(f"joint_signs values must be +/-1, got {self.joint_signs}")
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PolicyServerConfig":
@@ -109,7 +156,6 @@ class RobotClientConfig:
 
     # Policy configuration
     policy_type: str = field(metadata={"help": "Type of policy to use"})
-    pretrained_name_or_path: str = field(metadata={"help": "Pretrained model name or path"})
 
     # Robot configuration (for CLI usage - robot instance will be created from this)
     robot: RobotConfig = field(metadata={"help": "Robot configuration"})
@@ -117,6 +163,25 @@ class RobotClientConfig:
     # Policies typically output K actions at max, but we can use less to avoid wasting bandwidth (as actions
     # would be aggregated on the client side anyway, depending on the value of `chunk_size_threshold`)
     actions_per_chunk: int = field(metadata={"help": "Number of actions per chunk"})
+
+    # Optional: a LeRobot-saved checkpoint (draccus config.json + weights) loadable
+    # via PreTrainedConfig.from_pretrained / PreTrainedPolicy.from_pretrained.
+    # Leave empty to use the HF-original mode, in which the server constructs the
+    # policy config purely from `policy_config_overrides` (the checkpoint location
+    # for the underlying weights then comes from the policy-specific field, e.g.
+    # MolmoAct2's `--checkpoint_path=allenai/MolmoAct2-SO100_101`).
+    # NOTE: kept after the required fields above so the dataclass rule
+    # "non-default arguments may not follow default arguments" is satisfied.
+    pretrained_name_or_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "LeRobot-saved checkpoint (HF repo id or local dir). "
+                "Leave empty when using an HF-original checkpoint, in which case "
+                "the policy config is built entirely from --policy_config_overrides."
+            )
+        },
+    )
 
     # Task instruction for the robot to execute (e.g., 'fold my tshirt')
     task: str = field(default="", metadata={"help": "Task instruction for the robot to execute"})
@@ -143,6 +208,37 @@ class RobotClientConfig:
         metadata={"help": f"Name of aggregate function to use. Options: {list(AGGREGATE_FUNCTIONS.keys())}"},
     )
 
+    # Optional rename map applied server-side to translate robot observation keys
+    # (e.g. {"observation.images.front": "observation.images.cam_high"}) into the
+    # names baked into the policy's saved processor (`config.image_keys`).
+    rename_map: dict[str, str] = field(
+        default_factory=dict,
+        metadata={
+            "help": (
+                "Rename map applied server-side via the policy preprocessor's "
+                "RenameObservationsProcessorStep, used when the robot's observation "
+                "keys differ from the policy's expected feature keys."
+            )
+        },
+    )
+
+    # Draccus CLI-style overrides shipped to the server and applied to the saved
+    # policy config before the policy is instantiated, e.g.
+    # ``["--norm_tag=so101", "--inference_action_mode=continuous",
+    # "--normalize_gripper=true", "--rtc_config=null"]``. Useful when the
+    # checkpoint's config.json was saved without deployment-specific fields and
+    # the client cannot edit it (e.g. running MolmoAct2 on SO-101 from a
+    # GPU-less robot).
+    policy_config_overrides: list[str] = field(
+        default_factory=list,
+        metadata={
+            "help": (
+                "List of draccus CLI overrides (e.g. '--norm_tag=so101') applied "
+                "server-side to the saved policy config before instantiation."
+            )
+        },
+    )
+
     # Debug configuration
     debug_visualize_queue_size: bool = field(
         default=False, metadata={"help": "Visualize the action queue size"}
@@ -161,8 +257,16 @@ class RobotClientConfig:
         if not self.policy_type:
             raise ValueError("policy_type cannot be empty")
 
-        if not self.pretrained_name_or_path:
-            raise ValueError("pretrained_name_or_path cannot be empty")
+        # `pretrained_name_or_path` is optional: when empty, the server runs in
+        # HF-original mode and builds the policy config from
+        # `policy_config_overrides` only. Require at least one of the two so the
+        # server has something to construct the policy from.
+        if not self.pretrained_name_or_path and not self.policy_config_overrides:
+            raise ValueError(
+                "Either `pretrained_name_or_path` (LeRobot-saved checkpoint) or "
+                "`policy_config_overrides` (HF-original checkpoint, e.g. "
+                "'--checkpoint_path=allenai/MolmoAct2-SO100_101') must be set."
+            )
 
         if not self.policy_device:
             raise ValueError("policy_device cannot be empty")
@@ -200,4 +304,6 @@ class RobotClientConfig:
             "task": self.task,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
+            "rename_map": dict(self.rename_map),
+            "policy_config_overrides": list(self.policy_config_overrides),
         }

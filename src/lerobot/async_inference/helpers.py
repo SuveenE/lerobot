@@ -28,13 +28,14 @@ from lerobot.configs import PolicyFeature
 from lerobot.policies import (  # noqa: F401
     ACTConfig,
     DiffusionConfig,
+    MolmoAct2Config,
     PI0Config,
     PI05Config,
     SmolVLAConfig,
     VQBeTConfig,
 )
 from lerobot.robots.robot import Robot
-from lerobot.utils.constants import OBS_IMAGES, OBS_STATE, OBS_STR
+from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE, OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame, hw_to_dataset_features
 from lerobot.utils.utils import init_logging
 
@@ -64,7 +65,17 @@ def visualize_action_queue_size(action_queue_size: list[int]) -> None:
 
 
 def map_robot_keys_to_lerobot_features(robot: Robot) -> dict[str, dict]:
-    return hw_to_dataset_features(robot.observation_features, OBS_STR, use_video=False)
+    """Build a LeRobot dataset-features dict describing both observations and the action.
+
+    The observation features (state + images) are needed client-side to build
+    LeRobot-format observations from the raw robot dict. The action feature is
+    needed server-side (in HF-original checkpoint mode) so the policy config's
+    `output_features` reflects the real robot action dim, not the policy's
+    padded `expected_max_action_dim`.
+    """
+    obs_features = hw_to_dataset_features(robot.observation_features, OBS_STR, use_video=False)
+    action_features = hw_to_dataset_features(robot.action_features, ACTION, use_video=False)
+    return {**obs_features, **action_features}
 
 
 def is_image_key(k: str) -> bool:
@@ -271,6 +282,12 @@ class RemotePolicyConfig:
     actions_per_chunk: int
     device: str = "cpu"
     rename_map: dict[str, str] = field(default_factory=dict)
+    # Draccus CLI-style overrides applied to the saved policy config server-side
+    # before the policy is instantiated. Each entry looks like a CLI argument,
+    # e.g. ``"--norm_tag=so101"`` or ``"--inference_action_mode=continuous"``.
+    # This lets a GPU-less client tune things like normalization tag, gripper
+    # handling, and RTC for VLA policies without editing the checkpoint.
+    policy_config_overrides: list[str] = field(default_factory=list)
 
 
 def _compare_observation_states(obs1_state: torch.Tensor, obs2_state: torch.Tensor, atol: float) -> bool:
